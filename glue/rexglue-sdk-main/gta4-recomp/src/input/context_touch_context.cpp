@@ -1,4 +1,5 @@
 #include "input/context_touch_context.h"
+#include "input/context_touch_activity.h"
 
 #include <algorithm>
 #include <array>
@@ -413,6 +414,7 @@ TouchContextSnapshot ReadTouchContextFacts(const TouchContextMemory& memory,
   ReadVehicleEntry(read, *ped, queries, out);
   const auto aim_base = read.U8(kControl, 2400), aim_current = read.U8(kControl, 2402);
   out.aiming = aim_base && aim_current && ((*aim_base ^ *aim_current) != 0);
+  out.activity = ReadTouchActivityFacts(memory, out);
   return out;
 }
 
@@ -427,7 +429,8 @@ uint64_t TouchContextGeneration::Advance(const TouchContextSnapshot& value) noex
       value.minigame_active != previous_.minigame_active ||
       value.input_user_known != previous_.input_user_known ||
       value.native_input_allowed != previous_.native_input_allowed ||
-      value.gameplay_allowed != previous_.gameplay_allowed) ++generation_;
+      value.gameplay_allowed != previous_.gameplay_allowed ||
+      !value.activity.SameSession(previous_.activity)) ++generation_;
   previous_ = value;
   return generation_;
 }
@@ -535,8 +538,8 @@ std::optional<TouchScriptControl> DecodeTouchHelpToken(
   // sub_821F2360. The left/right stick image families remain native sticks.
   struct RawToken { std::string_view text; uint32_t glyph; uint32_t button; };
   constexpr std::array raw_tokens = {
-      RawToken{"PAD_LT", 289, 4}, RawToken{"PAD_RT", 291, 5},
-      RawToken{"PAD_LB", 288, 6}, RawToken{"PAD_RB", 290, 7},
+      RawToken{"PAD_LT", 289, 5}, RawToken{"PAD_RT", 291, 7},
+      RawToken{"PAD_LB", 288, 4}, RawToken{"PAD_RB", 290, 6},
       RawToken{"PAD_UP", 256, 8}, RawToken{"PAD_DOWN", 257, 9},
       RawToken{"PAD_LEFT", 258, 10}, RawToken{"PAD_RIGHT", 259, 11},
       RawToken{"PAD_DPAD_UP", 260, 8}, RawToken{"PAD_DPAD_DOWN", 261, 9},
@@ -613,6 +616,16 @@ uint32_t ReadTouchScriptThread(uint8_t* base) noexcept {
 #else
   (void)base;
   return 0;
+#endif
+}
+
+bool TouchActivityQueryMatches(uint8_t* base, const TouchActivitySnapshot& expected) noexcept {
+  if (!expected.valid) return true;
+#if !defined(GTA4_TOUCH_CONTEXT_TEST)
+  return base && TouchActivityQueryMatches(TouchContextMemory{base, RuntimeRead}, expected);
+#else
+  (void)base;
+  return false;
 #endif
 }
 

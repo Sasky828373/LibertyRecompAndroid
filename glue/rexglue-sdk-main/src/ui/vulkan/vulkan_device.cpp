@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -21,6 +22,13 @@
 #include <rex/platform.h>
 #include <rex/string.h>
 #include <rex/ui/vulkan/device.h>
+#include <rex/ui/vulkan/native_queue_policy.h>
+
+#include "graphics/gta4_native/temporal/dlss_bootstrap.h"
+
+REXCVAR_DEFINE_BOOL(vulkan_native_queue_separation, true, "UI/Vulkan",
+                    "Isolate native offscreen work from drawable-dependent presentation")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
@@ -279,6 +287,29 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 #undef XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION
 #undef XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION
 
+  graphics::gta4_native::temporal::DlssExtensionRequirements dlss_requirements;
+  if (vulkan_instance->dlss_extensions_enabled()) {
+    dlss_requirements = graphics::gta4_native::temporal::QueryDlssDeviceExtensions(
+        vulkan_instance->instance(), physical_device, properties.vendorID);
+  } else {
+    dlss_requirements.reason = vulkan_instance->dlss_unavailable_reason();
+  }
+  graphics::gta4_native::temporal::DlssExtensionRequirements dlss_fg_requirements;
+  if (vulkan_instance->dlss_frame_generation_extensions_enabled()) {
+    dlss_fg_requirements = graphics::gta4_native::temporal::QueryDlssDeviceExtensions(
+        vulkan_instance->instance(), physical_device, properties.vendorID,
+        graphics::gta4_native::temporal::DlssFeature::kFrameGeneration);
+  } else {
+    dlss_fg_requirements.reason = vulkan_instance->dlss_frame_generation_unavailable_reason();
+  }
+  std::map<std::string, bool> dlss_extension_states;
+  for (const auto* requirements : {&dlss_requirements, &dlss_fg_requirements}) {
+    for (const auto& name : requirements->extensions) {
+      auto state = dlss_extension_states.emplace(name, false).first;
+      requested_extensions.try_emplace(name, &state->second);
+    }
+  }
+
   std::vector<const char*> enabled_extensions;
   {
     uint32_t supported_extension_count = 0;
@@ -312,6 +343,23 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       }
     }
   }
+
+  const auto check_dlss_extensions = [&](const auto& requirements, bool& enabled,
+                                          std::string& reason) {
+    enabled = requirements.available;
+    reason = requirements.reason;
+    for (const auto& name : requirements.extensions) {
+      if (!*requested_extensions.at(name)) {
+        enabled = false;
+        reason = "Missing required DLSS device extension: " + name;
+        break;
+      }
+    }
+  };
+  check_dlss_extensions(dlss_requirements, device->dlss_extensions_enabled_,
+                         device->dlss_unavailable_reason_);
+  check_dlss_extensions(dlss_fg_requirements, device->dlss_fg_extensions_enabled_,
+                         device->dlss_fg_unavailable_reason_);
 
   if (with_swapchain && !device->extensions_.ext_KHR_swapchain) {
     REXLOG_WARN("Vulkan device '{}' doesn't support swapchains", properties.deviceName);
@@ -468,6 +516,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
        ++queue_family_index) {
     QueueFamily& queue_family = device->queue_families_[queue_family_index];
     const VkQueueFamilyProperties& queue_family_properties = queue_families[queue_family_index];
+    queue_family.queue_flags = queue_family_properties.queueFlags;
 
     const VkQueueFlags queue_unsupported_flags = ~queue_family_properties.queueFlags;
 
@@ -537,9 +586,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     supported_features.sparseResidencyAliased = VK_FALSE;
   }
 
-  // Prefer using one queue for everything whenever possible for simplicity.
-  // TODO(Triang3l): Research if separate queues for purposes like composition,
-  // swapchain image presentation, and sparse binding, may be beneficial.
+  // The original graphics queue remains the UI/presentation queue. Native
+  // offscreen rendering can use a separate backend execution queue below.
 
   if (first_queue_family_graphics_compute_sparse_binding != UINT32_MAX) {
     device->queue_family_graphics_compute_ = first_queue_family_graphics_compute_sparse_binding;
@@ -555,6 +603,23 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     device->queue_families_[device->queue_family_sparse_binding_].queues.resize(std::max(
         size_t(1), device->queue_families_[device->queue_family_sparse_binding_].queues.size()));
   }
+
+  device->queue_family_native_offscreen_ = SelectNativeOffscreenQueueFamily(
+      queue_families, device->queue_family_graphics_compute_,
+      with_native_shader_support && with_swapchain && !with_gpu_emulation &&
+          REXCVAR_GET(vulkan_native_queue_separation),
+      properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0) &&
+          features_1_2.supported.timelineSemaphore,
+      properties_1_2.driverID == VK_DRIVER_ID_MOLTENVK ||
+          properties_1_2_KHR_driver_properties.driverID == VK_DRIVER_ID_MOLTENVK);
+  if (device->has_native_offscreen_queue()) {
+    device->queue_families_[device->queue_family_native_offscreen_].queues.resize(1);
+    features_1_2.enabled.timelineSemaphore = VK_TRUE;
+    device->properties_.timelineSemaphore = true;
+  }
+  REXLOG_INFO("Vulkan native queues: scene-family={} paint-family={} separated={}",
+              device->queue_family_native_offscreen_, device->queue_family_graphics_compute_,
+              device->has_native_offscreen_queue());
 
   size_t max_enabled_queues_per_family = 0;
   for (const QueueFamily& queue_family : device->queue_families_) {
@@ -701,6 +766,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   XE_UI_VULKAN_LIMIT(minStorageBufferOffsetAlignment)
   XE_UI_VULKAN_LIMIT(maxFramebufferWidth)
   XE_UI_VULKAN_LIMIT(maxFramebufferHeight)
+  XE_UI_VULKAN_LIMIT(maxColorAttachments)
   XE_UI_VULKAN_ENUM_LIMIT(framebufferColorSampleCounts, SampleCountFlags)
   XE_UI_VULKAN_ENUM_LIMIT(framebufferDepthSampleCounts, SampleCountFlags)
   XE_UI_VULKAN_ENUM_LIMIT(framebufferStencilSampleCounts, SampleCountFlags)
@@ -743,6 +809,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
   if (with_native_shader_support) {
     XE_UI_VULKAN_FEATURE(shaderInt64)
+    // FidelityFX's Vulkan backend selects permutations from physical-device
+    // capabilities. Enable the corresponding logical-device capabilities so
+    // its Float16/Int16 and unformatted storage-image SPIR-V is legal.
+    XE_UI_VULKAN_FEATURE(shaderInt16)
+    XE_UI_VULKAN_FEATURE(shaderStorageImageExtendedFormats)
+    XE_UI_VULKAN_FEATURE(shaderStorageImageReadWithoutFormat)
+    XE_UI_VULKAN_FEATURE(shaderStorageImageWriteWithoutFormat)
   }
 
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
@@ -754,6 +827,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_FEATURE_2(features_1_2, scalarBlockLayout);
     }
     if (with_native_shader_support) {
+      XE_UI_VULKAN_FEATURE_2(features_1_2, shaderFloat16);
       XE_UI_VULKAN_FEATURE_2(features_1_2, runtimeDescriptorArray);
       XE_UI_VULKAN_FEATURE_2(features_1_2, descriptorBindingPartiallyBound);
       XE_UI_VULKAN_FEATURE_2(features_1_2, descriptorBindingSampledImageUpdateAfterBind);

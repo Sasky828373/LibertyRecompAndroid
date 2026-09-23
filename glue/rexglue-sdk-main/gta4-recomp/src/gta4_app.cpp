@@ -1,5 +1,6 @@
 #include "gta4_app.h"
 #include "gta4_present_mode_policy.h"
+#include "gta4_streaming_hooks.h"
 
 #include <array>
 #include <atomic>
@@ -161,9 +162,16 @@ REXCVAR_DEFINE_STRING(gta4_native_anti_aliasing, "smaa", "GTA IV/Graphics/Anti-A
                       "Anti-aliasing: off, fxaa, smaa, deferred MSAA, or even-factor SSAA")
     // `spatial` remains loadable as a deprecated compatibility alias. It is
     // never exposed by the frontend or accepted by the controller setter.
-    .allowed({"off", "fxaa", "smaa", "msaa2x", "msaa4x", "ssaa2x", "ssaa4x",
+    .allowed({"off", "fxaa", "smaa", "taa", "metalfx_taa", "msaa2x", "msaa4x", "msaa4x_smaa", "ssaa2x", "ssaa4x",
               "ssaa6x", "ssaa8x", "ssaa10x", "ssaa12x", "ssaa14x", "ssaa16x",
               "spatial"});
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation, false, "GTA IV/Graphics/Display",
+                    "MetalFX 2x frame interpolation; requires temporal AA and synchronized display")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(gta4_native_frame_generation, "off", "GTA IV/Graphics/Display",
+                      "Vulkan frame interpolation: off, fsr3, or dlss; requires FSR 3.1 or DLSS temporal reconstruction")
+    .allowed({"off", "fsr3", "dlss"})
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gta4_native_anti_aliasing_unified, false,
                     "GTA IV/Graphics/Anti-Aliasing/Compatibility",
                     "Canonical unified anti-aliasing selection has replaced legacy split values");
@@ -171,8 +179,12 @@ REXCVAR_DEFINE_STRING(gta4_native_smaa_quality, "high", "GTA IV/Graphics/Anti-Al
                       "SMAA 1x preset: low, medium, high, or ultra")
     .allowed({"low", "medium", "high", "ultra"});
 REXCVAR_DEFINE_STRING(gta4_native_upscaler, "native", "GTA IV/Graphics/Upscaling",
-                      "Output upscaler: native or fsr1")
-    .allowed({"native", "fsr1"})
+                      "Output upscaler: native, fsr1, MetalFX, FSR 3.1, or DLSS; temporal modes require backend support")
+    .allowed({"native", "fsr1", "metalfx", "fsr3", "dlss"})
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(gta4_temporal_upscaler_quality, "quality", "GTA IV/Graphics/Upscaling",
+                      "FSR 3.1/DLSS preset; dimensions come from the active provider")
+    .allowed({"native", "quality", "balanced", "performance", "ultra_performance"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(gta4_fsr1_quality, "quality", "GTA IV/Graphics/Upscaling",
                       "FSR 1 preset: ultra_quality, quality, balanced, or performance")
@@ -182,7 +194,9 @@ REXCVAR_DEFINE_DOUBLE(gta4_fsr1_sharpness_reduction, 0.2, "GTA IV/Graphics/Upsca
                       "FSR 1 RCAS sharpness reduction in stops")
     .range(0.0, 2.0)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gta4_force_highest_lod, true, "GTA IV/Graphics/LOD",
+// Keep the authored resident LOD hierarchy by default. Forcing LOD0 at every
+// distance bypasses transitions as soon as a new drawable becomes resident.
+REXCVAR_DEFINE_BOOL(gta4_force_highest_lod, false, "GTA IV/Graphics/LOD",
                     "Prefer the highest resident model LOD regardless of distance");
 REXCVAR_DEFINE_DOUBLE(gta4_draw_distance_scale, 3.0, "GTA IV/Graphics/LOD",
                       "Multiplier applied through GTA IV's built-in world-distance input")
@@ -427,6 +441,21 @@ AntiAliasingApplyResult SetConfiguredAntiAliasingMode(std::string_view value) {
     return AntiAliasingApplyResult::kRejected;
   }
 
+  if(UsesTemporalAntiAliasing(*requested)&&rex::cvar::GetFlagByName("gpu_plugin")!="gta4-metal"){
+    REXLOG_WARN("GTA4AAPolicy: {} requires the Metal renderer",value);
+    return AntiAliasingApplyResult::kRejected;
+  }
+  if(rex::cvar::GetFlagByName("gta4_native_upscaler")=="metalfx"&&*requested!=AntiAliasingMode::kMetalFxTaa){
+    REXLOG_WARN("GTA4AAPolicy: MetalFX upscaling includes temporal AA; select Native upscaling before changing AA");
+    return AntiAliasingApplyResult::kRejected;
+  }
+  const auto upscaler = rex::cvar::GetFlagByName("gta4_native_upscaler");
+  if ((upscaler == "fsr3" || upscaler == "dlss") &&
+      (UsesSceneMsaa(*requested) || UsesSceneSupersampling(*requested))) {
+    REXLOG_WARN("GTA4AAPolicy: {} requires a single-sample scene; select Native upscaling before {}",
+                upscaler, value);
+    return AntiAliasingApplyResult::kRejected;
+  }
   std::lock_guard lock(g_anti_aliasing_controller_mutex);
   InitializeFrontendAntiAliasingControllerLocked();
   const AntiAliasingMode active =
@@ -455,7 +484,7 @@ AntiAliasingApplyResult SetConfiguredAntiAliasingMode(std::string_view value) {
     std::string_view legacy_scene_msaa = "original";
     if (*requested == AntiAliasingMode::kMsaa2x) {
       legacy_scene_msaa = "2x";
-    } else if (*requested == AntiAliasingMode::kMsaa4x) {
+    } else if (GetAntiAliasingRoute(*requested).scene_sample_count == 4u) {
       legacy_scene_msaa = "4x";
     }
     // SetFlagByName intentionally records a pending restart even if the value
@@ -621,6 +650,53 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
     config.gpu_plugin = "gta4-native";
   }
 
+  // Resolve the backend-dependent combination before the AA controller latches
+  // its active scene configuration. A pending frontend choice cannot change
+  // the active render graph until the next launch.
+  const bool metal_backend=config.gpu_plugin=="gta4-metal";
+  const bool vendor_temporal_requested = REXCVAR_GET(gta4_native_upscaler) == "fsr3" ||
+                                        REXCVAR_GET(gta4_native_upscaler) == "dlss";
+  if (vendor_temporal_requested && config.gpu_plugin != "gta4-native") {
+    REXLOG_WARN("{} requires the native Vulkan renderer; using native resolution on this backend",
+                REXCVAR_GET(gta4_native_upscaler));
+    REXCVAR_SET(gta4_native_upscaler, "native");
+  }
+  if (REXCVAR_GET(gta4_native_frame_generation) != "off") {
+    if (config.gpu_plugin != "gta4-native") {
+      REXLOG_WARN("{} frame generation requires the native Vulkan renderer; disabled for this launch",
+                  REXCVAR_GET(gta4_native_frame_generation));
+      REXCVAR_SET(gta4_native_frame_generation, "off");
+    } else if (!vendor_temporal_requested) {
+      REXLOG_WARN("Vulkan frame generation requires FSR 3.1 or DLSS temporal reconstruction; "
+                  "use its Native preset for native resolution; disabled for this launch");
+      REXCVAR_SET(gta4_native_frame_generation, "off");
+    } else if (REXCVAR_GET(gta4_present_mode) == "immediate") {
+      REXLOG_WARN("Vulkan frame generation uses synchronized presentation; selecting VSync for this launch");
+      REXCVAR_SET(gta4_present_mode, "vsync");
+    }
+  }
+  const auto requested_aa=rex::graphics::gta4_native::ParseAntiAliasingMode(REXCVAR_GET(gta4_native_anti_aliasing));
+  if(!metal_backend){
+    if(REXCVAR_GET(gta4_native_upscaler)=="metalfx"){
+      REXLOG_WARN("MetalFX temporal upscaling requires the Metal renderer; using native resolution");
+      REXCVAR_SET(gta4_native_upscaler,"native");
+    }
+    if(requested_aa&&rex::graphics::gta4_native::UsesTemporalAntiAliasing(*requested_aa)){
+      REXLOG_WARN("Temporal AA requires the Metal renderer; using SMAA on this backend");
+      REXCVAR_SET(gta4_native_anti_aliasing,"smaa");REXCVAR_SET(gta4_native_anti_aliasing_unified,true);
+    }
+    if(REXCVAR_GET(gta4_metalfx_frame_generation)){
+      REXLOG_WARN("MetalFX frame generation requires the Metal renderer; disabled for this launch");
+      REXCVAR_SET(gta4_metalfx_frame_generation,false);
+    }
+  }else if(REXCVAR_GET(gta4_native_upscaler)=="metalfx"||
+      (REXCVAR_GET(gta4_metalfx_frame_generation)&&(!requested_aa||!rex::graphics::gta4_native::UsesTemporalAntiAliasing(*requested_aa)))){
+    REXCVAR_SET(gta4_native_anti_aliasing,"metalfx_taa");REXCVAR_SET(gta4_native_anti_aliasing_unified,true);
+  }
+  if(metal_backend&&REXCVAR_GET(gta4_metalfx_frame_generation)&&REXCVAR_GET(gta4_present_mode)=="immediate"){
+    REXLOG_WARN("MetalFX frame generation uses synchronized presentation; selecting VSync for this launch");
+    REXCVAR_SET(gta4_present_mode,"vsync");
+  }
   ApplyPresentationMode();
   // This callback owns no application pointer. Registry setters serialize the
   // flag group; swapchain recreation remains on the existing presenter path.
@@ -1029,11 +1105,13 @@ bool GTA4App::RequiresSynchronizedInitialThreadResume() const {
 }
 
 bool GTA4App::OnWindowCloseRequested() {
+  gta4::streaming::FinishTrace();
   (void)gta4::input::FlushContextTouchSettings();
   return true;
 }
 
 void GTA4App::OnShutdown() {
+  gta4::streaming::FinishTrace();
   if (entitlement_service_) {
     entitlement_service_->SetConnectionRestoredHandler({});
     entitlement_service_ = nullptr;

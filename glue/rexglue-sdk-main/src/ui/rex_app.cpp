@@ -52,8 +52,8 @@
 
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "Graphics plugin to load at startup (for example, 'xenos'); empty lets "
-                      "the title choose")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+                      "the title choose; changes take effect after restart")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex {
 

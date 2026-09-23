@@ -10,6 +10,7 @@
 #include <rex/logging.h>
 
 #include "gta4_init.h"
+#include "gta4_streaming_hooks.h"
 
 namespace {
 
@@ -26,6 +27,7 @@ constexpr uint32_t kDiskCacheWorker = 0x831AB5D8;
 }  // namespace
 
 extern "C" void sub_821CFD10(PPCContext& ctx, uint8_t* base) {
+  gta4::streaming::Initialize(base);
   __imp__sub_821CFD10(ctx, base);
   REXLOG_INFO(
       "gta4-streaming: configured limits virtual={} physical={} source=platform:/stream.ini",

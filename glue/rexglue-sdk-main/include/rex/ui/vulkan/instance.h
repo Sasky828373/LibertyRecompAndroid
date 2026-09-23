@@ -11,6 +11,7 @@
  */
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <rex/platform.h>
@@ -107,6 +108,11 @@ class VulkanInstance {
 
   const Extensions& extensions() const { return extensions_; }
 
+  bool dlss_extensions_enabled() const { return dlss_extensions_enabled_; }
+  const std::string& dlss_unavailable_reason() const { return dlss_unavailable_reason_; }
+  bool dlss_frame_generation_extensions_enabled() const { return dlss_fg_extensions_enabled_; }
+  const std::string& dlss_frame_generation_unavailable_reason() const { return dlss_fg_unavailable_reason_; }
+
   VkInstance instance() const { return instance_; }
 
   void EnumeratePhysicalDevices(std::vector<VkPhysicalDevice>& physical_devices_out) const;
@@ -123,6 +129,10 @@ class VulkanInstance {
   uint32_t api_version_ = VK_MAKE_API_VERSION(0, 1, 0, 0);
 
   Extensions extensions_;
+  bool dlss_extensions_enabled_ = false;
+  std::string dlss_unavailable_reason_;
+  bool dlss_fg_extensions_enabled_ = false;
+  std::string dlss_fg_unavailable_reason_;
 
   VkInstance instance_ = nullptr;
 

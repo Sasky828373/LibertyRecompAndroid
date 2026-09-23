@@ -148,6 +148,16 @@ add_library(rex::gpu-xenos ALIAS rexgpu-xenos)
 rexgpu_configure_plugin(rexgpu-xenos gpu-xenos)
 
 if(REXGLUE_USE_VULKAN)
+    if(REXGLUE_BUILD_TESTS)
+        add_executable(rex-vulkan-temporal-contract-test EXCLUDE_FROM_ALL
+            "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/vulkan_temporal_contract_test.cpp")
+        target_include_directories(rex-vulkan-temporal-contract-test PRIVATE "${REXGLUE_ROOT}/src")
+        target_link_libraries(rex-vulkan-temporal-contract-test PRIVATE volk::volk fmt::fmt)
+        add_executable(rex-vulkan-temporal-archive-test EXCLUDE_FROM_ALL
+            "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/vulkan/shader_archive_test.cpp"
+            gta4_native/temporal/shader_archive.cpp)
+        target_include_directories(rex-vulkan-temporal-archive-test PRIVATE "${REXGLUE_ROOT}/src")
+    endif()
     set(GTA4_NATIVE_SHADER_CACHE_ROOT
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/LibertyRecompLib")
     set(GTA4_NATIVE_SMOLV_ROOT
@@ -268,7 +278,7 @@ if(REXGLUE_USE_VULKAN)
 
     add_library(rexgpu-gta4-native SHARED
         gta4_native/graphics_system.cpp
-        gta4_native/modern_shader_options.cpp
+        gta4_native/core/font_atlas.cpp
         gta4_native/shader_override_policy.h
         gta4_native/native_buffer_arena.cpp
         gta4_native/native_descriptor_backend.cpp
@@ -281,6 +291,10 @@ if(REXGLUE_USE_VULKAN)
         gta4_native/smaa_pipeline.cpp
         gta4_native/split_postfx_pass.cpp
         gta4_native/sun_shafts_pass.cpp
+        gta4_native/temporal/fsr_vulkan.cpp
+        gta4_native/temporal/shader_archive.cpp
+        gta4_native/temporal/vulkan_scene.cpp
+        gta4_native/temporal/vulkan_frame_generation.cpp
         gta4_native/plugin_main.cpp
         "${GTA4_NATIVE_SHADER_CACHE_ROOT}/shader/shader_cache.cpp"
         "${GTA4_NATIVE_SHADER_OVERRIDE_CPP}"
@@ -306,4 +320,14 @@ if(REXGLUE_USE_VULKAN)
         libzstd_static
         SPIRV-Headers::SPIRV-Headers
     )
+    if(TARGET rexglue_fidelityfx_vulkan)
+        target_link_libraries(rexgpu-gta4-native PRIVATE rexglue_fidelityfx_vulkan)
+    endif()
+    include("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/vulkan/VulkanShaderArchive.cmake")
+    liberty_add_vulkan_temporal_archive()
+endif()
+
+# Native Metal is a peer plugin, not a Vulkan translation path.
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    add_subdirectory(gta4_metal)
 endif()

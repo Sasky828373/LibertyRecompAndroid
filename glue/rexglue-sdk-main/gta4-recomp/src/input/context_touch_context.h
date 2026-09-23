@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "input/context_touch_layout.h"
+#include "input/context_touch_activity_types.h"
 
 struct PPCContext;
 
@@ -70,6 +71,7 @@ struct TouchContextSnapshot {
   // Native GET_VEHICLE_PLAYER_WOULD_ENTER selection, before an Enter input.
   bool can_enter_vehicle = false;
   bool scoped_zoom = false;  // Supplied by the native camera observation.
+  TouchActivitySnapshot activity{};
 };
 
 // The checked reader also allows deterministic tests with sparse guest memory.
@@ -150,6 +152,7 @@ TouchVisiblePromptSnapshot GetTouchVisiblePromptSnapshot(uint64_t epoch,
 // Native GET_ID_OF_THIS_THREAD identity, not its reusable allocation address.
 uint32_t ReadTouchScriptThread(const TouchContextMemory& memory) noexcept;
 uint32_t ReadTouchScriptThread(uint8_t* base) noexcept;
+bool TouchActivityQueryMatches(uint8_t* base, const TouchActivitySnapshot& expected) noexcept;
 std::optional<uint32_t> ReadTouchParachuteState(const TouchContextMemory& memory) noexcept;
 std::optional<uint32_t> ReadTouchParachuteState(uint8_t* base) noexcept;
 

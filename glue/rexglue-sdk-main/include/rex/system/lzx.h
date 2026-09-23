@@ -32,6 +32,8 @@ namespace rex::lzx {
 // libmspack's LZX state is deliberately hidden from SDK consumers. One
 // instance represents one retail streaming decoder and retains its window,
 // repeated offsets, and Huffman tables across DecodeFrame calls.
+// This persistent API follows Xbox XMem framing, including unpadded odd raw
+// blocks. The separate one-shot lzx_decompress API retains standard LZX padding.
 enum class DecodeStatus : uint8_t {
   kSuccess,
   kInvalidArgument,

@@ -58,27 +58,37 @@ class NativePipelineLookupMemo {
   using Context = NativePipelineLookupContext<ColorTargetCount>;
 
   Pipeline Find(const void* owner, const FixedState& fixed, const Context& context) const {
-    return pipeline_ && owner && owner == owner_ && context.lifetime && context == context_ &&
-                   fixed == fixed_
-               ? pipeline_
-               : Pipeline{};
+    if (!owner || !context.lifetime) return Pipeline{};
+    for (const auto& entry : entries_) {
+      if (entry.pipeline && owner == entry.owner && context == entry.context &&
+          fixed == entry.fixed) return entry.pipeline;
+    }
+    return Pipeline{};
   }
 
   void Store(const void* owner, const FixedState& fixed, const Context& context, Pipeline pipeline) {
     if (!owner || !context.lifetime || !pipeline) {
       return;
     }
-    owner_ = owner;
-    fixed_ = fixed;
-    context_ = context;
-    pipeline_ = pipeline;
+    for (auto& entry : entries_) {
+      if (entry.owner == owner && entry.context == context && entry.fixed == fixed) {
+        entry.pipeline = pipeline;
+        return;
+      }
+    }
+    entries_[next_] = {owner, fixed, context, pipeline};
+    next_ = (next_ + 1) % entries_.size();
   }
 
  private:
-  const void* owner_ = nullptr;
-  FixedState fixed_{};
-  Context context_{};
-  Pipeline pipeline_{};
+  struct Entry {
+    const void* owner = nullptr;
+    FixedState fixed{};
+    Context context{};
+    Pipeline pipeline{};
+  };
+  std::array<Entry, 4> entries_{};
+  size_t next_ = 0;
 };
 
 }  // namespace rex::graphics::gta4_native

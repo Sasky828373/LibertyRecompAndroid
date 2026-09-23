@@ -33,9 +33,10 @@ void CopySwapBlock(xenos::Endian endian, void* output, const void* input, size_t
     case xenos::Endian::k8in32:
       memory::copy_and_swap_32_unaligned(output, input, length / 4);
       break;
-    case xenos::Endian::k16in32:  // Swap high and low 16 bits within a 32 bit
-                                  // word
-      memory::copy_and_swap_16_in_32_unaligned(output, input, length);
+    case xenos::Endian::k16in32:
+      // This helper counts 32-bit words; CopySwapBlock receives bytes.
+      // Passing the byte length overruns both spans and corrupts adjacent blocks.
+      memory::copy_and_swap_16_in_32_unaligned(output, input, length / sizeof(uint32_t));
       break;
     default:
     case xenos::Endian::kNone:

@@ -40,6 +40,11 @@ class VulkanDevice {
 
   VkPhysicalDevice physical_device() const { return physical_device_; }
 
+  bool dlss_extensions_enabled() const { return dlss_extensions_enabled_; }
+  const std::string& dlss_unavailable_reason() const { return dlss_unavailable_reason_; }
+  bool dlss_frame_generation_extensions_enabled() const { return dlss_fg_extensions_enabled_; }
+  const std::string& dlss_frame_generation_unavailable_reason() const { return dlss_fg_unavailable_reason_; }
+
   // If functionality from higher API versions is used, increase this.
   // This is for VkApplicationInfo.
   // "apiVersion must be the highest version of Vulkan that the application is
@@ -92,6 +97,7 @@ class VulkanDevice {
     VkDeviceSize minStorageBufferOffsetAlignment = 256;
     uint32_t maxFramebufferWidth = 4096;
     uint32_t maxFramebufferHeight = 4096;
+    uint32_t maxColorAttachments = 0;
     VkSampleCountFlags framebufferColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
     VkSampleCountFlags framebufferDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
     VkSampleCountFlags framebufferStencilSampleCounts =
@@ -128,6 +134,10 @@ class VulkanDevice {
     bool sparseBinding = false;
     bool sparseResidencyBuffer = false;
     bool shaderInt64 = false;
+    bool shaderInt16 = false;
+    bool shaderStorageImageExtendedFormats = false;
+    bool shaderStorageImageReadWithoutFormat = false;
+    bool shaderStorageImageWriteWithoutFormat = false;
 
     // Vulkan 1.2 features used by Liberty's precompiled native shader cache.
     bool runtimeDescriptorArray = false;
@@ -137,6 +147,8 @@ class VulkanDevice {
     bool descriptorBindingUpdateUnusedWhilePending = false;
     bool descriptorBindingVariableDescriptorCount = false;
     bool bufferDeviceAddress = false;
+    bool timelineSemaphore = false;
+    bool shaderFloat16 = false;
 
     // VK_KHR_sampler_mirror_clamp_to_edge (#15, promoted to 1.2)
 
@@ -308,6 +320,10 @@ class VulkanDevice {
 
   const std::vector<QueueFamily>& queue_families() const { return queue_families_; }
   uint32_t queue_family_graphics_compute() const { return queue_family_graphics_compute_; }
+  uint32_t queue_family_native_offscreen() const { return queue_family_native_offscreen_; }
+  bool has_native_offscreen_queue() const {
+    return queue_family_native_offscreen_ != queue_family_graphics_compute_;
+  }
   // UINT32_MAX if not supported or not enabled.
   // May be the same as queue_family_graphics_compute().
   uint32_t queue_family_sparse_binding() const { return queue_family_sparse_binding_; }
@@ -334,6 +350,10 @@ class VulkanDevice {
 
   Properties properties_;
   Extensions extensions_;
+  bool dlss_extensions_enabled_ = false;
+  std::string dlss_unavailable_reason_;
+  bool dlss_fg_extensions_enabled_ = false;
+  std::string dlss_fg_unavailable_reason_;
 
   VkDevice device_ = nullptr;
 
@@ -341,6 +361,7 @@ class VulkanDevice {
 
   std::vector<QueueFamily> queue_families_;
   uint32_t queue_family_graphics_compute_ = UINT32_MAX;
+  uint32_t queue_family_native_offscreen_ = UINT32_MAX;
   uint32_t queue_family_sparse_binding_ = UINT32_MAX;
 
   MemoryTypes memory_types_;

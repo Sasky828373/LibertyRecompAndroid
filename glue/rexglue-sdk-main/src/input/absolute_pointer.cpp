@@ -204,8 +204,9 @@ bool ShouldEnableTouchControls(TouchControlsMode mode, bool controller_connected
        !physical_keyboard_connected && !physical_mouse_connected));
 }
 
-AbsolutePointerService::AbsolutePointerService(size_t max_queued_moves)
-    : max_queued_moves_(max_queued_moves) {}
+AbsolutePointerService::AbsolutePointerService(size_t max_queued_moves,
+                                               bool preserve_motion_history)
+    : max_queued_moves_(max_queued_moves), preserve_motion_history_(preserve_motion_history) {}
 
 size_t AbsolutePointerService::SourcePointerKeyHash::operator()(
     const SourcePointerKey& key) const noexcept {
@@ -324,6 +325,12 @@ void AbsolutePointerService::QueueEventLocked(const AbsolutePointerEvent& event)
     return;
   }
 
+  if (preserve_motion_history_) {
+    events_.push_back(event);
+    ++queued_move_count_;
+    return;
+  }
+
   for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
     if (it->phase == AbsolutePointerPhase::kMove && it->pointer_id == event.pointer_id &&
         it->generation == event.generation) {
@@ -393,6 +400,20 @@ void AbsolutePointerService::SubmitPointer(uint64_t source_device_id, uint64_t s
     return;
   }
   if (active == active_pointers_.end()) {
+    return;
+  }
+
+  if (phase == AbsolutePointerPhase::kMove && preserve_motion_history_ &&
+      queued_move_count_ >= max_queued_moves_) {
+    // Dropping one point can fabricate a stroke or erase a reversal. Reject the
+    // whole incomplete history instead, cancel its contacts, and require fresh
+    // downs. Lifecycle edges stay ordered and the generation invalidates input
+    // that a concurrent consumer may already have dequeued.
+    std::erase_if(events_, [](const auto& queued) {
+      return queued.phase == AbsolutePointerPhase::kMove;
+    });
+    queued_move_count_ = 0;
+    ResetLocked(timestamp_ns);
     return;
   }
 
@@ -680,7 +701,7 @@ size_t AbsolutePointerService::queued_move_count() const noexcept {
 }
 
 AbsolutePointerService& GetAbsolutePointerService() noexcept {
-  static AbsolutePointerService service;
+  static AbsolutePointerService service(AbsolutePointerService::kDefaultMaxQueuedMoves, true);
   return service;
 }
 

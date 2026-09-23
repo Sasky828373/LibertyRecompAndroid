@@ -1,4 +1,5 @@
 #include "gta4_quicksave_hooks.h"
+#include "input/context_touch_activity.h"
 #include "gta4_quicksave_policy.h"
 #include "gta4_phone_quicksave_profiles.h"
 
@@ -401,6 +402,7 @@ bool EnsureThunks() {
   return request_thunk && observe_thunk;
 }
 void ResetWorld() {
+  gta4::input::ResetTouchActivityPrograms();
   std::lock_guard lock(state_mutex);
   world_epoch.fetch_add(1);
   transaction.Reset();
@@ -482,6 +484,9 @@ struct LoadFrame {
   bool phone = false;
   const PhoneProfile* profile = nullptr;
   uint32_t linked_source = 0;
+  std::string activity_name;
+  std::optional<size_t> activity_profile;
+  uint32_t activity_source = 0;
 };
 thread_local LoadFrame* loading = nullptr;
 }  // namespace
@@ -521,7 +526,10 @@ bool ResolveText(PPCContext& context, uint8_t* base) {
 
 extern "C" void sub_82846AE8(PPCContext& ctx, uint8_t* base) {
   using namespace gta4::quicksave;
-  LoadFrame frame{.phone = ProgramName(base, ctx.r4.u32) == "spcellphonemain"};
+  const auto name = ProgramName(base, ctx.r4.u32);
+  LoadFrame frame{.phone = name == "spcellphonemain"};
+  for (const auto& profile : gta4::input::kTouchActivityProfiles)
+    if (profile.name == name) { frame.activity_name = name; break; }
   struct Restore {
     LoadFrame* previous;
     ~Restore() { loading = previous; }
@@ -531,6 +539,18 @@ extern "C" void sub_82846AE8(PPCContext& ctx, uint8_t* base) {
 }
 extern "C" void sub_828453F8(PPCContext& ctx, uint8_t* base) {
   using namespace gta4::quicksave;
+  if (loading && !loading->activity_name.empty() && ctx.r4.u32 <= kMaxSCO &&
+      Span(base, ctx.r3.u32, ctx.r4.u32)) {
+    const std::string_view data(
+        reinterpret_cast<const char*>(rex::memory::GuestPtr(base, ctx.r3.u32)), ctx.r4.u32);
+    const auto digest = rex::crypto::sha256(data);
+    loading->activity_profile = gta4::input::MatchTouchActivityProfile(
+        loading->activity_name, ctx.r4.u32, digest);
+    loading->activity_source = ctx.r3.u32;
+    if (!loading->activity_profile)
+      REXLOG_WARN("gta4-touch-activity: unknown script={} size={} sha256={}; generic controls retained",
+                  loading->activity_name, ctx.r4.u32, digest);
+  }
   if (loading && loading->phone && REXCVAR_GET(gta4_quicksave) && ctx.r4.u32 <= kMaxSCO &&
       Span(base, ctx.r3.u32, ctx.r4.u32)) {
     const std::string_view data(
@@ -543,14 +563,33 @@ extern "C" void sub_828453F8(PPCContext& ctx, uint8_t* base) {
                   ctx.r4.u32, digest);
   }
   __imp__sub_828453F8(ctx, base);
-  if (loading && loading->phone && ctx.r3.u32 == 0)
+  if (loading && ctx.r3.u32 == 0) {
     loading->profile = nullptr;
+    loading->activity_profile.reset();
+  }
 }
 extern "C" void sub_82846780(PPCContext& ctx, uint8_t* base) {
   using namespace gta4::quicksave;
   const auto name = ProgramName(base, ctx.r4.u32);
   if (name == "main" || name == "initial")
     ResetWorld();
+  if (loading && !loading->activity_name.empty() && loading->activity_name == name) {
+    using namespace gta4::input;
+    InvalidateTouchActivityProgram(name);
+    const auto index = loading->activity_profile;
+    const auto* activity = index ? &kTouchActivityProfiles[*index] : nullptr;
+    const bool valid = activity && ctx.r5.u32 == loading->activity_source &&
+        ctx.r6.u32 == activity->code_size && ctx.r8.u32 == activity->local_count && ctx.r10.u32 == 0 &&
+        Span(base, ctx.r5.u32, ctx.r6.u32);
+    __imp__sub_82846780(ctx, base);
+    if (valid && Span(base, ctx.r3.u32, 28) && Read(base, ctx.r3.u32 + 4) == activity->program_key &&
+        Read(base, ctx.r3.u32 + 16) == activity->code_size) {
+      PublishTouchActivityProgram(*index, ctx.r3.u32);
+      REXLOG_INFO("gta4-touch-activity: admitted script={} episode={} program={:08X} sha256={}",
+                  activity->name, activity->episode, ctx.r3.u32, activity->sha256);
+    }
+    return;
+  }
   const auto* profile = loading ? loading->profile : nullptr;
   if (!profile || name != "spcellphonemain" || ctx.r5.u32 != loading->linked_source ||
       ctx.r6.u32 != profile->code_size || ctx.r8.u32 != profile->local_count || ctx.r10.u32 != 0 ||

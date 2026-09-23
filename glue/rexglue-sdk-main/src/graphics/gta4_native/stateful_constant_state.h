@@ -359,6 +359,12 @@ struct SharedConstantSemanticKey {
   uint64_t cached_descriptor_epoch = 0;
   uint64_t environmental_data_hash = 0;
   uint64_t environmental_sequence = 0;
+  uint64_t tone_lut_address = 0;
+  uint64_t cloud_mask_address = 0;
+  uint32_t cloud_mask_width = 0, cloud_mask_height = 0;
+  uint32_t modern_effects_enabled = 0;
+  uint32_t water_reflection = 0;
+  std::array<uint32_t, 6> viewport_bits{};
   uint32_t device = 0;
   uint32_t descriptor_copy = 0;
   uint32_t descriptor_page = std::numeric_limits<uint32_t>::max();
@@ -377,6 +383,7 @@ struct SharedConstantSemanticKey {
   uint32_t pixel_booleans = 0;
   uint8_t descriptor_backend = 0;
   uint8_t environment_present = 0;
+  uint8_t split_postfx_applied = 0;
 
   constexpr bool operator==(const SharedConstantSemanticKey&) const = default;
 };

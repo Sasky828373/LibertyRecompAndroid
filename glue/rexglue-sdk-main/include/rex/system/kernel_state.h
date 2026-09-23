@@ -109,6 +109,7 @@ constexpr memory::fourcc_t kKernelSaveSignature = memory::make_fourcc("KRNL");
 
 class Dispatcher;
 class XHostThread;
+class OrderedIoQueue;
 class KernelModule;
 class XModule;
 class XNotifyListener;
@@ -349,6 +350,10 @@ class KernelState {
   // the worker's PPC context and retained kernel objects.
   HostTaskAdmissionResult QueueHostTask(std::function<void()> task,
                                         std::function<void()> admitted_callback = nullptr);
+  HostTaskAdmissionResult QueueHostIoTask(
+      uintptr_t file_identity, std::function<void()> task,
+      std::function<void()> admitted_callback = nullptr);
+  void LogHostIoStatistics();
   void WaitForHostTasks();
   xam::ArbitrationAsyncManager* arbitration_async_manager() const {
     return arbitration_async_manager_.get();
@@ -380,6 +385,8 @@ class KernelState {
   void LoadAchievementsData();
   void StartHostTaskWorker();
   void StopHostTaskWorker();
+  void StartHostIoWorkers();
+  void StopHostIoWorkers();
 
   Runtime* emulator_;
   memory::Memory* memory_;
@@ -441,6 +448,11 @@ class KernelState {
   std::atomic<uint64_t> host_tasks_accepted_{0};
   std::atomic<uint64_t> host_tasks_completed_{0};
   std::atomic<uint64_t> host_tasks_rejected_{0};
+
+  // Admission is fenced by the global region; transfers execute outside it.
+  std::unique_ptr<OrderedIoQueue> host_io_queue_;
+  std::vector<object_ref<XHostThread>> host_io_workers_;
+  bool host_io_accepting_ = false;
 
   friend class XObject;
 };

@@ -761,3 +761,36 @@ CMakeUserPresets.json
 !/glue/rexglue-sdk-main/tests/regression/controls/touch_samples.py
 !/glue/rexglue-sdk-main/tests/regression/controls/touch_icon_samples.py
 !/glue/rexglue-sdk-main/tests/regression/touch_frontend_activation_runtime_test.py
+!/glue/rexglue-sdk-main/tests/regression/keyboard_context_runtime_test.py
+!/glue/rexglue-sdk-main/tests/regression/touch_help_layout_runtime_test.py
+
+!/tools/derive_streaming_hooks.py
+!/glue/rexglue-sdk-main/gta4-recomp/tools/derive_streaming_hooks.py
+!/glue/rexglue-sdk-main/gta4-recomp/tools/run_streaming_guest_tests.py
+
+# Preserve the native GPU scope analysis tool in source control.
+!/tools/analyze_native_gpu_scope_labels.py
+!/tools/run_native_gpu_profile_labels_smoke.py
+!/glue/rexglue-sdk-main/gta4-recomp/tools/analyze_streaming_trace.py
+!/tools/tests/test_native_gpu_scope_labels.py
+
+# Reproducible FusionFix shader assets and GPU comparisons.
+!/tools/generate_modern_shader_assets.py
+!/tools/generate_fusion_forward_overrides.py
+!/tools/verify_modern_shaders.py
+!/tools/verify_dof_shaders.py
+!/tools/verify_fusion_shader_math.py
+
+# Reproducible temporal-motion and HUD shader variants.
+!/tools/metal/shader_archive.py
+!/tools/metal/override_archive.py
+!/tools/metal/compile_passes.py
+!/tools/metal/compile_overrides.py
+!/tools/metal/temporal_shader_variants.py
+!/tools/metal/audit_shaders.py
+!/tools/metal/verify_sky_orientation.py
+!/tools/tests/build_metal_temporal_motion_fixture.py
+!/tools/tests/build_metal_geometry_fixture.py
+!/tools/tests/test_metal_shader_archive.py
+!/tools/vulkan/*.py
+!/glue/rexglue-sdk-main/cmake/fidelityfx_shader_compiler.py

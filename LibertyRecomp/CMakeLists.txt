@@ -1675,6 +1675,9 @@ if(USE_REXGLUE_RUNTIME)
             "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_camera_hooks.cpp"
             "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_controls.cpp"
             "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_layout.cpp"
+            "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_activity.cpp"
+            "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_activity_context.cpp"
+            "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_activity_layout.cpp"
             "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_draw.cpp"
             "${LIBERTY_TOUCH_SOURCE_ROOT}/input/context_touch_settings.cpp")
         target_sources(LibertyRecomp PRIVATE ${LIBERTY_TOUCH_SHARED_SOURCES}
@@ -1961,6 +1964,13 @@ if(LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
     endif()
 else()
     BIN2C(TARGET_OBJ LibertyRecomp SOURCE_FILE "${RESOURCES_SOURCE_PATH}/images/game_icon.bmp" DEST_FILE "${RESOURCES_OUTPUT_PATH}/images/game_icon.bmp" ARRAY_NAME "g_game_icon")
+endif()
+
+if(COMMAND rexglue_stage_dlss_runtime)
+    rexglue_stage_dlss_runtime(LibertyRecomp)
+endif()
+if(COMMAND liberty_stage_vulkan_temporal_archive)
+    liberty_stage_vulkan_temporal_archive(LibertyRecomp)
 endif()
 
 ## Button Prompts (Controller-specific XTD files) ##

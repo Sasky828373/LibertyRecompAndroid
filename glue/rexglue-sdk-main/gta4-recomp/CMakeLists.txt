@@ -108,12 +108,14 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         src/gta4_motion_hooks.cpp
         src/gta4_motion_vehicle_hooks.cpp
         src/gta4_audio_lifetime_trace.cpp
+        src/gta4_audio_ramped_mix.cpp
         src/gta4_lzx_hooks.cpp
         src/gta4_multiplayer_64_hooks.cpp
         src/gta4_online_hooks.cpp
         src/gta4_native_hooks.cpp
         src/gta4_population_hooks.cpp
         src/gta4_streaming_diagnostics.cpp
+        src/gta4_streaming_hooks.cpp
         src/gta4_touch_coordinator.cpp
         src/gta4_transition_hooks.cpp
         src/install/gta4_install_dialog.cpp
@@ -130,6 +132,9 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         src/input/context_touch_settings.cpp
         src/input/context_touch_draw.cpp
         src/input/context_touch_layout.cpp
+        src/input/context_touch_activity.cpp
+        src/input/context_touch_activity_context.cpp
+        src/input/context_touch_activity_layout.cpp
         src/input/context_touch_overlay.cpp
         src/gta4_touch_guest_hooks.cpp
         src/input/user_music_player.mm
@@ -143,6 +148,12 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         ${LIBERTY_RPF_AES_KEY_RESOURCES}
         ${GENERATED_SOURCES}
     )
+
+    # The startup registrar is one very large straight-line function. Avoid
+    # optimizer memory/swap spikes for that file only; all gameplay translation
+    # units retain the release optimization level. Generated source is untouched.
+    set_property(SOURCE generated/gta4_register.cpp APPEND PROPERTY COMPILE_OPTIONS
+        "$<$<CONFIG:Release>:-O0>")
 
     set_source_files_properties(
         src/achievement_bridge_gc.mm
@@ -159,6 +170,9 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/imgui
         ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/inja/third_party/include
     )
+    # This hook shares the native temporal camera/history policy headers.
+    set_property(SOURCE src/gta4_native_hooks.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
     set_source_files_properties(src/gta4_sony_feedback.cpp src/gta4_sony_event_hooks.cpp
         PROPERTIES COMPILE_DEFINITIONS GTA4_SONY_PRIMARY_PLAYER_ALIAS)
@@ -182,7 +196,20 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         "-framework GameKit"
     )
 
-    rexglue_configure_target(LibertyRecomp GPU_PLUGINS xenos gta4-native)
+    include("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/metal/MetalShaderArchive.cmake")
+    liberty_add_metal_shader_archive(LibertyRecomp "${LIBERTY_RECOMP_WORKSPACE_ROOT}")
+    liberty_stage_vulkan_temporal_archive(LibertyRecomp)
+
+    get_property(LIBERTY_METAL_PASS_LIBRARY GLOBAL PROPERTY REX_METAL_PASSES_LIBRARY)
+    if(LIBERTY_METAL_PASS_LIBRARY)
+        set_source_files_properties("${LIBERTY_METAL_PASS_LIBRARY}" PROPERTIES
+            GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources/metal")
+        target_sources(LibertyRecomp PRIVATE "${LIBERTY_METAL_PASS_LIBRARY}")
+        add_dependencies(LibertyRecomp rexui_metal_passes)
+        set_property(TARGET LibertyRecomp APPEND PROPERTY LINK_DEPENDS "${LIBERTY_METAL_PASS_LIBRARY}")
+    endif()
+
+    rexglue_configure_target(LibertyRecomp GPU_PLUGINS xenos gta4-native gta4-metal)
 
     # rexglue_configure_target stages the Vulkan loader and its companion
     # runtime from the selected SDK.  MoltenVK itself is built from the
@@ -285,6 +312,10 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/generated
     )
     set(GTA4_RECOMP_GENERATED_SOURCES ${GENERATED_SOURCES} PARENT_SCOPE)
+endif()
+
+if(TARGET LibertyRecomp AND COMMAND rexglue_stage_dlss_runtime)
+    rexglue_stage_dlss_runtime(LibertyRecomp)
 endif()
 
 if(TARGET rex::rexglue)

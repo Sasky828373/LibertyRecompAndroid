@@ -65,7 +65,7 @@
       "path": "tools/XenosRecomp",
       "base_revision": "fb32631ee398e46f2a113d8f9103201dbaa000b4",
       "patch": "xenosrecomp.patch",
-      "sha256": "efe7a4e65a957092101feb4376e7c7ea741e975938c4beb4463bd87f398ee271",
+      "sha256": "d68f6fb153421693e8546e27ba396ca31baf76d95b2a063926e46311743e7677",
       "files": [
         {
           "path": "XenosRecomp/CMakeLists.txt",
@@ -95,12 +95,12 @@
         {
           "path": "XenosRecomp/shader_common.h",
           "before_sha256": "dbe3b1d4936734c18b54f9f035018638e87c1187edc5eec906e2320a5b4680e2",
-          "after_sha256": "79499e75ee81493de2828ccece79061a30fc5af507aad567489ea920de05bd47"
+          "after_sha256": "c10eee4c3278200a078713c3436688a086f32e66ae6efa831c426229354e2550"
         },
         {
           "path": "XenosRecomp/shader_recompiler.cpp",
           "before_sha256": "517fe7f38560e6205b053456fd3d69e7a9db1951a66cae2688107e5ba9bc46fc",
-          "after_sha256": "4e1987dc755739b8ca74b6c2a012cb3b47c939b39a55e789ef73e1fe21667bd8"
+          "after_sha256": "5eea610118c2811fe6164e196eb99c2ea40f30d108c75c40e5f135bd4e58d54e"
         },
         {
           "path": "XenosRecomp/shader_recompiler.h",
@@ -160,7 +160,7 @@
         {
           "path": "tests/test_conditional_exec_translation.py",
           "before_sha256": "absent",
-          "after_sha256": "2acebbee67f88641debee654bdd788e1b2299adc23909201afe365d2ad52cab8"
+          "after_sha256": "c994f3c373bf58ed8d4c4a98913ab4dd59debb86ce910a7ece5fded1880cd651"
         },
         {
           "path": "tests/test_override_sampler_lod_bias.py",
@@ -191,6 +191,16 @@
           "path": "validate_smaa_pipeline.py",
           "before_sha256": "absent",
           "after_sha256": "f21c3e30202a579656f5cee7fa8636825e5c2ca22168c644065ba54474bda2f2"
+        },
+        {
+          "path": "tests/run_xenos_mul_gpu_test.py",
+          "before_sha256": "absent",
+          "after_sha256": "939bd30754489884893451168d1de2310d2673128a8efecd49596728716165d9"
+        },
+        {
+          "path": "tests/xenos_mul_gpu_test.mm",
+          "before_sha256": "absent",
+          "after_sha256": "3bc8057eab76de1f81cf9f53bcd96dec98d03e6dc26c70b8a66906b77b668ff5"
         }
       ]
     },
@@ -247,6 +257,25 @@
           "path": "libcxxabi/src/cxa_guard_impl.h",
           "before_sha256": "0c77f1e80dd8115e7fae1674e7c539b239b72b2b9552b79aaab68fd454d82f6d",
           "after_sha256": "af0286e4adb6edd044c875ab3173dc2fb0ff810850d9ffdd0b04331019e1c62e"
+        }
+      ]
+    },
+    {
+      "name": "libmspack-xmem",
+      "path": "glue/rexglue-sdk-main/thirdparty/libmspack",
+      "base_revision": "305907723a4e7ab2018e58040059ffb5e77db837",
+      "patch": "libmspack-xmem-block-padding.patch",
+      "sha256": "269f17014c3e71b98b4da3888bdce7a6f8ea7b08ccc5a2c9e036641fc4d41cd5",
+      "files": [
+        {
+          "path": "libmspack/mspack/lzx.h",
+          "before_sha256": "22b1ffa9ddc15aa5fac95d4f4f0c60486f590e55636a17ab94f3ad1b770f907f",
+          "after_sha256": "91b6277a38e4ece4dd4643cfa8f27778c6ddad486e9d2e05e9050f1039732391"
+        },
+        {
+          "path": "libmspack/mspack/lzxd.c",
+          "before_sha256": "622183f03bac71a12327bc9f036395dcb5c3b7c6cc7d766785de24ac1354256a",
+          "after_sha256": "993aa2964aa8ba700de5784558b064ed82e13ccaa736b0a7b85d032a07698ff2"
         }
       ]
     }

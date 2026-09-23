@@ -516,6 +516,10 @@ int main() {
   assert(ReadTouchScriptThread(script_memory) == 0);
   std::cout << "PASS native script instance identity survives address reuse and isolates parachute state\n";
 
+  assert(DecodeTouchHelpToken("PAD_LB",288)->action==4);
+  assert(DecodeTouchHelpToken("PAD_LT",289)->action==5);
+  assert(DecodeTouchHelpToken("PAD_RB",290)->action==6);
+  assert(DecodeTouchHelpToken("PAD_RT",291)->action==7);
   const auto raw = DecodeTouchHelpToken("PAD_B", 285);
   assert(raw && raw->kind == TouchScriptQueryKind::kRawButton && raw->action == 17);
   const auto semantic = DecodeTouchHelpToken("INPUT_CONTEXT", 284, 23);

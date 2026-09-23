@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 #include "input/context_touch_layout.h"
 
@@ -20,6 +21,10 @@ struct ContextTouchOverlaySnapshot {
   bool movement_owned = false;
   bool editor = false;
   bool visible = false;
+  // Immutable presentation-only layer; it never participates in hit testing.
+  std::shared_ptr<const ContextTouchLayout> outgoing_layout;
+  float outgoing_alpha = 0.0f;
+  float layout_alpha = 1.0f;
 };
 
 // Host values, not guest-endian XInput fields. Reading never consumes input.
@@ -44,6 +49,7 @@ uint64_t ContextTouchPresentationRevision() noexcept;
 bool ContextTouchGameplayInputAdmitted() noexcept;
 // HUD taps use native weapon-cycle input, never direct inventory mutation.
 bool ContextTouchWeaponCycleAdmitted() noexcept;
+bool ContextTouchWeaponHudSelectorActive() noexcept;
 bool QueueContextTouchWeaponCycle(uint64_t epoch, uint64_t pointer_id) noexcept;
 class ContextTouchGameplayTransition final {
  public:
@@ -65,6 +71,8 @@ ContextTouchOverlaySnapshot GetContextTouchOverlaySnapshot() noexcept;
 // host monotonic clock; an explicit timestamp supports deterministic testing.
 ContextTouchOverlaySnapshot GetContextTouchDrawableOverlaySnapshot(
     uint64_t monotonic_ns = 0) noexcept;
+// Radar and help use one visibility rule, including the noninteractive fade.
+bool ContextTouchHudLayoutActive() noexcept;
 // epoch == 0 selects the latest frozen poll for host adapters.
 bool GetTouchNativePadState(uint64_t epoch, TouchNativePadState* output) noexcept;
 

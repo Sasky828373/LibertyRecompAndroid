@@ -1,4 +1,6 @@
 #include <array>
+#include "graphics/gta4_native/split_postfx_parameters.h"
+#include "graphics/gta4_native/native_immutable_bindings.h"
 #include <chrono>
 #include <filesystem>
 #include <thread>
@@ -14,7 +16,8 @@
 namespace m = rex::graphics::gta4_native;
 namespace p = gta4::presentation::policy;
 namespace {
-constexpr std::array<uint64_t, 18> hashes{
+constexpr std::array<uint64_t, 19> hashes{
+    0x535ACDAB8AE84D82ull,
     0xEE75C9F6AA1AB16Aull, 0xE51D9DD95A333D92ull, 0xD3B2B2125BC24911ull, 0x94CC5AF0E2FF5B08ull,
     0x79044EA1461439CAull, 0xC5D3E7806E478A16ull, 0x67C1FB770BB55E69ull, 0xE4AF188ACBDA7362ull,
     0xE74BFC50127AFED3ull, 0x86CB9F8D0850ABE3ull, 0xC3256D6D7C2E426Dull, 0xDF64C22EC010C136ull,
@@ -54,6 +57,7 @@ TEST_CASE("Modern shaders classify every shipped override and preserve video", "
       for (bool disabled : {false, true}) {
         const bool expected =
             family == m::ModernShaderFamily::kVideo ||
+            family == m::ModernShaderFamily::kMotionBlur ||
             (enabled && !(disabled && family == m::ModernShaderFamily::kTladGrain));
         CHECK(m::AllowModernShader(hash, {enabled, disabled}) == expected);
       }
@@ -137,21 +141,36 @@ TEST_CASE("Frame policy never changes across prewarm draw or readback flush", "[
   CHECK(frame.Begin({false, false}));
   CHECK(frame.settings().key() == 0);
 }
-TEST_CASE(
-    "Modern and grain changes invalidate cached prewarm receipts without destroying pipelines",
-    "[modern-shaders]") {
-  m::NativePipelineLookupMemo<Fixed, 4, uint64_t> memo;
+TEST_CASE("Modern and grain settings isolate prewarm receipts and retain exact-key hits",
+          "[modern-shaders]") {
+  using Memo = m::NativePipelineLookupMemo<Fixed, 4, uint64_t>;
   Fixed fixed;
   int owner = 0;
   m::NativePipelineLookupContext<4> context;
   context.lifetime = 1;
+  // One inserted key must never satisfy any of the other setting combinations.
   for (uint32_t state = 0; state < 4; ++state) {
+    Memo isolated;
     context.modern_shader_settings = state;
-    memo.Store(&owner, fixed, context, 100 + state);
+    isolated.Store(&owner, fixed, context, 100 + state);
     for (uint32_t next = 0; next < 4; ++next) {
       auto changed = context;
       changed.modern_shader_settings = next;
-      CHECK(memo.Find(&owner, fixed, changed) == (state == next ? 100 + state : 0));
+      CHECK(isolated.Find(&owner, fixed, changed) == (state == next ? 100 + state : 0));
+    }
+  }
+  // The bounded memo now keeps four validated keys. Returning to an earlier
+  // setting may reuse its own pipeline, never the most recently inserted one.
+  Memo retained;
+  for (uint32_t state = 0; state < 4; ++state) {
+    context.modern_shader_settings = state;
+    retained.Store(&owner, fixed, context, 100 + state);
+    for (uint32_t next = 0; next < 4; ++next) {
+      auto changed = context;
+      changed.modern_shader_settings = next;
+      CHECK(retained.Find(&owner, fixed, changed) == (next <= state ? 100 + next : 0));
+      ++changed.lifetime;
+      CHECK(retained.Find(&owner, fixed, changed) == 0);
     }
   }
 }
@@ -179,7 +198,7 @@ TEST_CASE("Real frontend CVar writes control guest grain remapping and modern se
         }
       const auto motion = m::ResolveModernShaderSelection(m::ShaderOverrideMode::kPair, state, {},
                                                           Candidate(0xEE75C9F6AA1AB16Aull), 1);
-      CHECK(motion.pixel_override == modern);  // Grain-free motion blur remains available.
+      CHECK(motion.pixel_override);  // Performance replacement is independent of Modern Shaders.
       for (auto hash : hashes)
         if (m::ClassifyModernShader(hash) == m::ModernShaderFamily::kTladGrain) {
           const auto grain = m::ResolveModernShaderSelection(m::ShaderOverrideMode::kPair, state,
@@ -240,4 +259,30 @@ TEST_CASE("Modern and TLAD settings persist through the actual config serializer
       gta4::presentation::InitializeOptions();
       CHECK(gta4::presentation::DisableTladFilmGrain() == grain);
     }
+}
+
+TEST_CASE("Split DoF rejects singular inputs and keeps explicit zero blur cheap", "[modern-shaders][dof]") {
+  m::SplitPostFxParameters p{{.1f,1000.f,0,0},{4,2,80,12},{.8f,.05f,1,0}};
+  REQUIRE(m::ValidSplitPostFxParameters(p));
+  p.dof_distance[0] = 0;
+  REQUIRE_FALSE(m::ValidSplitPostFxParameters(p));
+  p.dof_blur = {};
+  REQUIRE(m::ValidSplitPostFxParameters(p));
+  p.dof_projection[0] = std::numeric_limits<float>::quiet_NaN();
+  REQUIRE_FALSE(m::ValidSplitPostFxParameters(p));
+}
+TEST_CASE("Successful split DoF cannot reuse stock shared constants", "[modern-shaders][dof]") {
+  m::SharedConstantSemanticKey<26> stock{}, split{};
+  split.split_postfx_applied = 1;
+  REQUIRE(stock != split);
+  REQUIRE(m::NativeSharedKeyWords(stock) != m::NativeSharedKeyWords(split));
+}
+TEST_CASE("Split DoF adapters obey modern and effective override selection", "[modern-shaders][dof]") {
+  for (auto hash : {0xCC0C2F3146CCC96Eull, 0x54FABC991DB485C8ull, 0x5D2A71133DA823F7ull}) {
+    REQUIRE(m::SupportsSplitPostFx(hash));
+    REQUIRE_FALSE(m::ResolveModernShaderSelection(m::ShaderOverrideMode::kPair, {false,false}, {}, Candidate(hash), 1).pixel_override);
+    REQUIRE(m::ResolveModernShaderSelection(m::ShaderOverrideMode::kPair, {true,false}, {}, Candidate(hash), 1).pixel_override);
+    REQUIRE_FALSE(m::ResolveModernShaderSelection(m::ShaderOverrideMode::kStock, {true,false}, {}, Candidate(hash), 1).pixel_override);
+  }
+  REQUIRE_FALSE(m::SupportsSplitPostFx(0));
 }

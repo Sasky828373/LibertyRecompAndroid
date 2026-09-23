@@ -11,6 +11,8 @@
  */
 
 #include <rex/ui/frame_pacer.h>
+#include <rex/ui/publication_progress.h>
+#include <optional>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -114,6 +116,7 @@ struct RawImage {
 struct GuestOutputProvenance {
   uint32_t frame_rate_limit = 0;
   bool producer_backpressure = false;
+  bool paired_presentation = false;
   uint64_t publication_serial = 0;
   uint64_t tv_session_id = 0;
   uint64_t title_present_id = 0;
@@ -234,6 +237,9 @@ class Presenter {
       completion_ = std::move(completion);
     }
     const std::shared_ptr<Completion>& completion() const { return completion_; }
+    // A backend may determine paired delivery only after recording/submission.
+    // Unspecified preserves legacy backends' caller-provided provenance.
+    virtual std::optional<bool> PairedPresentation() const { return std::nullopt; }
 
    protected:
     GuestOutputRefreshContext(bool& is_8bpc_out_ref) : is_8bpc_out_ref_(is_8bpc_out_ref) {
@@ -255,13 +261,10 @@ class Presenter {
       // AMD FidelityFX Super Resolution upsampling, Contrast Adaptive
       // Sharpening otherwise.
       kFsr,
-      // FidelityFX FSR2 selection. Uses the runtime temporal upscaler path
-      // where available; currently still experimental due to limited temporal
-      // inputs in the presenter path.
+      // Legacy configuration values. The color-only presenter treats these as
+      // FSR1 compatibility requests; temporal reconstruction belongs to the
+      // renderer, which owns scene depth, motion, jitter and history.
       kFsr2,
-      // FidelityFX FSR3 selection. Uses the runtime temporal upscaler path
-      // where available; currently still experimental due to limited temporal
-      // inputs in the presenter path.
       kFsr3,
 #endif
     };
@@ -763,9 +766,31 @@ class Presenter {
   //
   // Call via PaintAndPresent.
   virtual PaintResult PaintAndPresentImpl(bool execute_ui_drawers) = 0;
+  // A display opportunity is not an invalidation. Pending work survives a cap
+  // skip or a busy frame slot, including requests made during the previous draw.
+  void PaintFromDisplayLink() { PaintFromUIThreadImpl(false, true); }
+  bool HasPendingPaintFromUIThread() const {
+    return ui_paint_pending_ || ui_thread_paint_requested_.load(std::memory_order_relaxed) ||
+        (UsesExplicitPaintDemand() && publication_progress_.pending());
+  }
+  // Implementations may deliver the already-selected pacing deadline through
+  // their native event source. Returning false retains the portable window path.
+  // This requests a wakeup only; it never advances the FramePacer schedule.
+  virtual bool ScheduleFramePacingWakeup(uint64_t delay_ns) { return false; }
   virtual void PollPresentationTiming() {}
+  // nullopt: software-paced; zero: awaiting a display-link callback; otherwise
+  // an upcoming display opportunity already translated into the host clock.
+  virtual std::optional<uint64_t> DisplayLinkTargetNs() const { return std::nullopt; }
+  // Some native surface schedulers have UI-thread-owned display callbacks.
+  virtual bool RequiresUIThreadPresentation() const { return false; }
+  virtual bool UsesExplicitPaintDemand() const { return false; }
   // Backend calls this after a successful queue-present with the exact consumed image.
-  void AcceptPacedPublication(uint64_t serial) { frame_publication_gate_.Accept(serial); }
+  void AcceptPacedPublication(uint64_t serial) {
+    publication_progress_.Accept(serial);
+    frame_publication_gate_.Accept(serial);
+  }
+  void AdmitPacedPublication(uint64_t serial) {frame_publication_gate_.Admit(serial);}
+  bool HasPendingPacedPublication() const { return publication_progress_.pending(); }
   const FramePacer::Attempt& pacing_attempt() const { return pacing_attempt_; }
   FramePacer& frame_pacer() { return frame_pacer_; }
 
@@ -877,7 +902,7 @@ class Presenter {
   // connection state. Returns whether the window_->RequestPaint() call has been
   // made.
   bool RequestPaintOrConnectionRecoveryViaWindow(bool force_ui_thread_paint_tick,
-                                                   bool defer_until_ui_tick = false);
+                                                   bool defer_until_ui_tick = false, bool publication_only = false);
 
   // Platform-specific function refreshing the monitor the current window
   // surface is on, through the Surface or its Window. A reference to the
@@ -900,6 +925,9 @@ class Presenter {
   // kPresentedSuboptimal rather than kNotPresentedConnectionOutdated, the image
   // has been successfully sent to the OS presentation at least.
   PaintResult PaintAndPresent(bool execute_ui_drawers);
+  void PaintFromUIThreadImpl(bool force_paint, bool display_opportunity);
+  bool ui_paint_pending_ = true;  // UI owner; callbacks do not manufacture work.
+  PublicationProgress publication_progress_;
 
   void HandleUIDrawersChangeFromUIThread(bool drawers_were_empty);
   void InvalidateGuestOutputTransform() const;

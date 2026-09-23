@@ -109,6 +109,30 @@ constexpr IntroPlan CollapseIntro(std::span<uint8_t> data, uint32_t count, bool 
   return plan;
 }
 
+constexpr bool IsMotionBlurPass(uint32_t pass, uint32_t episode) noexcept {
+  if (episode > 2) return false;
+  return pass == 11 || pass == 13 || pass == 15 || pass == 17 ||
+         (episode != 0 && (pass == 25 || pass == 27)) || (episode == 2 && pass == 29);
+}
+
+// Retain the complete matching technique, sampler layout, DOF and noise state.
+// The original helper binds these passes before issuing any rendering work.
+constexpr uint32_t SelectMotionBlurPass(uint32_t pass, bool enabled, uint32_t episode,
+                                      uint32_t caller, bool valid_effect) noexcept {
+  if (enabled || caller != kCompositeCaller || !valid_effect || !IsMotionBlurPass(pass, episode))
+    return pass;
+  switch (pass) {
+    case 11: return 10;
+    case 13: return 12;
+    case 15: return 14;
+    case 17: return 16;
+    case 25: return 24;
+    case 27: return 26;
+    case 29: return 28;
+    default: return pass;
+  }
+}
+
 constexpr bool IsNoisePass(uint32_t pass) noexcept {
   return pass == 24 || pass == 25 || pass == 26 || pass == 27;
 }

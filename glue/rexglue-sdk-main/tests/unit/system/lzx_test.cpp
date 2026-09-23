@@ -1,3 +1,4 @@
+#include "lzx_raw_block_fixture.h"
 #include <array>
 #include <cstdint>
 #include <span>
@@ -143,4 +144,58 @@ TEST_CASE("one-shot LZX decoder rejects invalid windows and reference bounds",
                        kRetailWindowSize, reference.data(), kRetailWindowSize + 1) == 1);
   CHECK(lzx_decompress(nullptr, input.size(), output.data(), output.size(),
                        kRetailWindowSize, nullptr, 0) == 1);
+}
+
+TEST_CASE("Xbox LZX raw blocks do not skip the next header after odd lengths", "[system][lzx]") {
+  const std::array<std::vector<uint32_t>, 5> sequences = {{
+      {3, 7, 9}, {1, 32767}, {9987, 22781}, {2, 4, 7}, {32765, 3}}};
+  for (const auto& lengths : sequences) {
+    const auto fixture = lzx_test::RawBlocks(lengths, false);
+    auto decoder = rex::lzx::PersistentDecoder::Create(kRetailWindowSize);
+    REQUIRE(decoder);
+    for (unsigned reset = 0; reset < 3; ++reset) {
+      REQUIRE(decoder->Reset());
+      std::vector<uint8_t> output(fixture.expected.size());
+      const auto result = decoder->DecodeFrame(fixture.compressed, output);
+      CAPTURE(lengths, reset, static_cast<unsigned>(result.status));
+      REQUIRE(result);
+      CHECK(output == fixture.expected);
+      CHECK(result.bytes_written == output.size());
+      CHECK(decoder->total_output_bytes() == output.size());
+    }
+  }
+}
+
+TEST_CASE("Xbox LZX keeps unpadded raw-block semantics across frame calls", "[system][lzx]") {
+  const std::array<uint32_t, 2> full = {3, 32765};
+  const std::array<uint32_t, 2> short_tail = {5, 9};
+  auto decoder = rex::lzx::PersistentDecoder::Create(kRetailWindowSize);
+  REQUIRE(decoder);
+  size_t total = 0;
+  for (unsigned frame = 0; frame < 9; ++frame) {
+    const auto fixture = lzx_test::RawBlocks(frame == 8 ? std::span(short_tail) : std::span(full),
+                                            false, frame == 0);
+    std::vector<uint8_t> output(fixture.expected.size());
+    REQUIRE(decoder->DecodeFrame(fixture.compressed, output));
+    CHECK(output == fixture.expected);
+    total += output.size();
+    CHECK(decoder->total_output_bytes() == total);
+  }
+}
+
+TEST_CASE("standard one-shot LZX retains odd raw-block padding", "[system][lzx]") {
+  const std::array<uint32_t, 3> lengths = {3, 7, 9};
+  const auto standard = lzx_test::RawBlocks(lengths, true);
+  const auto xbox = lzx_test::RawBlocks(lengths, false);
+  // Alternate API variants to prove no process-global format toggle exists.
+  for (unsigned repetition = 0; repetition < 8; ++repetition) {
+    std::vector<uint8_t> output(standard.expected.size());
+    REQUIRE(lzx_decompress(standard.compressed.data(), standard.compressed.size(),
+                           output.data(), output.size(), kRetailWindowSize, nullptr, 0) == 0);
+    CHECK(output == standard.expected);
+    auto decoder = rex::lzx::PersistentDecoder::Create(kRetailWindowSize);
+    REQUIRE(decoder);
+    REQUIRE(decoder->DecodeFrame(xbox.compressed, output));
+    CHECK(output == xbox.expected);
+  }
 }

@@ -157,3 +157,52 @@ TEST_CASE("Constant storage can change layout and extend its initialized region 
   REQUIRE(uploads.Write(storage, shared.size(), tail, true) == 0);
   REQUIRE(std::equal(shared.begin(), shared.end(), storage.begin()));
 }
+
+TEST_CASE("Grouped constant comparison preserves each changed register and unaligned storage",
+          "[native-upload][constants]") {
+  for (bool guest : {false, true}) {
+    for (size_t misalignment : {size_t(0), size_t(1), size_t(7)}) {
+      for (size_t size : {size_t(16), size_t(48), size_t(64), size_t(80),
+                          size_t(128), size_t(1056), size_t(3584), size_t(4096)}) {
+        NativeConstantUploadTracker uploads;
+        std::vector<uint8_t> backing(size + misalignment + 16, 0xCD);
+        std::span<uint8_t> storage(backing.data() + misalignment, size);
+        std::vector<uint8_t> source(size);
+        for (size_t i = 0; i < size; ++i) source[i] = uint8_t(i * 37 + 11);
+        REQUIRE(uploads.Write(storage, 0, source, guest) == size);
+        REQUIRE(uploads.Write(storage, 0, source, guest) == 0);
+        for (size_t changed = 0; changed < size; changed += 16) {
+          uploads.BeginFrame();
+          source[changed] ^= 0x80;
+          REQUIRE(uploads.Write(storage, 0, source, guest) == 16);
+          REQUIRE(uploads.written_bytes() == 16);
+          REQUIRE(std::ranges::equal(storage, HostBytes(source, guest)));
+          REQUIRE(std::all_of(backing.begin(), backing.begin() + misalignment,
+                              [](uint8_t v) { return v == 0xCD; }));
+          REQUIRE(std::all_of(backing.begin() + misalignment + size, backing.end(),
+                              [](uint8_t v) { return v == 0xCD; }));
+        }
+        // The no-comparison path writes every register even if bytes match.
+        REQUIRE(uploads.Write(storage, 0, source, guest, false) == size);
+        REQUIRE(std::ranges::equal(storage, HostBytes(source, guest)));
+      }
+    }
+  }
+}
+
+TEST_CASE("Grouped constant comparison never skips initialization at a partial group boundary",
+          "[native-upload][constants]") {
+  for (bool guest : {false, true}) {
+    for (size_t prefix : {size_t(0), size_t(16), size_t(32), size_t(48),
+                          size_t(64), size_t(80), size_t(96)}) {
+      NativeConstantUploadTracker uploads;
+      std::array<uint8_t, 256> storage{}, source{};
+      if (prefix) REQUIRE(uploads.Write(storage, 0, std::span(source).first(prefix), guest) == prefix);
+      uploads.BeginFrame();
+      REQUIRE(uploads.Write(storage, 0, source, guest) == source.size() - prefix);
+      REQUIRE(uploads.initialized_bytes() == source.size());
+      REQUIRE(uploads.written_bytes() == source.size() - prefix);
+      REQUIRE(uploads.Write(storage, 0, source, guest) == 0);
+    }
+  }
+}

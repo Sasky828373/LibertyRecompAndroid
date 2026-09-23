@@ -18,11 +18,13 @@
 #include <rex/diagnostics/policy.h>
 #include <rex/graphics/gta4_native/anti_aliasing_policy.h>
 #include <rex/graphics/gta4_native/hdr_policy.h>
+#include <rex/graphics/gta4_native/temporal_commands.h>
 #include <rex/input/input_trace.h>
 #include <rex/input/sony_feedback.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/interfaces/graphics.h>
 
 #include "gta4_frontend_menu_policy.h"
 #include "gta4_draw_distance_policy.h"
@@ -81,6 +83,10 @@ constexpr uint32_t kFrontendWidgetStateSize = 3216;
 constexpr int32_t kRetailListSlotCapacity = gta4::frontend_menu::policy::kRetailListSlotCapacity;
 
 enum class TextId : uint8_t {
+  kRendererLabel,
+  kEmulatedRenderer,
+  kVulkanRenderer,
+  kMetalRenderer,
   kResolutionLabel,
   kAspectLabel,
   kFullscreenLabel,
@@ -100,6 +106,7 @@ enum class TextId : uint8_t {
   kShadowLabel,
   kDitherLabel,
   kModernShadersLabel,
+  kMotionBlurLabel,
   kMotionControlsLabel,
   kTouchControlsLabel,
   kEditTouchLayoutLabel,
@@ -151,6 +158,7 @@ enum class TextId : uint8_t {
   kSmaa,
   kMsaa2x,
   kMsaa4x,
+  kMsaa4xSmaa,
   kSsaa2x,
   kSsaa4x,
   kSsaa6x,
@@ -187,6 +195,17 @@ enum class TextId : uint8_t {
   kMouseAimLabel,
   kHold,
   kToggle,
+  kTaa,
+  kMetalFxTaa,
+  kMetalFxUpscaler,
+  kFrameGenerationLabel,
+  kMetalFx2x,
+  kFsr3,
+  kDlss,
+  kNativeAa,
+  kUltraPerformance,
+  kFsr3FrameGeneration,
+  kDlssFrameGeneration,
   kCount,
 };
 
@@ -200,6 +219,8 @@ enum class SettingBinding : uint8_t {
   kAntiAliasing,
   kHdr,
   kUpscaler,
+  kUpscalingQuality,
+  kFrameGeneration,
   kDrawDistanceSlider,
   kTouchLayoutEditor,
   kSonyFeatures,
@@ -213,6 +234,14 @@ struct Setting {
   uint8_t choice_count;
   bool restart_required = false;
   SettingBinding binding = SettingBinding::kCvar;
+};
+
+constexpr std::array kRendererChoices = {
+    Choice{"xenos", TextId::kEmulatedRenderer},
+    Choice{"gta4-native", TextId::kVulkanRenderer},
+#if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
+    Choice{"gta4-metal", TextId::kMetalRenderer},
+#endif
 };
 
 constexpr std::array kResolutionChoices = {
@@ -293,8 +322,13 @@ constexpr std::array kAntiAliasingChoices = {
     Choice{"off", TextId::kOff},
     Choice{"fxaa", TextId::kFxaa},
     Choice{"smaa", TextId::kSmaa},
+#if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
+    Choice{"taa", TextId::kTaa},
+    Choice{"metalfx_taa", TextId::kMetalFxTaa},
+#endif
     Choice{"msaa2x", TextId::kMsaa2x},
     Choice{"msaa4x", TextId::kMsaa4x},
+    Choice{"msaa4x_smaa", TextId::kMsaa4xSmaa},
     Choice{"ssaa2x", TextId::kSsaa2x},
     Choice{"ssaa4x", TextId::kSsaa4x},
     Choice{"ssaa6x", TextId::kSsaa6x},
@@ -307,6 +341,34 @@ constexpr std::array kAntiAliasingChoices = {
 constexpr std::array kUpscalerChoices = {
     Choice{"native", TextId::kNative},
     Choice{"fsr1", TextId::kFsr1},
+#if defined(LIBERTY_HAS_FSR3)
+    Choice{"fsr3", TextId::kFsr3},
+#endif
+#if defined(LIBERTY_HAS_DLSS)
+    Choice{"dlss", TextId::kDlss},
+#endif
+#if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
+    Choice{"metalfx", TextId::kMetalFxUpscaler},
+#endif
+};
+constexpr std::array kFrameGenerationChoices = {
+    Choice{"off", TextId::kOff},
+#if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
+    Choice{"metalfx", TextId::kMetalFx2x},
+#endif
+#if defined(LIBERTY_HAS_FSR3)
+    Choice{"fsr3", TextId::kFsr3FrameGeneration},
+#endif
+#if defined(LIBERTY_HAS_DLSS)
+    Choice{"dlss", TextId::kDlssFrameGeneration},
+#endif
+};
+constexpr std::array kTemporalQualityChoices = {
+    Choice{"native", TextId::kNativeAa},
+    Choice{"quality", TextId::kQuality},
+    Choice{"balanced", TextId::kBalanced},
+    Choice{"performance", TextId::kPerformance},
+    Choice{"ultra_performance", TextId::kUltraPerformance},
 };
 constexpr std::array kFsrQualityChoices = {
     Choice{"ultra_quality", TextId::kUltraQuality},
@@ -342,6 +404,8 @@ constexpr std::array kShadowChoices = {
     Choice{"1024", TextId::kUltra},
 };
 constexpr std::array kSettings = {
+    Setting{"LR_RENDERER", TextId::kRendererLabel, "gpu_plugin", kRendererChoices.data(),
+            kRendererChoices.size(), true},
     Setting{"LR_FULLSCR", TextId::kFullscreenLabel, "fullscreen", kDisplayModeChoices.data(),
             kDisplayModeChoices.size(), true},
     Setting{"LR_RES", TextId::kResolutionLabel, "resolution", kResolutionChoices.data(),
@@ -365,9 +429,12 @@ constexpr std::array kSettings = {
     Setting{"LR_UPSCALE", TextId::kUpscalingLabel, "gta4_native_upscaler", kUpscalerChoices.data(),
             kUpscalerChoices.size(), true, SettingBinding::kUpscaler},
     Setting{"LR_FSR", TextId::kFsrLabel, "gta4_fsr1_quality", kFsrQualityChoices.data(),
-            kFsrQualityChoices.size(), true},
+            kFsrQualityChoices.size(), true, SettingBinding::kUpscalingQuality},
     Setting{"LR_AA", TextId::kPostAaLabel, "gta4_native_anti_aliasing", kAntiAliasingChoices.data(),
             kAntiAliasingChoices.size(), false, SettingBinding::kAntiAliasing},
+    Setting{"LR_FRAMEGEN", TextId::kFrameGenerationLabel, "gta4_native_frame_generation",
+            kFrameGenerationChoices.data(), kFrameGenerationChoices.size(), true,
+            SettingBinding::kFrameGeneration},
     Setting{"LR_TEXFILTER", TextId::kTextureFilteringLabel, "gta4_texture_filtering",
             kTextureFilteringChoices.data(), kTextureFilteringChoices.size()},
     Setting{"LR_ANISO", TextId::kAnisotropicLabel, "gta4_anisotropic_filtering",
@@ -380,6 +447,8 @@ constexpr std::array kSettings = {
             kReflectionAaChoices.data(), kReflectionAaChoices.size(), true},
     Setting{"LR_DITHER", TextId::kDitherLabel, "gta4_native_output_dither", kToggleChoices.data(),
             kToggleChoices.size()},
+    Setting{"LR_MBLUR", TextId::kMotionBlurLabel, "gta4_motion_blur",
+            kToggleChoices.data(), kToggleChoices.size()},
     Setting{"LR_MODSHADER", TextId::kModernShadersLabel, "gta4_modern_shaders",
             kToggleChoices.data(), kToggleChoices.size()},
     Setting{"LR_MOTION", TextId::kMotionControlsLabel, "gta4_motion_enabled",
@@ -406,6 +475,10 @@ constexpr std::string_view kNextPageKey = "LR_NEXT";
 constexpr std::string_view kTouchLayoutEditorKey = "LR_TOUCH_EDIT";
 
 constexpr std::array<std::string_view, static_cast<size_t>(TextId::kCount)> kStringPool = {
+    "Renderer (Restart)",
+    "Emulated",
+    "Vulkan",
+    "Metal",
     "Resolution",
     "Aspect Ratio",
     "Display Mode",
@@ -425,6 +498,7 @@ constexpr std::array<std::string_view, static_cast<size_t>(TextId::kCount)> kStr
     "Shadow Resolution",
     "Output Dithering",
     "Modern shaders",
+    "Motion Blur",
     "Motion Controls",
     "Touch Controls",
     "Edit Touch Layout",
@@ -476,6 +550,7 @@ constexpr std::array<std::string_view, static_cast<size_t>(TextId::kCount)> kStr
     "SMAA",
     "MSAA 2x (Deferred)",
     "MSAA 4x (Deferred)",
+    "MSAA 4x + SMAA",
     "SSAA 2x",
     "SSAA 4x",
     "SSAA 6x",
@@ -512,6 +587,17 @@ constexpr std::array<std::string_view, static_cast<size_t>(TextId::kCount)> kStr
     "Mouse Aim",
     "Hold",
     "Toggle",
+    "TAA",
+    "MetalFX Temporal AA",
+    "MetalFX Temporal",
+    "Frame Generation",
+    "MetalFX 2x",
+    "FSR 3.1",
+    "DLSS",
+    "Native AA",
+    "Ultra Performance",
+    "FSR 2x",
+    "DLSS 2x",
 };
 
 struct NativePageState {
@@ -980,7 +1066,69 @@ bool FindOwnedLabelText(uint8_t* base, uint32_t key_address, TextId& text) {
   return false;
 }
 
-std::string CurrentSettingValue(const Setting& setting) {
+uint32_t TemporalCapabilities() {
+  using namespace rex::graphics::gta4_native;
+  auto* runtime = rex::Runtime::instance();
+  auto* graphics = runtime ? runtime->graphics_system() : nullptr;
+  if (!graphics || graphics->GetTitleCommandAbi(kTitleId) != kTitleCommandAbi) return 0;
+  QueryDeviceCapabilitiesCommand query;
+  DeviceCapabilitiesResult result{};
+  return graphics->ExecuteTitleCommand(kTitleId, kTitleCommandAbi, &query, sizeof(query),
+                                        &result, sizeof(result)) ? result.capabilities : 0;
+}
+
+Setting ResolveSetting(const Setting& setting) {
+  Setting resolved = setting;
+  if (setting.binding == SettingBinding::kUpscalingQuality) {
+    const auto upscaler = rex::cvar::GetFlagByName("gta4_native_upscaler");
+    if (upscaler == "fsr3" || upscaler == "dlss") {
+      resolved.cvar = "gta4_temporal_upscaler_quality";
+      resolved.choices = kTemporalQualityChoices.data();
+      resolved.choice_count = kTemporalQualityChoices.size();
+    }
+  } else if (setting.binding == SettingBinding::kFrameGeneration &&
+             (TemporalCapabilities() & rex::graphics::gta4_native::kCapabilityNativeTemporalAA)) {
+    resolved.cvar = "gta4_metalfx_frame_generation";
+  }
+  return resolved;
+}
+
+bool ChoiceAvailable(const Setting& setting, std::string_view value, uint32_t capabilities) {
+  using namespace rex::graphics::gta4_native;
+  if (setting.binding == SettingBinding::kUpscaler) {
+    if (value == "metalfx") return capabilities & kCapabilityMetalFxTemporalUpscaling;
+    if (value == "fsr3") return capabilities & kCapabilityFsr3Upscaling;
+    if (value == "dlss") return capabilities & kCapabilityDlssUpscaling;
+  } else if (setting.binding == SettingBinding::kFrameGeneration) {
+    if (value == "metalfx") return capabilities & kCapabilityMetalFxFrameGeneration;
+    if (value == "fsr3") return capabilities & kCapabilityFsrFrameGeneration;
+    if (value == "dlss") return capabilities & kCapabilityDlssFrameGeneration;
+  } else if (setting.binding == SettingBinding::kAntiAliasing) {
+    if (value == "taa") return capabilities & kCapabilityNativeTemporalAA;
+    if (value == "metalfx_taa") return capabilities & kCapabilityMetalFxTemporalUpscaling;
+  }
+  return true;
+}
+
+bool SettingAvailable(const Setting& setting, uint32_t capabilities) {
+  using namespace rex::graphics::gta4_native;
+  if (setting.binding == SettingBinding::kFrameGeneration) {
+    for (const auto& choice : kFrameGenerationChoices) {
+      if (choice.value != "off" && ChoiceAvailable(setting, choice.value, capabilities)) return true;
+    }
+    return false;
+  }
+  if (setting.binding == SettingBinding::kUpscaler ||
+      setting.binding == SettingBinding::kUpscalingQuality) {
+    auto* runtime = rex::Runtime::instance();
+    auto* graphics = runtime ? runtime->graphics_system() : nullptr;
+    return graphics && graphics->GetTitleCommandAbi(kTitleId) == kTitleCommandAbi;
+  }
+  return true;
+}
+
+std::string CurrentSettingValue(const Setting& source) {
+  const Setting setting = ResolveSetting(source);
   if (setting.binding == SettingBinding::kAntiAliasing) {
     return std::string(
         rex::graphics::gta4_native::GetConfiguredAntiAliasingModeName());
@@ -989,6 +1137,12 @@ std::string CurrentSettingValue(const Setting& setting) {
     return std::string(rex::graphics::gta4_native::GetConfiguredHdrModeName());
   }
   std::string value = rex::cvar::GetFlagByName(setting.cvar);
+  if (setting.binding == SettingBinding::kFrameGeneration &&
+      setting.cvar == "gta4_metalfx_frame_generation") {
+    return value == "true" ? "metalfx" : "off";
+  }
+  // Empty delegates to the title default; pending choices never swap a live plugin.
+  if (setting.cvar == "gpu_plugin" && value.empty()) value = "gta4-native";
   if (setting.cvar == "gta4_present_mode" && value != "immediate")
     value = "vsync";  // Legacy auto/FIFO/mailbox settings all synchronize.
   if (std::string_view(setting.cvar) == "gta4_aspect_ratio" && value == "original")
@@ -996,20 +1150,26 @@ std::string CurrentSettingValue(const Setting& setting) {
   return value;
 }
 
-const Choice& CurrentChoice(const Setting& setting) {
+const Choice& CurrentChoice(const Setting& source) {
+  const Setting setting = ResolveSetting(source);
   const std::string current = CurrentSettingValue(setting);
+  const uint32_t capabilities = TemporalCapabilities();
   for (uint8_t index = 0; index < setting.choice_count; ++index) {
-    if (current == setting.choices[index].value) {
+    if (current == setting.choices[index].value &&
+        ChoiceAvailable(setting, current, capabilities)) {
       return setting.choices[index];
     }
   }
   return setting.choices[0];
 }
 
-uint8_t CurrentChoiceIndex(const Setting& setting) {
+uint8_t CurrentChoiceIndex(const Setting& source) {
+  const Setting setting = ResolveSetting(source);
   const std::string current = CurrentSettingValue(setting);
+  const uint32_t capabilities = TemporalCapabilities();
   for (uint8_t index = 0; index < setting.choice_count; ++index) {
-    if (current == setting.choices[index].value) {
+    if (current == setting.choices[index].value &&
+        ChoiceAvailable(setting, current, capabilities)) {
       return index;
     }
   }
@@ -1083,7 +1243,8 @@ bool ValidateNativeMenuKeys() {
 
 bool WriteJumpRow(uint8_t* base, uint32_t destination, std::string_view key);
 
-bool WriteSettingRow(uint8_t* base, uint32_t destination, const Setting& setting) {
+bool WriteSettingRow(uint8_t* base, uint32_t destination, const Setting& source) {
+  const Setting setting = ResolveSetting(source);
   if (setting.binding == SettingBinding::kTouchLayoutEditor) {
     return WriteJumpRow(base, destination, setting.key);
   }
@@ -1258,12 +1419,17 @@ void InstallDisplayExtension(PPCContext& ctx, uint8_t* base) {
     return;
   }
 
+  const uint32_t capabilities = TemporalCapabilities();
+  std::vector<const Setting*> visible_settings;
+  for (const auto& setting : kSettings) {
+    if (SettingAvailable(setting, capabilities)) visible_settings.push_back(&setting);
+  }
   std::vector<gta4::frontend_menu::policy::NativePageSlice> page_slices;
   std::size_t first_setting = 0;
   std::size_t total_row_count = 0;
-  while (first_setting < kSettings.size()) {
+  while (first_setting < visible_settings.size()) {
     const auto slice =
-        gta4::frontend_menu::policy::PlanNativePage(kSettings.size(), first_setting);
+        gta4::frontend_menu::policy::PlanNativePage(visible_settings.size(), first_setting);
     if (slice.item_count == 0 ||
         !gta4::frontend_menu::policy::CanBuildAdvanced(slice.RowCount()) ||
         slice.RowCount() > std::numeric_limits<uint16_t>::max()) {
@@ -1336,7 +1502,7 @@ void InstallDisplayExtension(PPCContext& ctx, uint8_t* base) {
         .has_next = slice.has_next,
     };
     for (std::size_t index = 0; index < slice.item_count; ++index) {
-      const Setting& setting = kSettings[slice.first_item + index];
+      const Setting& setting = *visible_settings[slice.first_item + index];
       if (!WriteSettingRow(base, destination, setting)) {
         InvokeGuest(ctx, base, sub_821B3560, allocation);
         return;
@@ -1386,7 +1552,7 @@ void InstallDisplayExtension(PPCContext& ctx, uint8_t* base) {
   REXLOG_INFO(
       "GTA IV native menu installed: primary-rows={} native-pages={} native-settings={} "
       "stock-vector={:08X} allocation={:08X} allocation-bytes={}",
-      g_display_menu.primary_count, g_display_menu.native_pages.size(), kSettings.size(),
+      g_display_menu.primary_count, g_display_menu.native_pages.size(), visible_settings.size(),
       g_display_menu.stock_rows, g_display_menu.allocation, allocation_bytes);
 }
 
@@ -1403,7 +1569,8 @@ void SwitchDisplayPage(PPCContext& ctx, uint8_t* base, gta4::frontend_menu::poli
               selected_row);
 }
 
-void ChangeSetting(const Setting& setting, int32_t delta) {
+void ChangeSetting(const Setting& source, int32_t delta) {
+  const Setting setting = ResolveSetting(source);
   if (delta == 0 || setting.binding == SettingBinding::kTouchLayoutEditor) {
     return;
   }
@@ -1434,7 +1601,54 @@ void ChangeSetting(const Setting& setting, int32_t delta) {
                        : static_cast<uint8_t>(index - 1);
   }
 
+  const bool native_generation = setting.binding == SettingBinding::kFrameGeneration &&
+                                 setting.cvar == "gta4_native_frame_generation";
+  const uint32_t capabilities = TemporalCapabilities();
+  for (uint8_t attempt = 0; attempt < setting.choice_count; ++attempt) {
+    if (ChoiceAvailable(setting, setting.choices[index].value, capabilities)) break;
+    index = delta > 0 ? (index + 1 == setting.choice_count ? 0 : index + 1)
+                      : (index ? index - 1 : setting.choice_count - 1);
+  }
+  if (!ChoiceAvailable(setting, setting.choices[index].value, capabilities)) return;
   const Choice& choice = setting.choices[index];
+  if (native_generation && choice.value != "off") {
+    const auto upscaler = rex::cvar::GetFlagByName("gta4_native_upscaler");
+    if (upscaler != "fsr3" && upscaler != "dlss") {
+      REXLOG_WARN("Select FSR 3.1 or DLSS before enabling frame generation; Native AA quality keeps native resolution");
+      return;
+    }
+    if (rex::cvar::GetFlagByName("gta4_present_mode") == "immediate")
+      rex::cvar::SetFlagByName("gta4_present_mode", "vsync");
+  }
+  if (setting.binding == SettingBinding::kUpscaler &&
+      (choice.value == "fsr3" || choice.value == "dlss") &&
+      rex::graphics::gta4_native::UsesSceneMsaa(
+          rex::graphics::gta4_native::GetConfiguredAntiAliasingMode())) {
+    REXLOG_WARN("Select a single-sample anti-aliasing mode before temporal upscaling");
+    return;
+  }
+  if (setting.binding == SettingBinding::kFrameGeneration && choice.value == "metalfx") {
+    if (rex::cvar::GetFlagByName("gta4_present_mode") == "immediate") {
+      rex::cvar::SetFlagByName("gta4_present_mode", "vsync");
+    }
+    const auto selected = rex::graphics::gta4_native::GetConfiguredAntiAliasingMode();
+    if (!rex::graphics::gta4_native::UsesTemporalAntiAliasing(selected) &&
+        rex::graphics::gta4_native::SetConfiguredAntiAliasingMode("metalfx_taa") ==
+            rex::graphics::gta4_native::AntiAliasingApplyResult::kRejected) {
+      return;
+    }
+  }
+  if (setting.binding == SettingBinding::kUpscaler && choice.value == "metalfx") {
+    if (rex::graphics::gta4_native::UsesSceneSupersampling(
+            rex::graphics::gta4_native::GetConfiguredAntiAliasingMode())) {
+      REXLOG_WARN("Select a non-SSAA mode before MetalFX upscaling");
+      return;
+    }
+    if (rex::graphics::gta4_native::SetConfiguredAntiAliasingMode("metalfx_taa") ==
+        rex::graphics::gta4_native::AntiAliasingApplyResult::kRejected) {
+      return;
+    }
+  }
   bool restart_required = setting.restart_required;
   if (setting.binding == SettingBinding::kAntiAliasing) {
     using rex::graphics::gta4_native::AntiAliasingApplyResult;
@@ -1463,7 +1677,11 @@ void ChangeSetting(const Setting& setting, int32_t delta) {
         "select a non-SSAA anti-aliasing mode first",
         setting.cvar, choice.value);
     return;
-  } else if (!rex::cvar::SetFlagByName(setting.cvar, choice.value)) {
+  } else if (!rex::cvar::SetFlagByName(
+                 setting.cvar, setting.binding == SettingBinding::kFrameGeneration &&
+                                       setting.cvar == "gta4_metalfx_frame_generation"
+                                   ? (choice.value == "metalfx" ? "true" : "false")
+                                   : choice.value)) {
     REXLOG_ERROR("GTA IV Advanced Graphics: rejected {}={}", setting.cvar, choice.value);
     return;
   }
@@ -1616,6 +1834,34 @@ extern "C" void sub_8221FD88(PPCContext& ctx, uint8_t* base) {
         ReadGuestString(base, key_address, kMenuTraceStringCapacity), ctx.r3.u32,
         ReadGuestString(base, ctx.r3.u32, kMenuTraceStringCapacity));
   }
+}
+
+extern "C" void sub_8223F9F0(PPCContext& ctx, uint8_t* base) {
+  // The stock storage dialog uses the same localized message for several
+  // failures. These are its original r3 case IDs, also set by sub_82240C18
+  // and the save-block serializer. Observe them without changing save flow.
+  thread_local uint32_t previous_reason = std::numeric_limits<uint32_t>::max();
+  const uint32_t reason = ctx.r3.u32;
+  const char* stage = nullptr;
+  switch (reason) {
+    case 17: stage = "begin-save"; break;
+    case 18: stage = "save-operation-failed"; break;
+    case 19: stage = "save-completion-error"; break;
+    case 20: stage = "begin-thumbnail"; break;
+    case 21: stage = "thumbnail-operation-failed"; break;
+    case 22: stage = "thumbnail-completion-error"; break;
+    case 32: stage = "serialize-save-block"; break;
+    default: break;
+  }
+  if (stage && reason != previous_reason && FrontendDiagnosticsEnabled()) {
+    REXLOG_ERROR("gta4-save: failure reason={} stage={} dialog-argument={} caller={:08X}",
+                 reason, stage, ctx.r4.u32, ctx.lr);
+  }
+  previous_reason = reason;
+  __imp__sub_8223F9F0(ctx, base);
+  // The dialog is polled each frame. Log once until it closes, then allow a
+  // later attempt to report the same failure again.
+  if (ctx.r3.u32) previous_reason = std::numeric_limits<uint32_t>::max();
 }
 
 extern "C" void sub_82252A98(PPCContext& ctx, uint8_t* base) {

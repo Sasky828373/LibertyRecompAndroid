@@ -88,6 +88,7 @@ TEST_CASE("GTA IV unified anti-aliasing exposes only canonical public values") {
   CHECK(ParseAntiAliasingMode("smaa") == AntiAliasingMode::kSmaa);
   CHECK(ParseAntiAliasingMode("msaa2x") == AntiAliasingMode::kMsaa2x);
   CHECK(ParseAntiAliasingMode("msaa4x") == AntiAliasingMode::kMsaa4x);
+  CHECK(ParseAntiAliasingMode("msaa4x_smaa") == AntiAliasingMode::kMsaa4xSmaa);
   CHECK(ParseAntiAliasingMode("ssaa2x") == AntiAliasingMode::kSsaa2x);
   CHECK(ParseAntiAliasingMode("ssaa4x") == AntiAliasingMode::kSsaa4x);
   CHECK(ParseAntiAliasingMode("ssaa6x") == AntiAliasingMode::kSsaa6x);
@@ -127,15 +128,15 @@ TEST_CASE("GTA IV unified anti-aliasing resolves legacy configurations determini
         AntiAliasingMode::kOff);
 }
 
-TEST_CASE("GTA IV unified anti-aliasing routes exactly one implementation") {
+TEST_CASE("GTA IV unified anti-aliasing routes supported stage combinations") {
   for (AntiAliasingMode mode : {AntiAliasingMode::kOff, AntiAliasingMode::kFxaa,
                                 AntiAliasingMode::kSmaa, AntiAliasingMode::kMsaa2x,
                                 AntiAliasingMode::kMsaa4x, AntiAliasingMode::kSsaa2x,
                                 AntiAliasingMode::kSsaa4x, AntiAliasingMode::kSsaa6x,
                                 AntiAliasingMode::kSsaa8x, AntiAliasingMode::kSsaa10x,
                                 AntiAliasingMode::kSsaa12x, AntiAliasingMode::kSsaa14x,
-                                AntiAliasingMode::kSsaa16x}) {
-    CHECK(HasExclusiveAntiAliasingRoute(GetAntiAliasingRoute(mode)));
+                                AntiAliasingMode::kSsaa16x, AntiAliasingMode::kMsaa4xSmaa}) {
+    CHECK(IsValidAntiAliasingRoute(GetAntiAliasingRoute(mode)));
   }
 
   const auto off = GetAntiAliasingRoute(AntiAliasingMode::kOff);
@@ -182,6 +183,40 @@ TEST_CASE("GTA IV unified anti-aliasing applies only topology-compatible changes
                                       AntiAliasingMode::kSsaa4x));
   CHECK_FALSE(CanApplyAntiAliasingLive(AntiAliasingMode::kSsaa16x,
                                       AntiAliasingMode::kOff));
+}
+
+
+TEST_CASE("GTA IV hybrid AA composes four scene samples with one SMAA output route") {
+  constexpr auto hybrid = AntiAliasingMode::kMsaa4xSmaa;
+  const auto route = GetAntiAliasingRoute(hybrid);
+  CHECK(AntiAliasingModeName(hybrid) == "msaa4x_smaa");
+  CHECK(UsesSceneMsaa(hybrid)); CHECK(UsesSceneTopology(hybrid));
+  CHECK_FALSE(UsesSceneSupersampling(hybrid));
+  CHECK(route.scene_sample_count == 4); CHECK(route.presentation_smaa);
+  CHECK_FALSE(route.presentation_fxaa); CHECK(route.supersampling_pixel_factor == 1);
+  CHECK(IsValidAntiAliasingRoute(route));
+  for (const auto legacy : {"original", "off", "2x", "4x"})
+    for (bool unified : {false, true}) for (bool spatial : {false, true}) {
+      const auto resolved = ResolveAntiAliasingConfiguration("msaa4x_smaa", legacy, spatial, unified);
+      CHECK(resolved.mode == hybrid); CHECK(resolved.compatibility == AntiAliasingCompatibility::kCanonical);
+    }
+  CHECK(CanApplyAntiAliasingLive(AntiAliasingMode::kMsaa4x, hybrid));
+  CHECK(CanApplyAntiAliasingLive(hybrid, AntiAliasingMode::kMsaa4x));
+  for (auto other : {AntiAliasingMode::kOff, AntiAliasingMode::kFxaa,
+                     AntiAliasingMode::kSmaa, AntiAliasingMode::kMsaa2x,
+                     AntiAliasingMode::kSsaa4x, AntiAliasingMode::kSsaa16x}) {
+    CHECK_FALSE(CanApplyAntiAliasingLive(hybrid, other));
+    CHECK_FALSE(CanApplyAntiAliasingLive(other, hybrid));
+  }
+  CHECK_FALSE(ParseAntiAliasingMode("msaa8x").has_value());
+  CHECK_FALSE(ParseAntiAliasingMode("smaa4x").has_value());
+  CHECK_FALSE(IsValidAntiAliasingRoute({true, true, 4, 1}));
+  CHECK_FALSE(IsValidAntiAliasingRoute({true, false, 4, 1}));
+  CHECK_FALSE(IsValidAntiAliasingRoute({false, true, 2, 1}));
+  CHECK_FALSE(IsValidAntiAliasingRoute({false, true, 4, 4}));
+  CHECK_FALSE(IsValidAntiAliasingRoute({false, true, 8, 1}));
+  CHECK_FALSE(IsValidAntiAliasingRoute({false, false, 0, 1}));
+  CHECK_FALSE(IsValidAntiAliasingRoute({false, false, 1, 3}));
 }
 
 TEST_CASE("GTA IV SSAA accepts only even total pixel factors") {

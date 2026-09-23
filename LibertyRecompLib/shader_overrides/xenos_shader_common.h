@@ -51,6 +51,8 @@ struct PushConstants
 #define g_AlphaThreshold            vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 580)
 #define g_conditionalSurveyIndex    vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 584)
 #define g_conditionalRenderingIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 588)
+#define g_AlphaToMaskSampleCount    vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 740)
+#define g_AlphaToMask               vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 736)
 #else
 #define g_Booleans                  vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 320)
 #define g_SwappedTexcoords          vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 324)
@@ -160,6 +162,52 @@ uint g_SpecConstants();
 
 #ifndef GTA4_RECOMP
 #define GetTextureLodBias(SLOT) 0.0
+#endif
+
+#if defined(GTA4_RECOMP) && defined(__spirv__)
+uint ComputeXenosAlphaToMask(float alpha, float2 position, uint alphaToMask,
+                             uint sampleCount)
+{
+    if ((alphaToMask & 0x100u) == 0u)
+        return 0xFFFFFFFFu;
+
+    uint offsetIndex = (uint(position.x) & 1u) | ((uint(position.y) & 1u) << 1u);
+    uint offset = (alphaToMask >> (offsetIndex << 1u)) & 3u;
+    float thresholdOffset = float(offset);
+    uint sampleMask = 0u;
+
+    if (sampleCount == 1u)
+    {
+        if (alpha >= 1.0 - thresholdOffset * 0.25)
+            sampleMask |= 1u;
+    }
+    else if (sampleCount == 2u)
+    {
+        // Xenos top and bottom samples map to Vulkan samples 1 and 0.
+        if (alpha >= 0.5 - thresholdOffset * 0.125)
+            sampleMask |= 2u;
+        if (alpha >= 1.0 - thresholdOffset * 0.125)
+            sampleMask |= 1u;
+    }
+    else if (sampleCount == 4u)
+    {
+        // Xenos TL, BL, TR, BR map to Vulkan TL, TR, BL, BR.
+        if (alpha >= 0.75 - thresholdOffset * 0.0625)
+            sampleMask |= 1u;
+        if (alpha >= 0.25 - thresholdOffset * 0.0625)
+            sampleMask |= 4u;
+        if (alpha >= 0.5 - thresholdOffset * 0.0625)
+            sampleMask |= 2u;
+        if (alpha >= 1.0 - thresholdOffset * 0.0625)
+            sampleMask |= 8u;
+    }
+    else
+    {
+        return 0xFFFFFFFFu;
+    }
+
+    return sampleMask;
+}
 #endif
 
 float4 cube(float4 value)

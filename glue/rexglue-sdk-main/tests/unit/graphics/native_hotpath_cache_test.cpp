@@ -107,9 +107,11 @@ TEST_CASE("Ordered and out-of-order constant reconstruction match complete snaps
 #define SHARED_SCALARS(X) \
  X(boolean_version.epoch) X(boolean_version.revision) X(image_descriptor_epoch) X(sampler_descriptor_epoch) \
  X(cached_descriptor_epoch) X(environmental_data_hash) X(environmental_sequence) X(device) \
+ X(tone_lut_address) X(cloud_mask_address) X(cloud_mask_width) X(cloud_mask_height) \
+ X(modern_effects_enabled) X(water_reflection) \
  X(descriptor_copy) X(descriptor_page) X(width) X(height) X(logical_width) X(logical_height) \
  X(sample_count) X(alpha_reference_bits) X(alpha_to_mask) X(color_output_mask) X(clip_plane_enable_mask) \
- X(vertex_booleans) X(pixel_booleans) X(descriptor_backend) X(environment_present)
+ X(vertex_booleans) X(pixel_booleans) X(descriptor_backend) X(environment_present) X(split_postfx_applied)
 TEST_CASE("Single-pass shared key includes every semantic field without struct padding", "[hotpath]") {
   using Key=SharedConstantSemanticKey<16>;Key original{};const auto words=NativeSharedKeyWords(original);
 #define X(field) {auto changed=original;++changed.field;REQUIRE(NativeSharedKeyWords(changed)!=words);}
@@ -120,6 +122,7 @@ TEST_CASE("Single-pass shared key includes every semantic field without struct p
     c=original;c.sampler_lod_bias_bits[i]=0x80000000u;REQUIRE(NativeSharedKeyWords(c)!=words);}
   for(size_t i=0;i<4;++i){auto c=original;++c.color_output_info[i];REQUIRE(NativeSharedKeyWords(c)!=words);
     c=original;c.clip_plane_bits[i]=0x7FC00001u;REQUIRE(NativeSharedKeyWords(c)!=words);}
+  for(size_t i=0;i<original.viewport_bits.size();++i){auto c=original;++c.viewport_bits[i];REQUIRE(NativeSharedKeyWords(c)!=words);}
   Key a,b;std::memset(&a,0xA5,sizeof(a));std::memset(&b,0x5A,sizeof(b));
 #define X(field) a.field=original.field;b.field=original.field;
   SHARED_SCALARS(X)
@@ -129,6 +132,7 @@ TEST_CASE("Single-pass shared key includes every semantic field without struct p
   a.sampler_lod_bias_bits=b.sampler_lod_bias_bits=original.sampler_lod_bias_bits;
   a.color_output_info=b.color_output_info=original.color_output_info;
   a.clip_plane_bits=b.clip_plane_bits=original.clip_plane_bits;
+  a.viewport_bits=b.viewport_bits=original.viewport_bits;
   REQUIRE(a==b);REQUIRE(NativeSharedKeyWords(a)==NativeSharedKeyWords(b));
 }
 #undef SHARED_SCALARS
@@ -185,6 +189,50 @@ TEST_CASE("Incremental queue protection equals brute-force scans across streamin
   for(const auto& command:queue)for(auto g:command)REQUIRE(queued.Release(g));
   REQUIRE(queued.size()==0);REQUIRE_FALSE(queued.Release(7));REQUIRE_FALSE(queued.valid());
   queued.Reset();REQUIRE(queued.valid());REQUIRE(queued.size()==0);
+}
+TEST_CASE("Queued DoF inputs survive replacement until their last composite retires", "[hotpath][memory][dof]") {
+  struct Texture {
+    uint64_t generation;
+    std::shared_ptr<const Texture> packed_depth_source;
+  };
+  struct Command {
+    std::shared_ptr<const Texture> resolve_destination, depth_handoff_source, present_source;
+    std::shared_ptr<const Texture> postfx_half_scene;
+    std::array<std::shared_ptr<const Texture>, 3> textures{};
+  };
+  auto old_half = std::make_shared<Texture>(Texture{101, {}});
+  Command old_draw; old_draw.postfx_half_scene = old_half;
+  Command duplicate = old_draw;
+  // The newer draw reuses the guest name but has a distinct resolved generation.
+  Command new_draw; new_draw.postfx_half_scene = std::make_shared<Texture>(Texture{102, {}});
+  NativeTextureProtectionIndex queued;
+  auto retain = [&](const Command& draw) {
+    VisitNativeCommandTextureGenerations(draw, [&](uint64_t g) { REQUIRE(queued.Retain(g)); });
+  };
+  auto release = [&](const Command& draw) {
+    VisitNativeCommandTextureGenerations(draw, [&](uint64_t g) { REQUIRE(queued.Release(g)); });
+  };
+  retain(old_draw); retain(duplicate); retain(new_draw);
+  REQUIRE(queued.Contains(101)); REQUIRE(queued.Contains(102));
+  old_half.reset(); // Producer replacement/release cannot unprotect queued input.
+  std::unordered_set<uint64_t> frame;
+  VisitNativeCommandTextureGenerations(old_draw, [&](uint64_t g) { frame.insert(g); });
+  release(old_draw);
+  REQUIRE(frame.contains(101)); REQUIRE(queued.Contains(101));
+  release(duplicate);
+  REQUIRE_FALSE(queued.Contains(101)); REQUIRE(frame.contains(101));
+  frame.clear();
+  REQUIRE(queued.Contains(102));
+  release(new_draw); REQUIRE(queued.size() == 0); REQUIRE(queued.valid());
+
+  // Sharing the input with a title sampler must balance both references, and
+  // packed-depth dependencies must retain the same protection as other inputs.
+  Command aliased;
+  aliased.postfx_half_scene = std::make_shared<Texture>(Texture{103, new_draw.postfx_half_scene});
+  aliased.textures[2] = aliased.postfx_half_scene;
+  retain(aliased);
+  REQUIRE(queued.Contains(103)); REQUIRE(queued.Contains(102));
+  release(aliased); REQUIRE(queued.size() == 0); REQUIRE(queued.valid());
 }
 TEST_CASE("POD frame maps discard old allocation identities after every reset", "[hotpath][memory]") {
   FrameGenerationMap<uint64_t,Allocation> map;

@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "graphics/gta4_native/shader_override_policy.h"
+#include "graphics/gta4_native/modern_shader_policy.h"
 
 namespace rex::graphics::gta4_native {
 namespace {
@@ -108,6 +109,13 @@ TEST_CASE("GTA IV stock mode disables every override candidate",
   STATIC_CHECK_FALSE(selected.vertex_override);
   STATIC_CHECK_FALSE(selected.pixel_override);
   STATIC_CHECK(selected.variant_key == 0);
+}
+
+TEST_CASE("GTA IV authored motion blur override is independent of Modern Shaders",
+          "[gta4-native][graphics][shader-overrides][motion-blur]") {
+  constexpr uint64_t motion_blur = 0xEE75C9F6AA1AB16Aull;
+  STATIC_CHECK(AllowModernShader(motion_blur, {false, false}));
+  STATIC_CHECK(AllowModernShader(motion_blur, {true, false}));
 }
 
 }  // namespace rex::graphics::gta4_native

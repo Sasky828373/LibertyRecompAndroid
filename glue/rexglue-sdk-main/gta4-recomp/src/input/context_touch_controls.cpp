@@ -25,12 +25,18 @@
 
 #include "gta4_touch_coordinator.h"
 #include "input/context_touch_context.h"
+#include "input/context_touch_activity.h"
 #include "input/context_touch_fade.h"
 #include "input/context_touch_settings.h"
 
 REXCVAR_DECLARE(bool, gta4_touch_trace);
 
 namespace gta4::input {
+bool ContextTouchHudLayoutActive() noexcept {
+  return GetContextTouchDrawableOverlaySnapshot().visible ||
+         GetContextTouchOverlaySnapshot().visible || IsContextTouchEditorActive();
+}
+
 namespace {
 
 // Generated sub_822B7DD0 and the action decoders use this record layout.
@@ -113,6 +119,7 @@ struct PointerOwner {
   bool editing = false;
   bool wheel_opened = false;
   bool wheel_consumed = false;
+  int8_t weapon_swipe = 0;
 };
 
 struct NativePulse {
@@ -153,6 +160,9 @@ struct RuntimeState {
   uint64_t last_drawable_ns = 0;
   ContextTouchFade fade{};
   ContextTouchOverlaySnapshot last_drawable{};
+  std::shared_ptr<const ContextTouchLayout> outgoing_layout;
+  uint64_t layout_transition_started_ns = 0;
+  static constexpr uint64_t kLayoutTransitionNanoseconds = 150000000;
   bool weapon_wheel_open = false;
   uint32_t weapon_target = kNoWeaponSelection;
   uint32_t weapon_last_slot = kNoWeaponSelection;
@@ -181,6 +191,11 @@ struct RuntimeState {
   rex::input::mnk::MouseAxisQuantizer look_quantizer_y;
   rex::input::mnk::MouseAxisQuantizer zoom_quantizer;
   TouchNativePadState native_pad{};
+  // Activity vectors are private script input. They never enter pad replay.
+  std::array<TouchActivityGestureState, 2> activity_gestures{};
+  TouchActivityGestureOutput activity_frame{};
+  uint32_t activity_previous_buttons = 0;
+  uint32_t activity_pressed_buttons = 0;
   bool initialized = false;
 };
 
@@ -265,7 +280,7 @@ bool IsCamera(const ContextTouchControl& control) {
 }
 
 bool SameControlIdentity(const ContextTouchControl& a, const ContextTouchControl& b) {
-  if (a.action != b.action || a.kind != b.kind) return false;
+  if (a.action != b.action || a.kind != b.kind || a.activity_gesture != b.activity_gesture || a.native_hud != b.native_hud) return false;
   if (a.action == TouchAction::kWeaponSelect) return a.weapon_slot == b.weapon_slot;
   if (a.kind == ContextTouchControlKind::kScriptButton ||
       a.script.kind == TouchScriptQueryKind::kAnalogueSticks ||
@@ -294,7 +309,14 @@ void ResetPinchLocked() {
   g_runtime.zoom_delta = 0.0;
 }
 
+size_t ActivityGestureIndex(const ContextTouchControl& control) {
+  return control.action == TouchAction::kActivitySecondary ? 1 : 0;
+}
+
 void CancelAllLocked() {
+  for (auto& gesture : g_runtime.activity_gestures) gesture.Cancel();
+  g_runtime.activity_frame = {};
+  g_runtime.activity_previous_buttons = g_runtime.activity_pressed_buttons = 0;
   g_runtime.pointers.clear();
   g_runtime.key_latch.Cancel();
   g_runtime.script_refcounts.clear();
@@ -319,6 +341,8 @@ void CancelAllLocked() {
 }
 
 void HideGameplayLocked() {
+  g_runtime.outgoing_layout.reset();
+  g_runtime.layout_transition_started_ns = 0;
   g_runtime.awaiting_gameplay_poll = true;
   CancelAllLocked();
   g_runtime.fade.Reset();
@@ -338,6 +362,8 @@ void SuspendGameplayLocked() {
 }
 
 void CancelOwnerLocked(uint64_t pointer_id, const PointerOwner& owner) {
+  if (owner.control.kind == ContextTouchControlKind::kActivitySurface)
+    g_runtime.activity_gestures[ActivityGestureIndex(owner.control)].Cancel();
   if (!owner.editing) {
     ReleaseControlLocked(owner.control, true);
     if (owner.composite_fire) ReleaseControlLocked(owner.fire_control, true);
@@ -406,7 +432,7 @@ bool GameplayPresentationAdmittedLocked(const TouchContextSnapshot& context) {
       context.presentation_revision != ContextTouchPresentationRevision() ||
       context.player_identity != g_runtime.context.player_identity ||
       context.input_user != g_runtime.context.input_user) return false;
-  if (context.gameplay_allowed || context.minigame_active) return true;
+  if (context.gameplay_allowed || context.minigame_active || context.activity.valid) return true;
   const bool parachute = g_runtime.parachute_generation == context.generation &&
       EpochWithin(g_runtime.epoch, g_runtime.parachute_last_seen_epoch, kScriptQueryExpiryEpochs) &&
       (g_runtime.parachute_state == kParachuteFreefallState ||
@@ -502,7 +528,24 @@ void RefreshLayoutLocked(uint64_t epoch, bool frontend, bool map) {
                                  map != g_runtime.context.map;
   const bool geometry_changed = !ContextTouchLayoutEquivalent(
       {.viewport = g_runtime.layout.viewport}, {.viewport = viewport});
-  if (context_changed || native_ui_changed || geometry_changed || editing != g_runtime.editing ||
+  const bool activity_changed = !CompatibleActivityContacts(g_runtime.context.activity, context.activity);
+  if (geometry_changed || native_ui_changed || editing) {
+    g_runtime.outgoing_layout.reset();
+  } else if (activity_changed && g_runtime.layout.mode != ContextTouchMode::kDisabled &&
+             context.valid && context.native_input_allowed && !context.loading && !context.cutscene &&
+             (g_runtime.context.activity.valid || context.activity.valid)) {
+    g_runtime.outgoing_layout = std::make_shared<const ContextTouchLayout>(g_runtime.layout);
+    g_runtime.layout_transition_started_ns = std::max(MonotonicNanoseconds(), g_runtime.last_drawable_ns);
+  }
+  if (activity_changed) {
+    g_runtime.script_availability.clear();
+    if (REXCVAR_GET(gta4_touch_trace)) {
+      REXLOG_INFO("gta4-touch-activity: epoch={} script={} kind={} phase={} profile={} input-owner-changed",
+          epoch, context.activity.script_thread, TouchActivityName(context.activity.kind),
+          TouchActivityPhaseName(context.activity.phase), context.activity.profile);
+    }
+  }
+  if (context_changed || activity_changed || native_ui_changed || geometry_changed || editing != g_runtime.editing ||
       preferences.left_handed != g_runtime.preferences.left_handed ||
       preferences.floating_stick != g_runtime.preferences.floating_stick) {
     CancelAllLocked();
@@ -534,7 +577,11 @@ void RefreshLayoutLocked(uint64_t epoch, bool frontend, bool map) {
           mode = ContextTouchMode::kParachuteFreefall;
         else if (g_runtime.parachute_state == kParachuteDeployedState)
           mode = ContextTouchMode::kParachuteDeployed;
-      } else if (context.minigame_active || !context.gameplay_allowed) mode = ContextTouchMode::kMinigame;
+      } else if (context.activity.valid && context.activity.native_combat) {
+        mode = ContextTouchMode::kOnFoot;
+      } else if (context.activity.valid || context.minigame_active || !context.gameplay_allowed) {
+        mode = ContextTouchMode::kMinigame;
+      }
     }
   }
   const bool scoped = !g_runtime.editor_session && context.gameplay_allowed && mode == ContextTouchMode::kOnFoot &&
@@ -547,14 +594,15 @@ void RefreshLayoutLocked(uint64_t epoch, bool frontend, bool map) {
     g_runtime.zoom_quantizer.Reset();
   }
   g_runtime.scoped_zoom = scoped;
-  if (!context.inventory_known || !context.gameplay_allowed || mode != ContextTouchMode::kOnFoot) {
+  if (!context.inventory_known || !context.gameplay_allowed || context.phone_visible ||
+      context.activity.valid || mode != ContextTouchMode::kOnFoot) {
     g_runtime.weapon_wheel_open = false;
     g_runtime.weapon_target = kNoWeaponSelection;
   } else if (!g_runtime.editing) {
     for (auto& [id, owner] : g_runtime.pointers) {
       (void)id;
       if (owner.control.action == TouchAction::kWeaponWheel &&
-          !owner.wheel_consumed && owner.held_seconds >= kWeaponWheelHoldSeconds) {
+          !owner.wheel_consumed && !owner.weapon_swipe && owner.held_seconds >= kWeaponWheelHoldSeconds) {
         g_runtime.weapon_wheel_open = true;
         owner.wheel_opened = true;
       }
@@ -571,11 +619,15 @@ void RefreshLayoutLocked(uint64_t epoch, bool frontend, bool map) {
           (context.alternate_aim_setting ? context.aim_threshold != 0
                                         : context.aim_threshold == 0 || context.aim_threshold > 11)),
       .in_cover = context.cover_known && context.in_cover,
-      .melee = context.melee_known && context.melee,
+      .melee = (context.melee_known && context.melee) || context.activity.native_combat,
       .scoped_zoom = scoped,
       .can_enter_vehicle = editing || context.can_enter_vehicle,
       .editing = editing,
       .weapon_wheel_open = g_runtime.weapon_wheel_open,
+      .activity = enabled && !editing ? context.activity : TouchActivitySnapshot{},
+      .context_generation = context.generation,
+      .current_weapon_slot = context.weapon_slot,
+      .inventory_known = context.inventory_known,
       .left_handed = preferences.left_handed,
       .button_scale = preferences.button_scale,
       .opacity = preferences.opacity,
@@ -593,8 +645,10 @@ void RefreshLayoutLocked(uint64_t epoch, bool frontend, bool map) {
   }
   auto next = BuildContextTouchLayout(mode, viewport, scripts, options);
   if (!g_runtime.editor_session && !GameplayPresentationAdmittedLocked(context)) HideGameplayLocked();
-  ApplyContextTouchSavedLayout(next);
-  ApplyContextTouchHudReservation(next, options.weapon_hud_bounds);
+  if (!next.activity.valid || next.activity.native_combat) {
+    ApplyContextTouchSavedLayout(next);
+    ApplyContextTouchHudReservation(next, options.weapon_hud_bounds);
+  }
   if (mode != g_runtime.layout.mode) CancelAllLocked();
   for (auto it = g_runtime.pointers.begin(); it != g_runtime.pointers.end();) {
     auto& owner = it->second;
@@ -643,7 +697,12 @@ size_t FindControlLocked(float x, float y) {
   const auto& layout = g_runtime.layout;
   for (size_t i = 0; i < layout.control_count; ++i) {
     const auto& c = layout.controls[i];
-    if (c.visible && c.kind != ContextTouchControlKind::kLookSurface && PointInside(c, x, y)) return i;
+    if (c.visible && c.kind != ContextTouchControlKind::kLookSurface &&
+        c.kind != ContextTouchControlKind::kActivitySurface && PointInside(c, x, y)) return i;
+  }
+  for (size_t i = 0; i < layout.control_count; ++i) {
+    const auto& c = layout.controls[i];
+    if (c.visible && c.kind == ContextTouchControlKind::kActivitySurface && PointInside(c, x, y)) return i;
   }
   const auto& v = layout.viewport;
   if (!g_runtime.editing && g_runtime.preferences.floating_stick &&
@@ -675,6 +734,11 @@ bool ControlAlreadyOwnedLocked(const ContextTouchControl& control) {
       tail |= owner.pinch_member;
     }
     return cameras >= 2 || tail;
+  }
+  if (control.kind == ContextTouchControlKind::kActivitySurface || control.action == TouchAction::kWeaponWheel) {
+    return std::any_of(g_runtime.pointers.begin(), g_runtime.pointers.end(), [&](const auto& item) {
+      return item.second.control.kind == control.kind && item.second.control.action == control.action;
+    });
   }
   if (!IsStick(control) && control.kind != ContextTouchControlKind::kLookSurface) return false;
   return std::any_of(g_runtime.pointers.begin(), g_runtime.pointers.end(), [&](const auto& item) {
@@ -773,7 +837,16 @@ void UpdateCompositeLocked(PointerOwner& owner, uint64_t epoch) {
   }
 }
 
-void UpdateOwnerPositionLocked(PointerOwner& owner, float x, float y, uint64_t epoch) {
+void UpdateOwnerPositionLocked(PointerOwner& owner, float x, float y, uint64_t epoch,
+                               uint64_t timestamp_ns) {
+  if (!owner.editing && owner.control.kind == ContextTouchControlKind::kActivitySurface)
+    g_runtime.activity_gestures[ActivityGestureIndex(owner.control)].Move(x, y, timestamp_ns);
+  if (!owner.editing && owner.control.action == TouchAction::kWeaponWheel &&
+      !owner.wheel_opened && !owner.wheel_consumed && !owner.weapon_swipe) {
+    const double dx = double(x) - owner.start_x, dy = double(y) - owner.start_y;
+    if (std::abs(dx) > owner.control.radius * 0.6 && std::abs(dx) > std::abs(dy) * 1.4)
+      owner.weapon_swipe = dx < 0 ? -1 : 1;
+  }
   if (!owner.editing && IsCamera(owner.control) && !owner.pinch_member) {
     owner.look_dx += double(x) - owner.x;
     owner.look_dy += double(y) - owner.y;
@@ -818,21 +891,19 @@ void ReleaseWeaponWheelLocked(const PointerOwner& owner, uint64_t pointer_id, ui
   }
   if (owner.wheel_consumed) return;
   if (!g_runtime.weapon_wheel_open) {
-    if (owner.wheel_opened) return;
+    if (owner.wheel_opened || (!owner.weapon_swipe &&
+        std::abs(owner.y - owner.start_y) > owner.control.radius * 0.6f)) return;
     ContextTouchControl cycle;
     cycle.action = TouchAction::kWeaponNext;
     cycle.kind = ContextTouchControlKind::kNativeButton;
-    cycle.pad_buttons = rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT;
+    cycle.pad_buttons = owner.weapon_swipe < 0 ? rex::input::X_INPUT_GAMEPAD_DPAD_LEFT
+                                               : rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT;
     g_runtime.native_pulses.push_back({pointer_id, epoch, cycle});
     return;
   }
-  for (size_t i = 0; i < g_runtime.layout.control_count; ++i) {
-    const auto& control = g_runtime.layout.controls[i];
-    if (control.visible && control.action == TouchAction::kWeaponSelect &&
-        PointInside(control, owner.x, owner.y)) {
-      SelectWeaponLocked(control.weapon_slot);
-      return;
-    }
+  if (const auto slot = TouchWeaponWheelSelection(g_runtime.layout, owner.x, owner.y)) {
+    SelectWeaponLocked(*slot);
+    return;
   }
   g_runtime.weapon_wheel_open = false;
 }
@@ -858,7 +929,7 @@ bool OnPointerEvent(const rex::input::AbsolutePointerEvent& event, PPCContext&, 
   auto pointer = g_runtime.pointers.find(event.pointer_id);
   if (pointer != g_runtime.pointers.end() && !g_runtime.weapon_wheel_open &&
       pointer->second.control.action == TouchAction::kWeaponWheel &&
-      !pointer->second.wheel_consumed &&
+      !pointer->second.wheel_consumed && !pointer->second.weapon_swipe &&
       g_runtime.context.inventory_known &&
       event.timestamp_ns >= pointer->second.down_timestamp_ns &&
       event.timestamp_ns - pointer->second.down_timestamp_ns >= kWeaponWheelHoldNanoseconds) {
@@ -890,6 +961,10 @@ bool OnPointerEvent(const rex::input::AbsolutePointerEvent& event, PPCContext&, 
                        .start_x = x, .start_y = y, .x = x, .y = y,
                        .editing = g_runtime.editing};
     g_runtime.pointers.emplace(event.pointer_id, owner);
+    if (!owner.editing && control.kind == ContextTouchControlKind::kActivitySurface) {
+      g_runtime.activity_gestures[ActivityGestureIndex(control)].Begin(control.activity_gesture,
+          x, y, control.center_x, control.center_y, control.radius, event.timestamp_ns);
+    }
     if (!owner.editing) {
       PressControlLocked(control, epoch);
       if (IsNative(control) || control.action == TouchAction::kZoomIn ||
@@ -903,7 +978,7 @@ bool OnPointerEvent(const rex::input::AbsolutePointerEvent& event, PPCContext&, 
   if (pointer == g_runtime.pointers.end()) return false;
   auto& owner = pointer->second;
   const bool cancelled = event.phase == rex::input::AbsolutePointerPhase::kCancel || !finite;
-  if (!cancelled) UpdateOwnerPositionLocked(owner, x, y, epoch);
+  if (!cancelled) UpdateOwnerPositionLocked(owner, x, y, epoch, event.timestamp_ns);
   if (event.phase == rex::input::AbsolutePointerPhase::kMove && !cancelled) {
     RecalculateAxesLocked();
     return true;
@@ -914,6 +989,8 @@ bool OnPointerEvent(const rex::input::AbsolutePointerEvent& event, PPCContext&, 
         owner.control.action == TouchAction::kWeaponSelect) g_runtime.weapon_wheel_open = false;
   } else {
     if (!owner.editing) {
+      if (owner.control.kind == ContextTouchControlKind::kActivitySurface)
+        g_runtime.activity_gestures[ActivityGestureIndex(owner.control)].Release(event.timestamp_ns);
       ReleaseControlLocked(owner.control, false);
       if (owner.composite_fire) ReleaseControlLocked(owner.fire_control, true);
       if (IsCamera(owner.control) && !owner.pinch_member) {
@@ -1055,6 +1132,20 @@ void MergeWeaponSelectionLocked(TouchNativePadState& pad, uint64_t epoch) {
 void FreezeLocked(uint64_t epoch) {
   if (g_runtime.frozen_epoch == epoch) return;
   g_runtime.frozen_epoch = epoch;
+  g_runtime.activity_frame = {};
+  if (g_runtime.context.activity.valid && !g_runtime.context.activity.native_combat &&
+      !g_runtime.editor_session && g_runtime.layout.mode != ContextTouchMode::kDisabled) {
+    const auto now = MonotonicNanoseconds();
+    for (auto& gesture : g_runtime.activity_gestures) {
+      const auto sample = gesture.Sample(now, g_runtime.frame_seconds);
+      g_runtime.activity_frame.raw_buttons |= sample.raw_buttons;
+      for (size_t i = 0; i < sample.axes.size(); ++i)
+        if (std::abs(sample.axes[i]) > std::abs(g_runtime.activity_frame.axes[i]))
+          g_runtime.activity_frame.axes[i] = sample.axes[i];
+    }
+  }
+  g_runtime.activity_pressed_buttons = g_runtime.activity_frame.raw_buttons & ~g_runtime.activity_previous_buttons;
+  g_runtime.activity_previous_buttons = g_runtime.activity_frame.raw_buttons;
   double dx = std::exchange(g_runtime.completed_look_x, 0.0);
   double dy = std::exchange(g_runtime.completed_look_y, 0.0);
   for (auto& [id, owner] : g_runtime.pointers) {
@@ -1100,10 +1191,12 @@ void FreezeLocked(uint64_t epoch) {
         if (g_runtime.scoped_zoom && pulse.control.action == TouchAction::kZoomOut) g_runtime.zoom = 255;
       }
     }
-    pad.left_x = NativeAxis(g_runtime.movement_x);
-    pad.left_y = NativeAxis(-g_runtime.movement_y);
-    pad.right_x = NativeAxis(g_runtime.right_x);
-    pad.right_y = NativeAxis(-g_runtime.right_y);
+    if (!g_runtime.context.activity.valid || g_runtime.context.activity.native_combat) {
+      pad.left_x = NativeAxis(g_runtime.movement_x);
+      pad.left_y = NativeAxis(-g_runtime.movement_y);
+      pad.right_x = NativeAxis(g_runtime.right_x);
+      pad.right_y = NativeAxis(-g_runtime.right_y);
+    }
     MergeWeaponSelectionLocked(pad, epoch);
   }
   g_runtime.native_pad = pad;
@@ -1280,6 +1373,8 @@ void ShutdownContextTouchControls() noexcept {
   SetContextTouchEditorOpen(false);
   g_runtime.fade.Reset();
   g_runtime.last_drawable = {};
+  g_runtime.outgoing_layout.reset();
+  g_runtime.layout_transition_started_ns = 0;
   g_runtime.initialized = false;
 }
 
@@ -1313,6 +1408,15 @@ bool ContextTouchGameplayInputAdmitted() noexcept {
   std::lock_guard lock(g_runtime.mutex);
   return g_runtime.initialized && !g_runtime.editor_session &&
       GameplayPresentationAdmittedLocked(context);
+}
+
+bool ContextTouchWeaponHudSelectorActive() noexcept {
+  std::lock_guard lock(g_runtime.mutex);
+  if (!g_runtime.initialized || g_runtime.editing || g_runtime.layout.mode != ContextTouchMode::kOnFoot)
+    return false;
+  return std::any_of(g_runtime.layout.controls.begin(),
+      g_runtime.layout.controls.begin() + g_runtime.layout.control_count,
+      [](const auto& c) { return c.visible && c.native_hud && c.action == TouchAction::kWeaponWheel; });
 }
 
 bool ContextTouchWeaponCycleAdmitted() noexcept {
@@ -1414,9 +1518,10 @@ ContextTouchOverlaySnapshot BuildOverlaySnapshotLocked() {
       }
     }
     if (owner.control.action == TouchAction::kWeaponWheel && g_runtime.weapon_wheel_open) {
-      for (size_t i = 0; i < snapshot.layout.control_count; ++i) {
+      const auto slot = TouchWeaponWheelSelection(snapshot.layout, owner.x, owner.y);
+      for (size_t i = 0; slot && i < snapshot.layout.control_count; ++i) {
         const auto& c = snapshot.layout.controls[i];
-        if (c.visible && c.action == TouchAction::kWeaponSelect && PointInside(c, owner.x, owner.y))
+        if (c.visible && c.action == TouchAction::kWeaponSelect && c.weapon_slot == *slot)
           snapshot.active[i] = 1;
       }
     }
@@ -1489,6 +1594,18 @@ ContextTouchOverlaySnapshot GetContextTouchDrawableOverlaySnapshot(uint64_t mono
   snapshot.fade_alpha = alpha;
   snapshot.visible = snapshot.visible && alpha > 0.0f;
   if (snapshot.visible) snapshot.layout.viewport = viewport;
+  if (g_runtime.outgoing_layout) {
+    monotonic_ns = std::max(monotonic_ns, g_runtime.layout_transition_started_ns);
+    const double fraction = std::clamp(double(monotonic_ns - g_runtime.layout_transition_started_ns) /
+        double(RuntimeState::kLayoutTransitionNanoseconds), 0.0, 1.0);
+    if (!visible || !ViewportGeometryMatches(g_runtime.outgoing_layout->viewport, viewport) || fraction >= 1.0) {
+      g_runtime.outgoing_layout.reset();
+    } else {
+      snapshot.outgoing_layout = g_runtime.outgoing_layout;
+      snapshot.outgoing_alpha = static_cast<float>(1.0 - fraction);
+      snapshot.layout_alpha = static_cast<float>(fraction);
+    }
+  }
   if (!visible && alpha == 0.0f) g_runtime.last_drawable = {};
   return snapshot;
 }
@@ -1553,6 +1670,15 @@ uint32_t GetTouchScriptQueryValue(TouchScriptQueryKind kind, uint32_t action,
   if (GTA4_TouchTitleInputOwned() || !rex::input::TouchControlsActive()) return 0;
   std::lock_guard lock(g_runtime.mutex);
   if (!script_thread || !ScriptQueryAllowedLocked(epoch, generation)) return 0;
+  if (g_runtime.context.activity.valid && !g_runtime.context.activity.native_combat) {
+    if (script_thread != g_runtime.context.activity.script_thread) return 0;
+    if (input_group == 0 && action < 32 &&
+        (kind == TouchScriptQueryKind::kRawButton || kind == TouchScriptQueryKind::kRawButtonPressed)) {
+      const uint32_t buttons = kind == TouchScriptQueryKind::kRawButtonPressed
+          ? g_runtime.activity_pressed_buttons : g_runtime.activity_frame.raw_buttons;
+      if (buttons & (uint32_t{1} << action)) return 1;
+    }
+  }
   const uint32_t parachute = ParachuteQueryValueLocked(kind, action, epoch, script_thread);
   if (parachute) return parachute;
   const auto key = CanonicalScriptKey({kind, action, input_group, script_thread, generation});
@@ -1572,6 +1698,11 @@ bool GetTouchScriptAnalogueSticks(uint64_t epoch, std::array<int32_t, 4>* axes,
   *axes = {};
   std::lock_guard lock(g_runtime.mutex);
   if (!script_thread || !ScriptQueryAllowedLocked(epoch, generation)) return false;
+  if (g_runtime.context.activity.valid && !g_runtime.context.activity.native_combat) {
+    if (script_thread != g_runtime.context.activity.script_thread || input_group != 0) return false;
+    *axes = g_runtime.activity_frame.axes;
+    return std::any_of(axes->begin(), axes->end(), [](int32_t v) { return v != 0; });
+  }
   const auto key = CanonicalScriptKey({TouchScriptQueryKind::kAnalogueSticks, 0,
                                        input_group, script_thread, generation});
   for (const auto& [id, owner] : g_runtime.pointers) {
@@ -1599,6 +1730,8 @@ bool GetTouchScriptAnalogueSticks(uint64_t epoch, std::array<int32_t, 4>* axes,
 
 bool MergeTouchScriptQueryResult(uint8_t* base, uint32_t call_context, TouchScriptQueryKind kind,
                                  uint64_t epoch, uint32_t script_thread, uint64_t generation) noexcept {
+  const auto activity = GetTouchContextSnapshot().activity;
+  if (activity.valid && !TouchActivityQueryMatches(base, activity)) return false;
   if (!base || !call_context || call_context > std::numeric_limits<uint32_t>::max() - 12) return false;
   const uint32_t result = LoadU32(base, call_context);
   const uint32_t arguments = LoadU32(base, call_context + 8);
@@ -1617,6 +1750,8 @@ bool MergeTouchScriptQueryResult(uint8_t* base, uint32_t call_context, TouchScri
 bool MergeTouchScriptAnalogueStickResults(uint8_t* base, uint32_t call_context,
                                           uint64_t epoch, uint32_t script_thread,
                                           uint64_t generation) noexcept {
+  const auto activity = GetTouchContextSnapshot().activity;
+  if (activity.valid && !TouchActivityQueryMatches(base, activity)) return false;
   if (!base || !call_context || call_context > std::numeric_limits<uint32_t>::max() - 12) return false;
   const uint32_t arguments = LoadU32(base, call_context + 8);
   if (!arguments || arguments > std::numeric_limits<uint32_t>::max() - 20) return false;

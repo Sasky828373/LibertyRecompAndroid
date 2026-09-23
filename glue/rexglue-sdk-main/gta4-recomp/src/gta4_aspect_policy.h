@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace gta4::aspect {
@@ -128,6 +129,50 @@ inline Transform TopLeftRadarLayout(Extent output, Rect authored,
                                     double safe_top = 0.0, double safe_bottom = 1.0) noexcept {
   return output.valid() ? TopLeftRadarViewport(authored, safe_top, safe_bottom, RadarLayout(output)) :
                          Transform{};
+}
+// A touch tutorial sits beside the relocated radar. Keep native font size and
+// wrap within the available space; controls (including an outgoing layout)
+// are obstacles in displayed, normalized guest coordinates.
+inline std::optional<Rect> TouchHelpArea(Rect radar, Rect safe, Point origin,
+                                        double width, Extent output,
+                                        std::span<const Rect> obstacles = {}) noexcept {
+  const auto valid = [](Rect r) {
+    return std::isfinite(r.left) && std::isfinite(r.top) &&
+           std::isfinite(r.right) && std::isfinite(r.bottom) &&
+           r.right > r.left && r.bottom > r.top;
+  };
+  if (!output.valid() || !valid(radar) || !valid(safe) ||
+      !std::isfinite(origin.y) || !std::isfinite(width) || width <= 0.0) return {};
+  const double pixels = std::min(output.width, output.height) * 0.016;
+  const double gx = pixels / output.width, gy = pixels / output.height;
+  const double left = std::max(safe.left + gx, radar.right + gx);
+  // Lower the tutorial slightly beside the radar, scaling with the short edge.
+  const double drop = std::min(output.width, output.height) * 0.05 / output.height;
+  const double top = std::max(safe.top + gy, origin.y) + drop;
+  const double height = std::max(radar.bottom - radar.top, gy * 8.0);
+  std::optional<Rect> best;
+  const auto consider = [&](double x, double y) {
+    if (y > radar.bottom || y + height > safe.bottom - gy) return;
+    Rect area{x, y, std::min(x + width, safe.right - gx), y + height};
+    for (const auto& obstacle : obstacles) {
+      if (!valid(obstacle) || obstacle.bottom + gy <= area.top ||
+          obstacle.top - gy >= area.bottom || obstacle.right + gx <= area.left) continue;
+      area.right = std::min(area.right, obstacle.left - gx);
+    }
+    if (valid(area) && (!best || area.right - area.left > best->right - best->left + 1e-7))
+      best = area;
+  };
+  consider(left, top);
+  // Prefer the chosen top line when it still has a readable column, instead
+  // of chasing a slightly wider space farther into the gameplay view.
+  if (best && best->right - best->left >= width * 0.7) return best;
+  // A mirrored/custom utility row can occupy the preferred start. Try below
+  // it while remaining alongside the radar, then the gaps to its right.
+  for (const auto& obstacle : obstacles)
+    if (valid(obstacle)) consider(left, std::max(top, obstacle.bottom + gy));
+  for (const auto& obstacle : obstacles)
+    if (valid(obstacle)) consider(std::max(left, obstacle.right + gx), top);
+  return best;
 }
 inline double ExpandVerticalFov(double authored_degrees, double aspect) noexcept {
   if (!std::isfinite(authored_degrees) || !std::isfinite(aspect) || authored_degrees <= 0 ||

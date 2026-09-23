@@ -77,8 +77,8 @@ class NativeImmutableBindings {
 // Equality remains the authoritative test after a hash match.
 template <size_t Stages>
 constexpr auto NativeSharedKeyWords(const SharedConstantSemanticKey<Stages>& key) {
-  // Three stage arrays plus 31 scalar words (verified by the field-coverage test).
-  std::array<uint64_t, Stages * 3 + 31> words{};
+  // Three stage arrays plus 44 words (verified by the field-coverage test).
+  std::array<uint64_t, Stages * 3 + 44> words{};
   size_t cursor = 0;
   const auto append = [&](uint64_t value) { words[cursor++] = value; };
   for (auto v : key.texture_descriptor_indices) append(v);
@@ -87,6 +87,10 @@ constexpr auto NativeSharedKeyWords(const SharedConstantSemanticKey<Stages>& key
   append(key.boolean_version.epoch); append(key.boolean_version.revision);
   append(key.image_descriptor_epoch); append(key.sampler_descriptor_epoch);
   append(key.cached_descriptor_epoch); append(key.environmental_data_hash); append(key.environmental_sequence);
+  append(key.tone_lut_address); append(key.cloud_mask_address);
+  append(key.cloud_mask_width); append(key.cloud_mask_height);
+  append(key.modern_effects_enabled); append(key.water_reflection);
+  for (auto v : key.viewport_bits) append(v);
   append(key.device); append(key.descriptor_copy); append(key.descriptor_page);
   append(key.width); append(key.height); append(key.logical_width); append(key.logical_height);
   append(key.sample_count); append(key.alpha_reference_bits); append(key.alpha_to_mask);
@@ -95,6 +99,7 @@ constexpr auto NativeSharedKeyWords(const SharedConstantSemanticKey<Stages>& key
   for (auto v : key.clip_plane_bits) append(v);
   append(key.clip_plane_enable_mask); append(key.vertex_booleans); append(key.pixel_booleans);
   append(key.descriptor_backend); append(key.environment_present);
+  append(key.split_postfx_applied);
   return words;
 }
 }  // namespace rex::graphics::gta4_native

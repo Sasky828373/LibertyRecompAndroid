@@ -456,6 +456,10 @@ void Presenter::OnSurfaceResizeFromUIThread() {
 }
 
 void Presenter::PaintFromUIThread(bool force_paint) {
+  PaintFromUIThreadImpl(force_paint, false);
+}
+
+void Presenter::PaintFromUIThreadImpl(bool force_paint, bool display_opportunity) {
   // If there is no surface, this will be a no-op, nothing outdated, nothing to
   // paint. However, an explicit monitor check is needed because UI framerate
   // limiting may be tied to signals from the OS for the monitor - but painting
@@ -483,13 +487,16 @@ void Presenter::PaintFromUIThread(bool force_paint) {
   // connection has become outdated and has requested the UI thread to
   // reconnect).
   bool draw_ui = !ui_drawers_.empty();
-  bool do_paint = force_paint || draw_ui;
+  const bool explicit_demand = UsesExplicitPaintDemand();
+  bool do_paint = ui_paint_pending_ || (explicit_demand && publication_progress_.pending()) ||
+      (!display_opportunity && (force_paint || (!explicit_demand && draw_ui)));
   // Reset ui_thread_paint_requested_ unconditionally also, regardless of
   // whether the UI needs to be drawn - the flag may be set to try reconnecting,
   // for example.
   if (ui_thread_paint_requested_.exchange(false, std::memory_order_relaxed)) {
     do_paint = true;
   }
+  ui_paint_pending_ |= do_paint;
   PaintResult paint_result = PaintResult::kNotPresented;
   bool request_repaint_at_tick = false;
   bool request_repaint_immediately = false;
@@ -528,6 +535,8 @@ void Presenter::PaintFromUIThread(bool force_paint) {
       WaitForUITickFromUIThread();
 
       paint_result = PaintAndPresent(draw_ui);
+      if (paint_result == PaintResult::kPresented || paint_result == PaintResult::kPresentedSuboptimal)
+        ui_paint_pending_ = false;
       if (paint_result == PaintResult::kNotPresentedRetry) {
         // Yield to the window event loop before retrying. This is essential on
         // platforms where presentation progress may depend on that same loop.
@@ -618,6 +627,8 @@ bool Presenter::RefreshGuestOutput(
     auto observed_refresher = [&](GuestOutputRefreshContext& context) {
       context.SetFramePixelProbe({});
       const bool updated = refresher(context);
+      if (const auto paired = context.PairedPresentation())
+        writable_properties.provenance.paired_presentation = updated && *paired;
       writable_properties.provenance.frame_pixel_probe = PublishFramePixelProbe(
           context.frame_pixel_probe(), updated, provenance.submitted_frame,
           frontbuffer_width, frontbuffer_height);
@@ -651,8 +662,9 @@ bool Presenter::RefreshGuestOutput(
     guest_output_active_last_refresh_ = false;
   }
 
+  const bool paired_presentation = is_active && writable_properties.provenance.paired_presentation;
   const uint64_t publication_serial = frame_publication_gate_.Publish(
-      is_active ? provenance.frame_rate_limit : 0);
+      is_active ? provenance.frame_rate_limit : 0, paired_presentation);
   writable_properties.provenance.publication_serial = publication_serial;
   host_frame_rate_limit_.store(is_active ? provenance.frame_rate_limit : 0,
                                std::memory_order_relaxed);
@@ -714,6 +726,7 @@ bool Presenter::RefreshGuestOutput(
                 probe.run, probe.frame, probe.source_sequence, provenance.title_present_id,
                 probe.guest_image, probe.guest_version, published_mailbox_index, probe.native_submission);
   }
+  publication_progress_.Publish(publication_serial);
   // Trigger the presentation on the host.
   PaintResult paint_result = PaintResult::kNotPresented;
   PaintMode paint_mode_snapshot = PaintMode::kNone;
@@ -743,8 +756,9 @@ bool Presenter::RefreshGuestOutput(
         }
         break;
       case PaintMode::kUIThreadOnRequest:
-        // Only window paint requesting is accessible.
-        RequestPaintOrConnectionRecoveryViaWindow(true);
+        // Wake for this publication, without turning a delayed OS event into
+        // a new UI invalidation after a display callback already consumed it.
+        RequestPaintOrConnectionRecoveryViaWindow(true, false, true);
         paint_action = RefreshPaintAction::kUIThreadRequested;
         break;
       case PaintMode::kGuestOutputThreadImmediately:
@@ -855,7 +869,7 @@ bool Presenter::RefreshGuestOutput(
         paint_result_name(paint_result));
   }
   }
-  if (is_active && provenance.producer_backpressure && provenance.frame_rate_limit &&
+  if (is_active && provenance.producer_backpressure && (provenance.frame_rate_limit || paired_presentation) &&
       std::this_thread::get_id() != ui_thread_id_ &&
       paint_result != PaintResult::kGpuLostResponsible &&
       paint_result != PaintResult::kGpuLostExternally) {
@@ -1009,6 +1023,7 @@ void Presenter::RequestUIPaintFromUIThread() {
   // than the UI thread, check whether it's not pointless to make the request
   // coarsely via paint_mode_.
   if (!ui_drawers_.empty() && paint_mode_ != PaintMode::kNone) {
+    ui_paint_pending_ = true;
     // The window must be present, otherwise the conditions wouldn't have been
     // met.
     window_->RequestPaint();
@@ -1576,7 +1591,7 @@ Presenter::PaintMode Presenter::GetDesiredPaintModeFromUIThread(bool is_paintabl
     // lifecycle.
     return PaintMode::kNone;
   }
-  if (!REXCVAR_GET(host_present_from_non_ui_thread)) {
+  if (RequiresUIThreadPresentation() || !REXCVAR_GET(host_present_from_non_ui_thread)) {
     return PaintMode::kUIThreadOnRequest;
   }
   if (surface_paint_connection_has_implicit_vsync_) {
@@ -1665,7 +1680,7 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
           surface_paint_connection_has_implicit_vsync_ = is_vsync_implicit;
           surface_width_in_paint_connection_ = surface_width;
           surface_height_in_paint_connection_ = surface_height;
-          if (!is_reconnect) {
+          if (!is_reconnect && repaint_needed_out) {
             *repaint_needed_out = true;
           }
           break;
@@ -1688,14 +1703,16 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
 }
 
 bool Presenter::RequestPaintOrConnectionRecoveryViaWindow(bool force_ui_thread_paint_tick,
-                                                           bool defer_until_ui_tick) {
+                                                           bool defer_until_ui_tick,
+                                                           bool publication_only) {
   // Can be called from any thread if an existing window_ is available in it,
   // and it's known to have a Surface that will be the same throughout this
   // call - not doing any checks whether this request can be satisfied
   // theoretically. For safety, check whether the window exists unconditionally.
   assert_not_null(window_);
   assert_not_null(surface_);
-  const bool already_requested = ui_thread_paint_requested_.exchange(true, std::memory_order_relaxed);
+  const bool already_requested = publication_only && UsesExplicitPaintDemand()
+      ? false : ui_thread_paint_requested_.exchange(true, std::memory_order_relaxed);
   if (already_requested && defer_until_ui_tick) return false;
   // An immediate request may supersede a future timer. WindowSDL coalesces
   // matching tickets; the pacer still rejects an attempt before its one deadline.
@@ -1703,7 +1720,8 @@ bool Presenter::RequestPaintOrConnectionRecoveryViaWindow(bool force_ui_thread_p
     ForceUIThreadPaintTick();
   }
   if (defer_until_ui_tick) {
-    window_->RequestPaintAfterNanoseconds(paint_retry_delay_ns_.load(std::memory_order_relaxed));
+    const uint64_t delay_ns = paint_retry_delay_ns_.load(std::memory_order_relaxed);
+    if (!ScheduleFramePacingWakeup(delay_ns)) window_->RequestPaintAfterNanoseconds(delay_ns);
   } else {
     window_->RequestPaint();
   }
@@ -1786,8 +1804,13 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   const uint32_t fps = host_frame_rate_limit_.load(std::memory_order_relaxed);
   frame_pacer_.Configure(fps, FramePacerNowNs());
   PollPresentationTiming();
-  pacing_attempt_ = frame_pacer_.Plan(FramePacerNowNs());
+  const auto display_target = DisplayLinkTargetNs();
+  if (display_target && !*display_target) return PaintResult::kNotPresented;
+  pacing_attempt_ = display_target
+      ? frame_pacer_.PlanForDisplay(FramePacerNowNs(), *display_target)
+      : frame_pacer_.Plan(FramePacerNowNs());
   if (pacing_attempt_.delay_ns) {
+    if (display_target) return PaintResult::kNotPresented;
     paint_retry_delay_ns_.store(pacing_attempt_.delay_ns, std::memory_order_relaxed);
     return PaintResult::kNotPresentedRetry;
   }
@@ -1904,6 +1927,7 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
 }
 
 void Presenter::HandleUIDrawersChangeFromUIThread(bool drawers_were_empty) {
+  ui_paint_pending_ = true;
   if (is_in_ui_thread_paint_) {
     // Defer the refresh so no dangerous lifecycle-related changes happen during
     // drawing.

@@ -42,11 +42,6 @@
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
 
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-#include <ffx_api/ffx_api.h>
-#include <ffx_api/ffx_upscale.h>
-#include <ffx_api/vk/ffx_api_vk.h>
-#endif
 
 #if REX_PLATFORM_ANDROID
 #include <rex/ui/surface_android.h>
@@ -161,48 +156,6 @@ float LinearToSRGB(float value) {
 
 #include "frame_pixel_probe_io.inc"
 
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-namespace {
-
-std::atomic<PFN_vkGetDeviceProcAddr> g_ffx_vk_get_device_proc_addr{nullptr};
-
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL FfxVkGetDeviceProcAddrCompat(VkDevice device,
-                                                                      const char* p_name) {
-  if (!p_name) {
-    return nullptr;
-  }
-
-  PFN_vkGetDeviceProcAddr get_device_proc_addr =
-      g_ffx_vk_get_device_proc_addr.load(std::memory_order_relaxed);
-  if (!get_device_proc_addr) {
-    return nullptr;
-  }
-
-  PFN_vkVoidFunction proc = get_device_proc_addr(device, p_name);
-  if (proc) {
-    return proc;
-  }
-
-  // Some drivers expose Vulkan 1.1+ core entry points, but not the legacy KHR
-  // aliases expected by parts of FidelityFX VK backend initialization.
-  if (!std::strcmp(p_name, "vkGetBufferMemoryRequirements2KHR")) {
-    return get_device_proc_addr(device, "vkGetBufferMemoryRequirements2");
-  }
-  if (!std::strcmp(p_name, "vkGetImageMemoryRequirements2KHR")) {
-    return get_device_proc_addr(device, "vkGetImageMemoryRequirements2");
-  }
-  if (!std::strcmp(p_name, "vkBindBufferMemory2KHR")) {
-    return get_device_proc_addr(device, "vkBindBufferMemory2");
-  }
-  if (!std::strcmp(p_name, "vkBindImageMemory2KHR")) {
-    return get_device_proc_addr(device, "vkBindImageMemory2");
-  }
-
-  return nullptr;
-}
-
-}  // namespace
-#endif  // defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -349,9 +302,6 @@ VulkanPresenter::~VulkanPresenter() {
   }
   ui_submission_tracker_.Shutdown();
   guest_output_image_refresher_submission_tracker_.Shutdown();
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-  DestroyTemporalUpscalerContext();
-#endif
 
   const VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
@@ -391,173 +341,6 @@ VulkanPresenter::~VulkanPresenter() {
                              guest_output_paint_image_descriptor_set_layout_);
 }
 
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-void VulkanPresenter::DestroyTemporalUpscalerContext() {
-  if (!temporal_upscaler_context_) {
-    return;
-  }
-  ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
-  ffxDestroyContext(context, nullptr);
-  temporal_upscaler_context_ = nullptr;
-  temporal_upscaler_max_render_width_ = 0;
-  temporal_upscaler_max_render_height_ = 0;
-  temporal_upscaler_max_output_width_ = 0;
-  temporal_upscaler_max_output_height_ = 0;
-}
-
-bool VulkanPresenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint32_t render_height,
-                                                    uint32_t output_width, uint32_t output_height) {
-  if (!temporal_upscaler_context_ || temporal_upscaler_max_render_width_ != render_width ||
-      temporal_upscaler_max_render_height_ != render_height ||
-      temporal_upscaler_max_output_width_ != output_width ||
-      temporal_upscaler_max_output_height_ != output_height) {
-    DestroyTemporalUpscalerContext();
-
-    ffxCreateContextDescUpscale create_desc = {};
-    create_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    create_desc.header.pNext = nullptr;
-    create_desc.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
-    create_desc.maxRenderSize.width = render_width;
-    create_desc.maxRenderSize.height = render_height;
-    create_desc.maxUpscaleSize.width = output_width;
-    create_desc.maxUpscaleSize.height = output_height;
-    create_desc.fpMessage = nullptr;
-
-    ffxCreateBackendVKDesc backend_desc = {};
-    backend_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-    backend_desc.header.pNext = nullptr;
-    backend_desc.vkDevice = vulkan_device_->device();
-    backend_desc.vkPhysicalDevice = vulkan_device_->physical_device();
-    PFN_vkGetDeviceProcAddr vk_device_proc_addr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-        vulkan_device_->vulkan_instance()->functions().vkGetInstanceProcAddr(
-            vulkan_device_->vulkan_instance()->instance(), "vkGetDeviceProcAddr"));
-    if (!vk_device_proc_addr) {
-      REXLOG_WARN("VulkanPresenter: vkGetDeviceProcAddr is unavailable for FidelityFX");
-      return false;
-    }
-    g_ffx_vk_get_device_proc_addr.store(vk_device_proc_addr, std::memory_order_relaxed);
-    backend_desc.vkDeviceProcAddr = FfxVkGetDeviceProcAddrCompat;
-
-    create_desc.header.pNext = &backend_desc.header;
-
-    ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
-    if (ffxCreateContext(context, &create_desc.header, nullptr) != FFX_API_RETURN_OK) {
-      REXLOG_WARN(
-          "VulkanPresenter: Failed to create FidelityFX temporal upscaler "
-          "context");
-      temporal_upscaler_context_ = nullptr;
-      return false;
-    }
-
-    temporal_upscaler_max_render_width_ = render_width;
-    temporal_upscaler_max_render_height_ = render_height;
-    temporal_upscaler_max_output_width_ = output_width;
-    temporal_upscaler_max_output_height_ = output_height;
-    temporal_upscaler_provider_logged_ = false;
-  }
-
-  if (!temporal_upscaler_provider_logged_) {
-    ffxQueryGetProviderVersion provider_version = {};
-    provider_version.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
-    provider_version.header.pNext = nullptr;
-    ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
-    if (ffxQuery(context, &provider_version.header) == FFX_API_RETURN_OK &&
-        provider_version.versionName) {
-      REXLOG_INFO("VulkanPresenter: FidelityFX upscaler provider {}", provider_version.versionName);
-    }
-    temporal_upscaler_provider_logged_ = true;
-  }
-
-  return temporal_upscaler_context_ != nullptr;
-}
-
-bool VulkanPresenter::DispatchTemporalUpscaler(VkCommandBuffer command_buffer, VkImage input_image,
-                                               uint32_t input_width, uint32_t input_height,
-                                               VkImage output_image, uint32_t output_width,
-                                               uint32_t output_height,
-                                               const GuestOutputPaintConfig& config) {
-  if (command_buffer == VK_NULL_HANDLE || input_image == VK_NULL_HANDLE ||
-      output_image == VK_NULL_HANDLE || !input_width || !input_height || !output_width ||
-      !output_height) {
-    return false;
-  }
-  if (!EnsureTemporalUpscalerContext(input_width, input_height, output_width, output_height)) {
-    return false;
-  }
-
-  VkImageCreateInfo source_image_create_info = {};
-  source_image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-  source_image_create_info.imageType = VK_IMAGE_TYPE_2D;
-  source_image_create_info.format = kGuestOutputFormat;
-  source_image_create_info.extent.width = input_width;
-  source_image_create_info.extent.height = input_height;
-  source_image_create_info.extent.depth = 1;
-  source_image_create_info.mipLevels = 1;
-  source_image_create_info.arrayLayers = 1;
-  source_image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
-  source_image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  source_image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
-  source_image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  source_image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-  FfxApiResourceDescription source_desc = ffxApiGetImageResourceDescriptionVK(
-      input_image, source_image_create_info, FFX_API_RESOURCE_USAGE_READ_ONLY);
-  FfxApiResource source = ffxApiGetResourceVK(reinterpret_cast<void*>(input_image), source_desc,
-                                              FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
-  FfxApiResource depth =
-      ffxApiGetResourceVK(reinterpret_cast<void*>(input_image),
-                          ffxApiGetImageResourceDescriptionVK(input_image, source_image_create_info,
-                                                              FFX_API_RESOURCE_USAGE_DEPTHTARGET),
-                          FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
-  FfxApiResource motion_vectors = source;
-
-  VkImageCreateInfo output_image_create_info = source_image_create_info;
-  output_image_create_info.extent.width = output_width;
-  output_image_create_info.extent.height = output_height;
-  FfxApiResourceDescription output_desc = ffxApiGetImageResourceDescriptionVK(
-      output_image, output_image_create_info,
-      FFX_API_RESOURCE_USAGE_UAV | FFX_API_RESOURCE_USAGE_READ_ONLY);
-  FfxApiResource output = ffxApiGetResourceVK(reinterpret_cast<void*>(output_image), output_desc,
-                                              FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-
-  ffxDispatchDescUpscale dispatch_desc = {};
-  dispatch_desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
-  dispatch_desc.header.pNext = nullptr;
-  dispatch_desc.commandList = command_buffer;
-  dispatch_desc.color = source;
-  dispatch_desc.depth = depth;
-  dispatch_desc.motionVectors = motion_vectors;
-  dispatch_desc.exposure = {};
-  dispatch_desc.reactive = {};
-  dispatch_desc.transparencyAndComposition = {};
-  dispatch_desc.output = output;
-  dispatch_desc.jitterOffset.x = 0.0f;
-  dispatch_desc.jitterOffset.y = 0.0f;
-  dispatch_desc.motionVectorScale.x = float(input_width);
-  dispatch_desc.motionVectorScale.y = float(input_height);
-  dispatch_desc.renderSize.width = input_width;
-  dispatch_desc.renderSize.height = input_height;
-  dispatch_desc.upscaleSize.width = output_width;
-  dispatch_desc.upscaleSize.height = output_height;
-  dispatch_desc.enableSharpening = true;
-  dispatch_desc.sharpness = std::clamp(1.0f - config.GetFsrSharpnessReduction() * 0.5f, 0.0f, 1.0f);
-  dispatch_desc.reset = true;
-  dispatch_desc.frameTimeDelta = 16.666f;
-  dispatch_desc.preExposure = 1.0f;
-  dispatch_desc.cameraNear = 0.1f;
-  dispatch_desc.cameraFar = 1000.0f;
-  dispatch_desc.cameraFovAngleVertical = 1.0472f;
-  dispatch_desc.viewSpaceToMetersFactor = 1.0f;
-  dispatch_desc.flags = 0;
-
-  ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
-  if (ffxDispatch(context, &dispatch_desc.header) != FFX_API_RETURN_OK) {
-    return false;
-  }
-  return true;
-}
-#endif
 
 Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
     const VulkanInstance::Extensions& instance_extensions) {
@@ -597,6 +380,7 @@ Surface::TypeFlags VulkanPresenter::GetSupportedSurfaceTypes() const {
 
 bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
   std::shared_ptr<GuestOutputImage> guest_output_image;
+  ImageAccessTimeline::Lease image_access;
   {
     uint32_t guest_output_mailbox_index;
     std::unique_lock<std::mutex> guest_output_consumer_lock(
@@ -604,15 +388,17 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
     if (guest_output_mailbox_index != UINT32_MAX) {
       assert_true(guest_output_images_[guest_output_mailbox_index].ever_successfully_refreshed);
       guest_output_image = guest_output_images_[guest_output_mailbox_index].image;
+      image_access = guest_output_image->AcquireAccess();
     }
     // Incremented the reference count of the guest output image - safe to leave
     // the consumer critical section now.
   }
-  return CaptureGuestOutputImage(guest_output_image, image_out);
+  return CaptureGuestOutputImage(guest_output_image, image_out, image_access);
 }
 
 bool VulkanPresenter::CaptureGuestOutputImage(
-    const std::shared_ptr<GuestOutputImage>& guest_output_image, RawImage& image_out) {
+    const std::shared_ptr<GuestOutputImage>& guest_output_image, RawImage& image_out,
+    ImageAccessTimeline::Lease& image_access) {
   if (!guest_output_image) {
     return false;
   }
@@ -738,6 +524,13 @@ bool VulkanPresenter::CaptureGuestOutputImage(
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &command_buffer;
+    ImageAccessSubmit access_submit;
+    if (!access_submit.Attach(submit_info, image_access.ticket())) {
+      dfn.vkDestroyCommandPool(device, command_pool, nullptr);
+      dfn.vkDestroyBuffer(device, buffer, nullptr);
+      dfn.vkFreeMemory(device, buffer_memory, nullptr);
+      return false;
+    }
     VulkanSubmissionTracker submission_tracker(vulkan_device_);
     {
       VulkanSubmissionTracker::FenceAcquisition fence_acqusition(
@@ -758,6 +551,7 @@ bool VulkanPresenter::CaptureGuestOutputImage(
             vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
         submit_result =
             dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence_acqusition.fence());
+        if (submit_result == VK_SUCCESS) image_access.Commit();
       }
       if (submit_result != VK_SUCCESS) {
         REXLOG_ERROR(
@@ -902,6 +696,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
                                                                  uint32_t new_surface_height,
                                                                  bool was_paintable,
                                                                  bool& is_vsync_implicit_out) {
+  generated_frame_presentation_enabled_.store(false, std::memory_order_release);
   const VulkanInstance* const vulkan_instance = vulkan_device_->vulkan_instance();
   const VulkanInstance::Functions& ifn = vulkan_instance->functions();
   const VkInstance instance = vulkan_instance->instance();
@@ -1291,11 +1086,17 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
   }
 
   is_vsync_implicit_out = paint_context_.swapchain_is_fifo;
+  generated_frame_presentation_enabled_.store(paint_context_.swapchain_is_fifo,
+                                               std::memory_order_release);
   return SurfacePaintConnectResult::kSuccess;
 }
 
 void VulkanPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+  generated_frame_presentation_enabled_.store(false, std::memory_order_release);
   paint_context_.DestroySwapchainAndVulkanSurface();
+  pending_generated_frame_.reset();
+  generated_delivery_.ResetPending();
+  frame_pacer().SetMinimumInterval(0);
 }
 
 bool VulkanPresenter::RefreshGuestOutputImpl(
@@ -1325,7 +1126,8 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
   }
   if (!image_instance.image) {
     std::unique_ptr<GuestOutputImage> new_image =
-        GuestOutputImage::Create(vulkan_device_, frontbuffer_width, frontbuffer_height);
+        GuestOutputImage::Create(vulkan_device_, frontbuffer_width, frontbuffer_height,
+                                 vulkan_device_->has_native_offscreen_queue());
     if (!new_image) {
       return false;
     }
@@ -1342,13 +1144,35 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
     hdr_headroom = std::max(1.0f, window->GetHDRHeadroom());
     sdr_white_level = std::max(1.0f, window->GetSDRWhiteLevel());
   }
+  auto image_access = image_instance.image->AcquireAccess();
+  if (!image_access.ticket().valid()) return false;
   VulkanGuestOutputRefreshContext context(
       is_8bpc_out_ref, image_instance.image->image(), image_instance.image->view(),
       image_instance.version, image_instance.ever_successfully_refreshed, hdr_output,
-      hdr_headroom, sdr_white_level);
+      hdr_headroom, sdr_white_level, image_access.ticket(), image_instance.image->extent());
   bool refresher_succeeded = refresher(context);
+  if (image_access.ticket().semaphore) {
+    // Queue acceptance is observable even if the callback later rejects publication.
+    if (context.image_access_submitted()) image_access.Commit();
+    else if (refresher_succeeded) {
+      REXLOG_ERROR("VulkanPresenter: native refresher omitted shared-image synchronization");
+      refresher_succeeded = false;
+    }
+  }
   if (refresher_succeeded) {
     image_instance.ever_successfully_refreshed = true;
+  }
+  image_instance.generated_frame.reset();
+  if (refresher_succeeded && context.generated_frame() && context.image_access_submitted()) {
+    const auto& frame = context.generated_frame();
+    auto images = std::make_shared<GeneratedFrameImages>();
+    images->generated = GuestOutputImage::ReferenceGenerated(
+        vulkan_device_, frame, false, image_instance.image);
+    images->real = GuestOutputImage::ReferenceGenerated(
+        vulkan_device_, frame, true, image_instance.image);
+    images->interval_ns = frame->interval_ns;
+    images->hdr = hdr_output;
+    image_instance.generated_frame = std::move(images);
   }
   // Even if the refresher has returned false, it still might have submitted
   // some commands referencing the image. It's better to put an excessive
@@ -1758,8 +1582,24 @@ void VulkanPresenter::PaintContext::DestroySwapchainAndVulkanSurface() {
 }
 
 VulkanPresenter::GuestOutputImage::~GuestOutputImage() {
+  // Renderer-owned images and their semaphore owner are retained by these
+  // references. Paint descriptors release them only after GPU completion.
+  if (external_owner_) return;
   const VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
+  if (access_semaphore_) {
+    const uint64_t tail = accesses_.submitted_value();
+    if (tail) {
+      VkSemaphoreWaitInfo wait{};
+      wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+      wait.semaphoreCount = 1;
+      wait.pSemaphores = &access_semaphore_;
+      wait.pValues = &tail;
+      dfn.vkWaitSemaphores(device, &wait, UINT64_MAX);
+    }
+    // All readers and writers have completed, not only the last producer.
+    dfn.vkDestroySemaphore(device, access_semaphore_, nullptr);
+  }
   if (view_ != VK_NULL_HANDLE) {
     dfn.vkDestroyImageView(device, view_, nullptr);
   }
@@ -1788,9 +1628,13 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
   image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                             VK_IMAGE_USAGE_STORAGE_BIT;
-  image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  image_create_info.queueFamilyIndexCount = 0;
-  image_create_info.pQueueFamilyIndices = nullptr;
+  const std::array<uint32_t, 2> shared_families{
+      vulkan_device_->queue_family_graphics_compute(),
+      vulkan_device_->queue_family_native_offscreen()};
+  const bool shared = shared_with_native_ && vulkan_device_->has_native_offscreen_queue();
+  image_create_info.sharingMode = shared ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+  image_create_info.queueFamilyIndexCount = shared ? uint32_t(shared_families.size()) : 0;
+  image_create_info.pQueueFamilyIndices = shared ? shared_families.data() : nullptr;
   image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (!ui::vulkan::util::CreateDedicatedAllocationImage(
           vulkan_device_, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image_,
@@ -1823,6 +1667,17 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
     return false;
   }
 
+  if (shared) {
+    VkSemaphoreTypeCreateInfo type{};
+    type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo create{};
+    create.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    create.pNext = &type;
+    if (dfn.vkCreateSemaphore(device, &create, nullptr, &access_semaphore_) != VK_SUCCESS)
+      return false;
+    accesses_.Initialize(access_semaphore_);
+  }
   return true;
 }
 
@@ -2239,6 +2094,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   GuestOutputProperties guest_output_properties = {};
   GuestOutputPaintConfig guest_output_paint_config;
   std::shared_ptr<GuestOutputImage> guest_output_image;
+  std::shared_ptr<GeneratedFrameImages> selected_generated_frame;
+  auto generated_stage = GeneratedFrameDelivery::Stage::kUnpaired;
+  ImageAccessTimeline::Lease image_access;
   uint32_t guest_output_mailbox_index = UINT32_MAX;
   size_t guest_output_effect_count = 0;
   uint64_t frame_mailbox_version = 0;
@@ -2252,15 +2110,39 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
       assert_true(guest_output_images_[guest_output_mailbox_index].ever_successfully_refreshed);
       guest_output_image = guest_output_images_[guest_output_mailbox_index].image;
       frame_mailbox_version = guest_output_images_[guest_output_mailbox_index].version;
+      selected_generated_frame = guest_output_images_[guest_output_mailbox_index].generated_frame;
     }
+    if (pending_generated_frame_ && !generated_delivery_.has_pending(diagnostic_swapchain_epoch_)) {
+      pending_generated_frame_.reset();
+      generated_delivery_.ResetPending();
+    }
+    const bool candidate_ready = selected_generated_frame && paint_context_.swapchain_is_fifo &&
+        selected_generated_frame->hdr == paint_context_.swapchain_is_hdr &&
+        guest_output_properties.provenance.paired_presentation;
+    generated_stage = generated_delivery_.Select(
+        guest_output_properties.provenance.publication_serial, candidate_ready,
+        diagnostic_swapchain_epoch_);
+    if (generated_stage == GeneratedFrameDelivery::Stage::kReal) {
+      selected_generated_frame = pending_generated_frame_;
+      guest_output_image = selected_generated_frame->real;
+      guest_output_properties = pending_generated_properties_;
+      guest_output_paint_config = pending_generated_configuration_;
+      frame_mailbox_version = pending_generated_mailbox_version_;
+    } else if (generated_stage == GeneratedFrameDelivery::Stage::kGenerated) {
+      guest_output_image = selected_generated_frame->generated;
+    } else {
+      selected_generated_frame.reset();
+    }
+    if (guest_output_image) image_access = guest_output_image->AcquireAccess();
     // Incremented the reference count of the guest output image - safe to leave
     // the consumer critical section now as everything here either will be using
     // the new reference or is exclusively owned by main target painting (and
     // multiple threads can't paint the main target at the same time).
   }
+  frame_pacer().SetMinimumInterval(selected_generated_frame ? selected_generated_frame->interval_ns : 0);
 
   const auto& requested_frame_probe = guest_output_properties.provenance.frame_pixel_probe;
-  if (requested_frame_probe.valid()) {
+  if (requested_frame_probe.valid() && !selected_generated_frame) {
     if (guest_output_image && requested_frame_probe.matches(guest_output_properties.provenance.submitted_frame,
         uint64_t(uintptr_t(guest_output_image->image())), guest_output_image->extent().width,
         guest_output_image->extent().height, frame_mailbox_version)) {
@@ -2525,12 +2407,6 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
           paint_context_.guest_output_intermediate_image_last_submission =
               current_paint_submission_index;
         }
-        [[maybe_unused]] bool temporal_effect_selected = false;
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-        temporal_effect_selected =
-            guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
-            guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr3;
-#endif
         for (size_t i = 0; i < guest_output_flow.effect_count; ++i) {
           bool is_final_effect = i + 1 >= guest_output_flow.effect_count;
           GuestOutputPaintEffect effect = guest_output_flow.effects[i];
@@ -2557,60 +2433,6 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
             guest_output_flow.output_y = 0;
             guest_output_flow.letterbox_clear_rectangle_count = 0;
           }
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-          bool use_temporal_upscaler =
-              temporal_effect_selected && effect == GuestOutputPaintEffect::kFsrEasu;
-          if (use_temporal_upscaler && !is_final_effect) {
-            VkImage source_image =
-                i ? paint_context_.guest_output_intermediate_images[i - 1]->image()
-                  : guest_output_image->image();
-            VkImage output_image = paint_context_.guest_output_intermediate_images[i]->image();
-
-            VkImageMemoryBarrier barrier_to_uav = {};
-            barrier_to_uav.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier_to_uav.srcAccessMask = 0;
-            barrier_to_uav.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            barrier_to_uav.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier_to_uav.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            barrier_to_uav.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier_to_uav.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier_to_uav.image = output_image;
-            barrier_to_uav.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier_to_uav.subresourceRange.baseMipLevel = 0;
-            barrier_to_uav.subresourceRange.levelCount = 1;
-            barrier_to_uav.subresourceRange.baseArrayLayer = 0;
-            barrier_to_uav.subresourceRange.layerCount = 1;
-            dfn.vkCmdPipelineBarrier(draw_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
-                                     nullptr, 1, &barrier_to_uav);
-
-            uint32_t effect_input_width = 0, effect_input_height = 0;
-            guest_output_flow.GetEffectInputSize(i, effect_input_width, effect_input_height);
-            if (DispatchTemporalUpscaler(draw_command_buffer, source_image, effect_input_width,
-                                         effect_input_height, output_image, effect_rect_size.first,
-                                         effect_rect_size.second, guest_output_paint_config)) {
-              VkImageMemoryBarrier barrier_to_shader_read = {};
-              barrier_to_shader_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-              barrier_to_shader_read.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-              barrier_to_shader_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-              barrier_to_shader_read.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-              barrier_to_shader_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-              barrier_to_shader_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-              barrier_to_shader_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-              barrier_to_shader_read.image = output_image;
-              barrier_to_shader_read.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-              barrier_to_shader_read.subresourceRange.baseMipLevel = 0;
-              barrier_to_shader_read.subresourceRange.levelCount = 1;
-              barrier_to_shader_read.subresourceRange.baseArrayLayer = 0;
-              barrier_to_shader_read.subresourceRange.layerCount = 1;
-              dfn.vkCmdPipelineBarrier(
-                  draw_command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                  0, nullptr, 0, nullptr, 1, &barrier_to_shader_read);
-              continue;
-            }
-          }
-#endif
 
           int32_t effect_rect_x, effect_rect_y;
           if (is_final_effect) {
@@ -2965,6 +2787,10 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   submit_info.pCommandBuffers = command_buffers;
   submit_info.signalSemaphoreCount = 1;
   submit_info.pSignalSemaphores = &present_semaphore;
+  ImageAccessSubmit access_submit;
+  if (!access_submit.Attach(submit_info, image_access.ticket())) {
+    return PaintResult::kGpuLostResponsible;
+  }
   VkResult submit_result = VK_SUCCESS;
   {
     VulkanSubmissionTracker::FenceAcquisition fence_acqusition(
@@ -2984,6 +2810,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                          swapchain_image_index, uint64_t(uintptr_t(fence_acqusition.fence())));
       submit_result =
           dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence_acqusition.fence());
+      if (submit_result == VK_SUCCESS) image_access.Commit();
       gpu_flight::Record("present.submit-end", uint64_t(uintptr_t(draw_command_buffer)),
                          current_paint_submission_index, tv_trace_provenance.submitted_frame,
                          swapchain_image_index, uint64_t(uintptr_t(present_semaphore)),
@@ -3124,7 +2951,43 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                 int(present_result), paint_context_.swapchain_is_fifo);
   }
   if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR) {
-    AcceptPacedPublication(guest_output_properties.provenance.publication_serial);
+    const uint64_t publication = guest_output_properties.provenance.publication_serial;
+    if (selected_generated_frame && !guest_output_pass_recorded) {
+      // A successfully presented fallback clear is not delivery of the pair.
+      // Keep the same stage pending and retry through the common pacer.
+      if (Window* window = connected_window())
+        window->RequestPaintAfterNanoseconds(frame_pacer().period());
+    } else if (generated_stage == GeneratedFrameDelivery::Stage::kGenerated) {
+      generated_delivery_.Presented(generated_stage, publication, diagnostic_swapchain_epoch_);
+      pending_generated_frame_ = selected_generated_frame;
+      pending_generated_properties_ = guest_output_properties;
+      pending_generated_configuration_ = guest_output_paint_config;
+      pending_generated_mailbox_version_ = frame_mailbox_version;
+      // Allow the next scene to render, retaining explicit paint demand until
+      // this publication's real image has actually reached queue-present.
+      AdmitPacedPublication(publication);
+      if (Window* window = connected_window())
+        window->RequestPaintAfterNanoseconds(frame_pacer().period());
+    } else {
+      generated_delivery_.Presented(generated_stage, publication, diagnostic_swapchain_epoch_);
+      AcceptPacedPublication(publication);
+      if (generated_stage == GeneratedFrameDelivery::Stage::kReal)
+        pending_generated_frame_.reset();
+      // A newer publication may have delivered the wakeup that painted this
+      // retained real frame. Its paint demand survives, so explicitly deliver
+      // the next opportunity on event-driven Vulkan windows as well.
+      if (HasPendingPacedPublication()) {
+        if (Window* window = connected_window())
+          window->RequestPaintAfterNanoseconds(frame_pacer().period());
+      }
+    }
+    if (selected_generated_frame && guest_output_pass_recorded &&
+        rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter)) {
+      REXLOG_INFO("VulkanPresenter delivery={} frame={} publication={} interval-ns={}",
+                  generated_stage == GeneratedFrameDelivery::Stage::kGenerated ? "generated" : "real",
+                  guest_output_properties.provenance.submitted_frame, publication,
+                  selected_generated_frame->interval_ns);
+    }
     if (display_timing_available_) {
       presentation_feedback_.Insert({present_time.presentID,
           guest_output_properties.provenance.submitted_frame, pacing.fps, pacing.generation,
@@ -3247,7 +3110,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   if (guest_output_pixel_milestone &&
       REXCVAR_GET(vulkan_presenter_probe_guest_output_pixels)) {
     RawImage captured_image;
-    if (CaptureGuestOutputImage(guest_output_image, captured_image)) {
+    auto capture_access = guest_output_image ? guest_output_image->AcquireAccess()
+                                            : ImageAccessTimeline::Lease{};
+    if (CaptureGuestOutputImage(guest_output_image, captured_image, capture_access)) {
       uint64_t red_sum = 0;
       uint64_t green_sum = 0;
       uint64_t blue_sum = 0;
@@ -3440,6 +3305,9 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
     }
   }
 
+  const char* profile_label_option = std::getenv("REX_GTA4_GPU_PASS_MARKERS");
+  const bool profile_shader_labels = profile_label_option &&
+      std::strcmp(profile_label_option, "1") == 0;
   VkShaderModuleCreateInfo shader_module_create_info;
   shader_module_create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
   shader_module_create_info.pNext = nullptr;
@@ -3453,45 +3321,59 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
         "vertex shader module");
     return false;
   }
+  if (profile_shader_labels) {
+    vulkan_device_->SetObjectName(VK_OBJECT_TYPE_SHADER_MODULE, guest_output_paint_vs_,
+                                 "Liberty/HostPresent/rectangle-vertex");
+  }
   for (size_t i = 0; i < size_t(GuestOutputPaintEffect::kCount); ++i) {
     GuestOutputPaintEffect guest_output_paint_effect = GuestOutputPaintEffect(i);
+    const char* profile_shader_name = "Liberty/HostPresent/unknown";
     switch (guest_output_paint_effect) {
       case GuestOutputPaintEffect::kBilinear:
+        profile_shader_name = "Liberty/HostPresent/kBilinear";
         shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_ps);
         shader_module_create_info.pCode = shaders::guest_output_bilinear_ps;
         break;
       case GuestOutputPaintEffect::kBilinearDither:
+        profile_shader_name = "Liberty/HostPresent/kBilinearDither";
         shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_dither_ps);
         shader_module_create_info.pCode = shaders::guest_output_bilinear_dither_ps;
         break;
 #if defined(REX_HAS_FIDELITYFX_FSR1)
       case GuestOutputPaintEffect::kCasSharpen:
+        profile_shader_name = "Liberty/HostPresent/kCasSharpen";
         shader_module_create_info.codeSize = sizeof(shaders::guest_output_ffx_cas_sharpen_ps);
         shader_module_create_info.pCode = shaders::guest_output_ffx_cas_sharpen_ps;
         break;
       case GuestOutputPaintEffect::kCasSharpenDither:
+        profile_shader_name = "Liberty/HostPresent/kCasSharpenDither";
         shader_module_create_info.codeSize =
             sizeof(shaders::guest_output_ffx_cas_sharpen_dither_ps);
         shader_module_create_info.pCode = shaders::guest_output_ffx_cas_sharpen_dither_ps;
         break;
       case GuestOutputPaintEffect::kCasResample:
+        profile_shader_name = "Liberty/HostPresent/kCasResample";
         shader_module_create_info.codeSize = sizeof(shaders::guest_output_ffx_cas_resample_ps);
         shader_module_create_info.pCode = shaders::guest_output_ffx_cas_resample_ps;
         break;
       case GuestOutputPaintEffect::kCasResampleDither:
+        profile_shader_name = "Liberty/HostPresent/kCasResampleDither";
         shader_module_create_info.codeSize =
             sizeof(shaders::guest_output_ffx_cas_resample_dither_ps);
         shader_module_create_info.pCode = shaders::guest_output_ffx_cas_resample_dither_ps;
         break;
       case GuestOutputPaintEffect::kFsrEasu:
+        profile_shader_name = "Liberty/HostPresent/kFsrEasu";
         shader_module_create_info.codeSize = sizeof(shaders::guest_output_ffx_fsr_easu_ps);
         shader_module_create_info.pCode = shaders::guest_output_ffx_fsr_easu_ps;
         break;
       case GuestOutputPaintEffect::kFsrRcas:
+        profile_shader_name = "Liberty/HostPresent/kFsrRcas";
         shader_module_create_info.codeSize = sizeof(shaders::guest_output_ffx_fsr_rcas_ps);
         shader_module_create_info.pCode = shaders::guest_output_ffx_fsr_rcas_ps;
         break;
       case GuestOutputPaintEffect::kFsrRcasDither:
+        profile_shader_name = "Liberty/HostPresent/kFsrRcasDither";
         shader_module_create_info.codeSize = sizeof(shaders::guest_output_ffx_fsr_rcas_dither_ps);
         shader_module_create_info.pCode = shaders::guest_output_ffx_fsr_rcas_dither_ps;
         break;
@@ -3507,6 +3389,10 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
           "module for effect {}",
           i);
       return false;
+    }
+    if (profile_shader_labels) {
+      vulkan_device_->SetObjectName(VK_OBJECT_TYPE_SHADER_MODULE, guest_output_paint_fs_[i],
+                                   profile_shader_name);
     }
   }
 

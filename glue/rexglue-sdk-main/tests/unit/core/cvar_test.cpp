@@ -637,3 +637,65 @@ TEST_CASE("Saving default cvars removes an obsolete saved frame cap", "[cvar][di
   REQUIRE(text.find("gta4_frame_limit = 30") == std::string::npos);
   std::filesystem::remove(path);
 }
+
+TEST_CASE("Explicit CLI settings survive the later application config load", "[cvar][display-settings]") {
+  rex::cvar::testing::ResetAllForTesting();
+  const auto path = std::filesystem::temp_directory_path() / "rex-cli-renderer-precedence.toml";
+  {
+    std::ofstream file(path);
+    file << "test_string_flag = \"gta4-native\"\n"
+            "test_bool_flag = true\n"
+            "test_int32_flag = 30\n";
+  }
+  char program[] = "test";
+  char backend[] = "--test_string_flag=gta4-metal";
+  char boolean[] = "--no-test_bool_flag";
+  char* args[] = {program, backend, boolean};
+  rex::cvar::Init(int(std::size(args)), args);
+  rex::cvar::LoadConfig(path);
+  CHECK(REXCVAR_GET(test_string_flag) == "gta4-metal");
+  CHECK_FALSE(REXCVAR_GET(test_bool_flag));
+  CHECK(REXCVAR_GET(test_int32_flag) == 30);
+  // A launch override does not lock the live menu's normal mutation boundary.
+  REQUIRE(rex::cvar::SetFlagByName("test_string_flag", "menu-choice"));
+  CHECK(REXCVAR_GET(test_string_flag) == "menu-choice");
+  std::filesystem::remove(path);
+  rex::cvar::testing::ResetAllForTesting();
+}
+
+TEST_CASE("Late renderer settings give explicit CLI values precedence too", "[cvar][display-settings]") {
+  rex::cvar::testing::ResetAllForTesting();
+  const auto path = std::filesystem::temp_directory_path() / "rex-cli-late-renderer.toml";
+  { std::ofstream file(path); file << "test_late_renderer_setting = \"saved\"\n"; }
+  char program[] = "test", argument[] = "--test_late_renderer_setting=launch";
+  char* args[] = {program, argument};
+  rex::cvar::Init(int(std::size(args)), args);
+  rex::cvar::LoadConfig(path);
+  std::string value = "default";
+  {
+    rex::cvar::FlagRegistrar registrar({
+      .name = "test_late_renderer_setting", .type = rex::cvar::FlagType::String,
+      .category = "Test", .description = "Late renderer selection",
+      .setter = [&value](std::string_view v) { value = v; return true; },
+      .getter = [&value] { return value; }, .default_value = "default",
+    });
+    CHECK(value == "launch");
+    rex::cvar::LoadConfig(path);
+    CHECK(value == "launch");
+  }
+  std::filesystem::remove(path);
+  rex::cvar::testing::ResetAllForTesting();
+}
+
+TEST_CASE("Invalid explicit CLI values do not suppress a valid saved setting", "[cvar][display-settings]") {
+  rex::cvar::testing::ResetAllForTesting();
+  const auto path = std::filesystem::temp_directory_path() / "rex-cli-invalid-renderer.toml";
+  { std::ofstream file(path); file << "test_enum_flag = \"high\"\n"; }
+  char program[] = "test", argument[] = "--test_enum_flag=invalid";
+  char* args[] = {program, argument};
+  rex::cvar::Init(int(std::size(args)), args);
+  rex::cvar::LoadConfig(path);
+  CHECK(REXCVAR_GET(test_enum_flag) == "high");
+  std::filesystem::remove(path);
+  rex::cvar::testing::ResetAllForTesting();
+}

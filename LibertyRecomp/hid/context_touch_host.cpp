@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <rex/input/absolute_pointer.h>
+#include <rex/input/pointer_clock.h>
 #include <rex/platform.h>
 
 #include "input/context_touch_controls.h"
@@ -57,6 +58,7 @@ void PublishGeometryLocked(uint64_t timestamp) {
 SDL_Window* sdl_window = nullptr;
 std::mutex event_mutex;
 std::deque<SDL_Event> pending_events;
+bool pending_touch_history_lost = false;
 rex::input::sdl::PhysicalDeviceInventory sdl_device_inventory;
 
 void RefreshSDLGeometry(uint64_t timestamp) {
@@ -223,7 +225,9 @@ static void ProcessSDLEvent(const SDL_Event& event) {
     case SDL_EVENT_FINGER_CANCELED: {
       if (event.tfinger.windowID != id ||
           SDL_GetTouchDeviceType(event.tfinger.touchID) != SDL_TOUCH_DEVICE_DIRECT) return;
-      RefreshSDLGeometry(timestamp);
+      const uint64_t source_now = SDL_GetTicksNS();
+      const uint64_t pointer_timestamp = rex::input::RebasePointerTimestamp(timestamp, source_now, Timestamp());
+      RefreshSDLGeometry(pointer_timestamp);
       int width = 0, height = 0;
       SDL_GetWindowSizeInPixels(sdl_window, &width, &height);
       const auto phase = event.type == SDL_EVENT_FINGER_DOWN ? rex::input::AbsolutePointerPhase::kDown :
@@ -232,7 +236,7 @@ static void ProcessSDLEvent(const SDL_Event& event) {
           rex::input::AbsolutePointerPhase::kCancel;
       service.SubmitPointer(uint64_t(event.tfinger.touchID), uint64_t(event.tfinger.fingerID),
           phase, event.tfinger.x * float(width), event.tfinger.y * float(height),
-          event.tfinger.pressure, timestamp);
+          event.tfinger.pressure, pointer_timestamp);
       break;
     }
     case SDL_EVENT_KEY_DOWN:
@@ -331,8 +335,13 @@ void OnSDLEvent(const SDL_Event& event) {
     const auto old_move = std::find_if(pending_events.begin(), pending_events.end(), [](const auto& queued) {
       return queued.type == SDL_EVENT_FINGER_MOTION || queued.type == SDL_EVENT_MOUSE_MOTION;
     });
-    if (old_move != pending_events.end()) pending_events.erase(old_move);
-    else return;
+    if (old_move != pending_events.end()) {
+      pending_touch_history_lost |= old_move->type == SDL_EVENT_FINGER_MOTION;
+      pending_events.erase(old_move);
+    } else {
+      pending_touch_history_lost |= event.type == SDL_EVENT_FINGER_MOTION;
+      return;
+    }
   }
   pending_events.push_back(event);
 #else
@@ -343,12 +352,23 @@ void OnSDLEvent(const SDL_Event& event) {
 void PumpSDLEvents() {
 #if !REX_PLATFORM_CONSOLE
   std::deque<SDL_Event> events;
+  bool history_lost = false;
   {
     std::lock_guard lock(event_mutex);
     events.swap(pending_events);
+    history_lost = pending_touch_history_lost;
+    pending_touch_history_lost = false;
   }
+  if (history_lost) rex::input::GetAbsolutePointerService().CancelAll(Timestamp());
   if (sdl_window) sdl_device_inventory.Refresh(SDL_GetTicksNS());
-  for (const auto& event : events) ProcessSDLEvent(event);
+  for (const auto& event : events) {
+    // Reject the whole damaged touch batch. A retained Down with a missing
+    // reversal would otherwise create a plausible but unintended gesture.
+    if (history_lost && (event.type == SDL_EVENT_FINGER_DOWN ||
+        event.type == SDL_EVENT_FINGER_MOTION || event.type == SDL_EVENT_FINGER_UP ||
+        event.type == SDL_EVENT_FINGER_CANCELED)) continue;
+    ProcessSDLEvent(event);
+  }
 #endif
 }
 

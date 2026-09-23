@@ -1,10 +1,12 @@
 #include "input/context_touch_layout.h"
+#include "input/context_touch_activity.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <rex/input/input.h>
 
 namespace gta4::input {
@@ -41,6 +43,7 @@ const char* ActionIconId(TouchAction action) {
       "zoom_out", "edit_done", "edit_reset", "edit_smaller", "edit_larger", "edit_opacity",
       "edit_handedness", "edit_floating", "edit_camera_speed", "edit_aim_speed", "weapon_select", "activity_right_stick",
       "edit_vehicle_speed", "edit_flight_speed", "edit_invert_y",
+      "activity_primary", "activity_secondary",
   };
   static_assert(names.size() == static_cast<size_t>(TouchAction::kCount));
   const auto index = static_cast<size_t>(action);
@@ -49,7 +52,7 @@ const char* ActionIconId(TouchAction action) {
 
 const char* ScriptLabel(TouchScriptControl control) {
   // Raw indices: sub_825D1308 and accepted PAD tokens in sub_821F2360.
-  constexpr std::array raw = {"LT", "RT", "LB", "RB", "UP", "DOWN", "LEFT", "RIGHT",
+  constexpr std::array raw = {"LB", "LT", "RB", "RT", "UP", "DOWN", "LEFT", "RIGHT",
                               "START", "BACK", "X", "Y", "A", "B", "L3", "R3"};
   if (control.kind == TouchScriptQueryKind::kRawButton) {
     return control.action >= 4 && control.action - 4 < raw.size() ? raw[control.action - 4] : "ACTION";
@@ -162,6 +165,8 @@ ContextTouchLayout BuildContextTouchLayout(
   if (mode == ContextTouchMode::kFrontend || mode == ContextTouchMode::kMap) {
     return {.mode = mode, .viewport = viewport};
   }
+  if (mode != ContextTouchMode::kDisabled && options.activity.valid && !options.activity.native_combat && !options.editing)
+    return BuildTouchActivityLayout(viewport, options.activity, options.context_generation, script_controls, options);
   if (options.contextual) return BuildSemanticLayout(mode, viewport, script_controls, options);
   ContextTouchLayout layout{.mode = mode, .viewport = viewport};
   if (mode == ContextTouchMode::kDisabled || !viewport.valid || !viewport.focused ||
@@ -646,7 +651,19 @@ ContextTouchLayout BuildSemanticLayout(ContextTouchMode mode, const ContextTouch
             options.armed && !options.melee && !phone, K::kNativeButton, V::kR);
     compact(A::kAim, "AIM", 0, 1, !phone, K::kNativeTrigger, V::kRButton);
     compact(A::kCrouch, "CROUCH", X_INPUT_GAMEPAD_LEFT_THUMB, 0, !options.melee && !phone);
-    compact(A::kWeaponWheel, "WEAPON", 0, 0, !phone, K::kUtility);
+    compact(A::kWeaponWheel, "WEAPON", 0, 0, !phone && !options.activity.valid, K::kUtility);
+    for (size_t i = 0; i < layout.control_count; ++i) {
+      auto& selector = layout.controls[i];
+      if (selector.action != A::kWeaponWheel || options.current_weapon_slot >= options.weapon_names.size()) continue;
+      const auto& name = options.weapon_names[options.current_weapon_slot];
+      if (name[0]) {
+        SetLabel(selector, name.data());
+        std::snprintf(selector.accessible_name.data(), selector.accessible_name.size(),
+                      "%s: tap or swipe to cycle; hold to select", name.data());
+        std::snprintf(selector.icon_id.data(), selector.icon_id.size(), "weapon_%u",
+                      options.weapon_types[options.current_weapon_slot]);
+      }
+    }
     compact(A::kFreeAim, "FREE AIM", 0, 1,
             options.armed && options.free_aim_available && !options.melee && !phone, K::kNativeTrigger);
     compact(A::kZoomIn, "ZOOM +", 0, 0, options.scoped_zoom && !phone, K::kUtility);
@@ -698,6 +715,21 @@ ContextTouchLayout BuildSemanticLayout(ContextTouchMode mode, const ContextTouch
       if (c.kind == K::kLookSurface) continue;
       c.center_x = viewport.safe_x + right - c.center_x;
       c.minimum_x = c.center_x - c.radius; c.maximum_x = c.center_x + c.radius;
+    }
+  }
+  if (options.inventory_known && options.weapon_hud_bounds && mode == ContextTouchMode::kOnFoot && !phone && !options.activity.valid) {
+    const auto& b = *options.weapon_hud_bounds;
+    for (size_t i = 0; i < layout.control_count; ++i) {
+      auto& c = layout.controls[i];
+      if (c.action != A::kWeaponWheel) continue;
+      // The game already draws the current weapon silhouette here. Own its
+      // exact submitted rectangle instead of painting a duplicate icon.
+      c.native_hud = true;
+      c.minimum_x = b.left; c.minimum_y = b.top;
+      c.maximum_x = b.right; c.maximum_y = b.bottom;
+      c.center_x = std::midpoint(b.left, b.right);
+      c.center_y = std::midpoint(b.top, b.bottom);
+      c.radius = std::min(b.right - b.left, b.bottom - b.top) * 0.5f;
     }
   }
   ApplyContextTouchHudReservation(layout, options.weapon_hud_bounds);
@@ -752,7 +784,7 @@ bool ApplyContextTouchHudReservation(
   bool any_affected = false;
   for (size_t i = 0; i < count; ++i) {
     auto& control = layout.controls[i];
-    if (!control.visible || control.kind == ContextTouchControlKind::kLookSurface ||
+    if (!control.visible || control.native_hud || control.kind == ContextTouchControlKind::kLookSurface ||
         !std::isfinite(control.radius) || control.radius <= 0.0f ||
         !HudOverlapsCircle(*bounds, control.center_x, control.center_y, control.radius, layout.viewport)) continue;
     affected[i] = any_affected = true;
@@ -878,6 +910,7 @@ bool ContextTouchLayoutEquivalent(const ContextTouchLayout& left,
     if (a.kind != b.kind || a.action != b.action || a.key != b.key ||
         a.pad_buttons != b.pad_buttons || a.trigger_side != b.trigger_side ||
         a.trigger_value != b.trigger_value || a.weapon_slot != b.weapon_slot ||
+        a.activity_gesture != b.activity_gesture || a.native_hud != b.native_hud || a.visible != b.visible ||
         a.script.input_group != b.script.input_group || a.script.script_thread != b.script.script_thread ||
         a.script.generation != b.script.generation || a.script.kind != b.script.kind ||
         a.script.action != b.script.action || a.center_x != b.center_x ||
@@ -893,7 +926,8 @@ bool ContextTouchControlContains(const ContextTouchControl& control,
                                 const ContextTouchViewport& viewport,
                                 float x, float y) noexcept {
   if (!control.visible || !std::isfinite(x) || !std::isfinite(y)) return false;
-  if (control.kind == ContextTouchControlKind::kLookSurface) {
+  if (control.native_hud || control.kind == ContextTouchControlKind::kLookSurface ||
+      control.kind == ContextTouchControlKind::kActivitySurface) {
     return x >= control.minimum_x && x <= control.maximum_x &&
            y >= control.minimum_y && y <= control.maximum_y;
   }

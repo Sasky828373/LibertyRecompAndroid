@@ -1,16 +1,14 @@
 diff --git a/XenosRecomp/CMakeLists.txt b/XenosRecomp/CMakeLists.txt
-index b187f59..36c5fc1 100644
 --- a/XenosRecomp/CMakeLists.txt
 +++ b/XenosRecomp/CMakeLists.txt
-@@ -1,5 +1,7 @@
+@@ -1,4 +1,6 @@
  project(XenosRecomp)
- 
-+option(XENOS_RECOMP_GTA4 "Generate GTA IV-compatible shader interfaces" OFF)
 +
++option(XENOS_RECOMP_GTA4 "Generate GTA IV-compatible shader interfaces" OFF)
+ 
  if (WIN32)
      option(XENOS_RECOMP_DXIL "Generate DXIL shader cache" ON)
- endif()
-@@ -32,6 +34,10 @@ target_include_directories(XenosRecomp PRIVATE ${SMOLV_SOURCE_DIR})
+@@ -32,6 +34,10 @@
  
  target_precompile_headers(XenosRecomp PRIVATE pch.h)
  
@@ -22,19 +20,18 @@ index b187f59..36c5fc1 100644
      target_compile_options(XenosRecomp PRIVATE -Wno-switch -Wno-unused-variable -Wno-null-arithmetic -fms-extensions)
  endif()
 diff --git a/XenosRecomp/air_compiler.cpp b/XenosRecomp/air_compiler.cpp
-index 6cd79e3..131f890 100644
 --- a/XenosRecomp/air_compiler.cpp
 +++ b/XenosRecomp/air_compiler.cpp
-@@ -5,6 +5,8 @@
+@@ -4,6 +4,8 @@
+ #include <iterator>
  #include <spawn.h>
  #include <unistd.h>
- 
-+extern char** environ;
 +
++extern char** environ;
+ 
  struct TemporaryPath
  {
-     const std::string path;
-@@ -20,7 +22,7 @@ struct TemporaryPath
+@@ -20,7 +22,7 @@
  static int executeCommand(const char** argv)
  {
      pid_t pid;
@@ -43,7 +40,7 @@ index 6cd79e3..131f890 100644
          return -1;
  
      int status;
-@@ -54,12 +56,19 @@ std::vector<uint8_t> AirCompiler::compile(const std::string& shaderSource)
+@@ -54,12 +56,19 @@
      }
  
      const char* compileCommand[] = {
@@ -64,7 +61,7 @@ index 6cd79e3..131f890 100644
  #endif
          nullptr
      };
-@@ -70,7 +79,7 @@ std::vector<uint8_t> AirCompiler::compile(const std::string& shaderSource)
+@@ -70,7 +79,7 @@
          std::exit(1);
      }
  
@@ -74,10 +71,9 @@ index 6cd79e3..131f890 100644
      {
          fmt::println("Metal linker exited with status: {}", linkStatus);
 diff --git a/XenosRecomp/dxc_compiler.cpp b/XenosRecomp/dxc_compiler.cpp
-index 3386952..a466d3b 100644
 --- a/XenosRecomp/dxc_compiler.cpp
 +++ b/XenosRecomp/dxc_compiler.cpp
-@@ -43,6 +43,9 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
+@@ -43,6 +43,9 @@
      args[argCount++] = L"-HV 2021";
      args[argCount++] = L"-all-resources-bound";
  
@@ -87,18 +83,17 @@ index 3386952..a466d3b 100644
      if (compileSpirv)
      {
          args[argCount++] = L"-spirv";
-@@ -65,6 +68,9 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
+@@ -64,6 +67,9 @@
+ #endif
  #ifdef MARATHON_RECOMP
      args[argCount++] = L"-DMARATHON_RECOMP";
- #endif
++#endif
 +#ifdef GTA4_RECOMP
 +    args[argCount++] = L"-DGTA4_RECOMP";
-+#endif
+ #endif
  
      IDxcResult* result = nullptr;
-     HRESULT hr = dxcCompiler->Compile(&source, args, argCount, nullptr, IID_PPV_ARGS(&result));
 diff --git a/XenosRecomp/main.cpp b/XenosRecomp/main.cpp
-index a8b87a6..753bcd3 100644
 --- a/XenosRecomp/main.cpp
 +++ b/XenosRecomp/main.cpp
 @@ -1,10 +1,13 @@
@@ -115,7 +110,7 @@ index a8b87a6..753bcd3 100644
  
  #ifdef XENOS_RECOMP_AIR
  #include "air_compiler.h"
-@@ -34,31 +37,50 @@ struct RecompiledShader
+@@ -34,37 +37,79 @@
      uint8_t* data = nullptr;
      IDxcBlob* dxil = nullptr;
      std::vector<uint8_t> spirv;
@@ -162,10 +157,12 @@ index a8b87a6..753bcd3 100644
  
  #ifdef XENOS_RECOMP_AIR
 -    shader.air = AirCompiler::compile(recompiler.out);
-+    shader.air = AirCompiler::compile(earlySource);
- #endif
- 
+-#endif
+-
 -    IDxcBlob* spirv = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, false, true);
++    shader.air = AirCompiler::compile(earlySource);
++#endif
++
 +    IDxcBlob* spirv;
 +    {
 +        std::lock_guard lock(dxcCompilerMutex);
@@ -174,10 +171,10 @@ index a8b87a6..753bcd3 100644
      assert(spirv != nullptr);
  
      bool result = smolv::Encode(spirv->GetBufferPointer(), spirv->GetBufferSize(), shader.spirv, smolv::kEncodeFlagStripDebugInfo);
-@@ -66,6 +88,29 @@ void recompileShader(RecompiledShader& shader, const std::string_view include, s
+     assert(result);
  
      spirv->Release();
- 
++
 +    if (recovered ? !shader.recoveredLate.empty() :
 +        (isPixelShader && (shader.specConstantsMask & SPEC_CONSTANT_ALPHA_TEST_CAPABILITY_MASK) == SPEC_CONSTANT_ALPHA_TEST_CAPABILITY_MASK))
 +    {
@@ -200,11 +197,10 @@ index a8b87a6..753bcd3 100644
 +
 +        spirv->Release();
 +    }
-+
+ 
      size_t currentProgress = ++progress;
      if ((currentProgress % 10) == 0 || (currentProgress == numShaders - 1))
-         fmt::println("Recompiling shaders... {}%", currentProgress / float(numShaders) * 100.0f);
-@@ -76,7 +121,8 @@ int main(int argc, char** argv)
+@@ -76,7 +121,8 @@
  #ifndef XENOS_RECOMP_INPUT
      if (argc < 4)
      {
@@ -214,7 +210,7 @@ index a8b87a6..753bcd3 100644
          return 0;
      }
  #endif
-@@ -105,6 +151,46 @@ int main(int argc, char** argv)
+@@ -105,6 +151,46 @@
  #endif
          ;
  
@@ -261,7 +257,7 @@ index a8b87a6..753bcd3 100644
      size_t includeSize = 0;
      auto includeData = readAllBytes(includeInput, includeSize);
      std::string_view include(reinterpret_cast<const char*>(includeData.get()), includeSize);
-@@ -125,6 +211,7 @@ int main(int argc, char** argv)
+@@ -125,6 +211,7 @@
              size_t fileSize = 0;
              auto fileData = readAllBytes(file.path().string().c_str(), fileSize);
              bool foundAny = false;
@@ -269,7 +265,7 @@ index a8b87a6..753bcd3 100644
  
              for (size_t i = 0; fileSize > sizeof(ShaderContainer) && i < fileSize - sizeof(ShaderContainer) - 1;)
              {
-@@ -137,19 +224,27 @@ int main(int argc, char** argv)
+@@ -137,25 +224,79 @@
                      shaderContainer->field20 == 0)
                  {
                      XXH64_hash_t hash = XXH3_64bits(shaderContainer, dataSize);
@@ -303,10 +299,10 @@ index a8b87a6..753bcd3 100644
                  }
              }
  
-@@ -157,6 +252,52 @@ int main(int argc, char** argv)
+             if (foundAny)
                  files.emplace_back(std::move(fileData));
          }
- 
++
 +        try
 +        {
 +            const auto recoveryDirectory = std::filesystem::path(recoveredSourcePath).parent_path();
@@ -352,11 +348,10 @@ index a8b87a6..753bcd3 100644
 +        }
 +        if (missingPreferredSource)
 +            return 1;
-+
+ 
          std::mutex shaderQueueMutex;
          std::deque<XXH64_hash_t> shaderQueue;
-         for (const auto& [hash, _] : shaders)
-@@ -206,17 +347,10 @@ int main(int argc, char** argv)
+@@ -206,17 +347,10 @@
  
          for (auto& [hash, shader] : shaders)
          {
@@ -378,7 +373,7 @@ index a8b87a6..753bcd3 100644
  
              if (shader.dxil != nullptr)
              {
-@@ -229,6 +363,22 @@ int main(int argc, char** argv)
+@@ -229,6 +363,22 @@
  #endif
  
              spirv.insert(spirv.end(), shader.spirv.begin(), shader.spirv.end());
@@ -402,7 +397,6 @@ index a8b87a6..753bcd3 100644
  
          f.println("}};");
 diff --git a/XenosRecomp/pch.h b/XenosRecomp/pch.h
-index b080943..5a24b50 100644
 --- a/XenosRecomp/pch.h
 +++ b/XenosRecomp/pch.h
 @@ -17,6 +17,7 @@
@@ -414,7 +408,6 @@ index b080943..5a24b50 100644
  #include <zstd.h>
  
 diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
-index 5e0b6b1..521aa3c 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
 @@ -3,6 +3,9 @@
@@ -427,7 +420,7 @@ index 5e0b6b1..521aa3c 100644
  
  #ifdef UNLEASHED_RECOMP
      #define SPEC_CONSTANT_BICUBIC_GI_FILTER (1 << 2)
-@@ -32,18 +35,37 @@ struct PushConstants
+@@ -32,18 +35,37 @@
  
  [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
  
@@ -477,7 +470,7 @@ index 5e0b6b1..521aa3c 100644
  
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  
-@@ -70,39 +92,121 @@ struct PushConstants
+@@ -70,37 +92,119 @@
      ulong SharedConstants;
  };
  
@@ -493,6 +486,9 @@ index 5e0b6b1..521aa3c 100644
 -#define g_AlphaThreshold (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 308)))
 -#define g_conditionalSurveyIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + 312)))
 -#define g_conditionalRenderingIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + 316)))
+-
+-#else
+-
 +#ifdef GTA4_RECOMP
 +#define GetTextureLodBias(SLOT) (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 752 + (SLOT) * 4)))
 +#define g_Booleans (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + 528)))
@@ -522,12 +518,24 @@ index 5e0b6b1..521aa3c 100644
 +#define g_conditionalSurveyIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + 376)))
 +#define g_conditionalRenderingIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + 380)))
 +#endif
- 
- #else
- 
++
++#else
++
 +#ifdef GTA4_RECOMP
 +#define GetTextureLodBias(SLOT) g_TextureLodBias[(SLOT) / 4][(SLOT) % 4]
-+#define DEFINE_SHARED_CONSTANTS() \
+ #define DEFINE_SHARED_CONSTANTS() \
+-    uint g_Booleans : packoffset(c16.x); \
+-    uint g_SwappedTexcoords : packoffset(c16.y); \
+-    uint g_SwappedNormals : packoffset(c16.z); \
+-    uint g_SwappedBinormals : packoffset(c16.w); \
+-    uint g_SwappedTangents : packoffset(c17.x);  \
+-    uint g_SwappedBlendWeights : packoffset(c17.y); \
+-    float2 g_HalfPixelOffset : packoffset(c17.z); \
+-    float4 g_ClipPlane : packoffset(c18.x); \
+-    bool g_ClipPlaneEnabled : packoffset(c19.x); \
+-    float g_AlphaThreshold : packoffset(c19.y); \
+-    uint g_conditionalSurveyIndex : packoffset(c19.z); \
+-    uint g_conditionalRenderingIndex : packoffset(c19.w);
 +    uint g_Booleans : packoffset(c33.x); \
 +    uint g_SwappedTexcoords : packoffset(c33.y); \
 +    uint g_SwappedNormals : packoffset(c33.z); \
@@ -543,19 +551,7 @@ index 5e0b6b1..521aa3c 100644
 +    float2 g_FragmentCoordinateScale : packoffset(c46.z); \
 +    float4 g_TextureLodBias[7] : packoffset(c47);
 +#else
- #define DEFINE_SHARED_CONSTANTS() \
--    uint g_Booleans : packoffset(c16.x); \
--    uint g_SwappedTexcoords : packoffset(c16.y); \
--    uint g_SwappedNormals : packoffset(c16.z); \
--    uint g_SwappedBinormals : packoffset(c16.w); \
--    uint g_SwappedTangents : packoffset(c17.x);  \
--    uint g_SwappedBlendWeights : packoffset(c17.y); \
--    float2 g_HalfPixelOffset : packoffset(c17.z); \
--    float4 g_ClipPlane : packoffset(c18.x); \
--    bool g_ClipPlaneEnabled : packoffset(c19.x); \
--    float g_AlphaThreshold : packoffset(c19.y); \
--    uint g_conditionalSurveyIndex : packoffset(c19.z); \
--    uint g_conditionalRenderingIndex : packoffset(c19.w);
++#define DEFINE_SHARED_CONSTANTS() \
 +    uint g_Booleans : packoffset(c20.x); \
 +    uint g_SwappedTexcoords : packoffset(c20.y); \
 +    uint g_SwappedNormals : packoffset(c20.z); \
@@ -572,8 +568,8 @@ index 5e0b6b1..521aa3c 100644
  
  uint g_SpecConstants();
  
- #endif
- 
++#endif
++
 +#if defined(GTA4_RECOMP) && defined(__spirv__)
 +uint ComputeXenosAlphaToMask(float alpha, float2 position, uint alphaToMask,
 +                             uint sampleCount)
@@ -618,12 +614,10 @@ index 5e0b6b1..521aa3c 100644
 +
 +    return sampleMask;
 +}
-+#endif
-+
+ #endif
+ 
  float4 cube(float4 value)
- {
-     float3 src = value.zwx;
-@@ -193,6 +297,11 @@ struct Texture2DArrayDescriptorHeap
+@@ -193,6 +297,11 @@
      texture2d_array<float> tex;
  };
  
@@ -635,15 +629,17 @@ index 5e0b6b1..521aa3c 100644
  struct TextureCubeDescriptorHeap
  {
      texturecube<float> tex;
-@@ -218,41 +327,106 @@ uint3 getTexture2DArrayDimensions(texture2d_array<float> texture)
+@@ -216,42 +325,107 @@
+ uint3 getTexture2DArrayDimensions(texture2d_array<float> texture)
+ {
      return uint3(texture.get_width(), texture.get_height(), texture.get_array_size());
- }
- 
++}
++
 +uint3 getTexture3DDimensions(texture3d<float> texture)
 +{
 +    return uint3(texture.get_width(), texture.get_height(), texture.get_depth());
-+}
-+
+ }
+ 
  float4 tfetch2D(constant Texture2DDescriptorHeap* textureHeap,
                  constant SamplerDescriptorHeap* samplerHeap,
                  uint resourceDescriptorIndex,
@@ -705,13 +701,14 @@ index 5e0b6b1..521aa3c 100644
      sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
      float3 dir = cubeDir(texCoord);
 -    return texture.sample(sampler, dir);
+-}
 +#if defined(GTA4_RECOMP) && !defined(XENOS_RECOMP_PIXEL_SHADER)
 +    return texture.sample(sampler, dir, level(lodBias));
 +#else
 +    return texture.sample(sampler, dir, bias(lodBias));
 +#endif
- }
- 
++}
++
 +#ifdef GTA4_RECOMP
 +// Explicit texture levels are separate from implicit sampling plus bias. The
 +// caller combines register LOD, fetch-constant bias and instruction bias once.
@@ -744,11 +741,10 @@ index 5e0b6b1..521aa3c 100644
 +        samplerHeap[samplerDescriptorIndex].samp, cubeDir(texCoord), level(lod));
 +}
 +#endif
-+
+ 
  float2 getWeights2D(constant Texture2DDescriptorHeap* textureHeap,
                      constant SamplerDescriptorHeap* samplerHeap,
-                     uint resourceDescriptorIndex,
-@@ -273,15 +447,27 @@ float3 getWeights2DArray(constant Texture2DArrayDescriptorHeap* textureHeap,
+@@ -273,15 +447,27 @@
      return select(fract(texCoord * float3(getTexture2DArrayDimensions(texture)) + offset - 0.5), 0.0, isnan(texCoord));
  }
  
@@ -779,7 +775,7 @@ index 5e0b6b1..521aa3c 100644
  #endif
  
  uint2 getTexture2DDimensions(Texture2D<float4> texture)
-@@ -298,26 +484,88 @@ uint3 getTexture2DArrayDimensions(Texture2DArray<float4> texture)
+@@ -298,25 +484,87 @@
      return dimensions.xyz;
  }
  
@@ -799,19 +795,24 @@ index 5e0b6b1..521aa3c 100644
  {
      Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
 -    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
+-}
+-
+-float4 tfetch2DArray(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float3 offset)
 +#ifdef XENOS_RECOMP_PIXEL_SHADER
 +    return texture.SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), lodBias);
 +#else
 +    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), lodBias);
 +#endif
- }
- 
--float4 tfetch2DArray(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float3 offset)
++}
++
 +float4 tfetch2DArray(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float3 offset, float lodBias = 0.0)
  {
      Texture2DArray<float4> texture = g_Texture2DArrayDescriptorHeap[resourceDescriptorIndex];
      uint3 dimensions = getTexture2DArrayDimensions(texture);
 -    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], float3(texCoord.xy + offset.xy / dimensions.xy, texCoord.z * dimensions.z));
+-}
+-
+-float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
 +#ifdef XENOS_RECOMP_PIXEL_SHADER
 +    return texture.SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], float3(texCoord.xy + offset.xy / dimensions.xy, texCoord.z * dimensions.z), lodBias);
 +#else
@@ -830,14 +831,14 @@ index 5e0b6b1..521aa3c 100644
 +    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex],
 +                               texCoord + offset / dimensions, lodBias);
 +#endif
- }
- 
--float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
++}
++
 +float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float lodBias = 0.0)
  {
      float3 dir = cubeDir(texCoord);
 -    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(
 -        g_SamplerDescriptorHeap[samplerDescriptorIndex], dir);
+-}
 +#ifdef XENOS_RECOMP_PIXEL_SHADER
 +    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleBias(
 +        g_SamplerDescriptorHeap[samplerDescriptorIndex], dir, lodBias);
@@ -862,8 +863,8 @@ index 5e0b6b1..521aa3c 100644
 +    Texture3D<float4> texture = g_Texture3DDescriptorHeap[resourceDescriptorIndex];
 +    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex],
 +        texCoord + offset / getTexture3DDimensions(texture), lod);
- }
- 
++}
++
 +float4 tfetchCubeLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
 +                     float3 texCoord, float lod)
 +{
@@ -871,11 +872,10 @@ index 5e0b6b1..521aa3c 100644
 +        g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeDir(texCoord), lod);
 +}
 +#endif
-+
+ 
  float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
  {
-     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-@@ -330,6 +578,13 @@ float3 getWeights2DArray(uint resourceDescriptorIndex, uint samplerDescriptorInd
+@@ -330,6 +578,13 @@
      return select(isnan(texCoord), 0.0, frac(texCoord * getTexture2DArrayDimensions(texture) + offset - 0.5));
  }
  
@@ -889,8 +889,60 @@ index 5e0b6b1..521aa3c 100644
  #endif
  
  #ifdef __air__
+@@ -337,6 +592,52 @@
+ #else
+ #define selectWrapper(a, b, c) select(a, b, c)
+ #endif
++
++// Xenos / Shader Model 3 multiplication: either signed zero or denormal
++// operand produces +0, including 0 * infinity and 0 * NaN. Classify and
++// select integer bits so relaxed floating-point optimization cannot assume
++// that the operands or the unselected product are finite.
++// See xenia/src/xenia/gpu/dxbc_shader_translator_alu.cc (kMul/kMad/kDp3).
++#ifdef __air__
++#define XENOS_BITCAST(TYPE, VALUE) as_type<TYPE>(VALUE)
++#else
++#define XENOS_BITCAST_uint(VALUE) asuint(VALUE)
++#define XENOS_BITCAST_uint2(VALUE) asuint(VALUE)
++#define XENOS_BITCAST_uint3(VALUE) asuint(VALUE)
++#define XENOS_BITCAST_uint4(VALUE) asuint(VALUE)
++#define XENOS_BITCAST_float(VALUE) asfloat(VALUE)
++#define XENOS_BITCAST_float2(VALUE) asfloat(VALUE)
++#define XENOS_BITCAST_float3(VALUE) asfloat(VALUE)
++#define XENOS_BITCAST_float4(VALUE) asfloat(VALUE)
++#define XENOS_BITCAST(TYPE, VALUE) XENOS_BITCAST_##TYPE(VALUE)
++#endif
++#define XENOS_MUL_OVERLOAD(TYPE, BITS) \
++TYPE xenosMul(TYPE a, TYPE b) { \
++    BITS aBits = XENOS_BITCAST(BITS, a); \
++    BITS bBits = XENOS_BITCAST(BITS, b); \
++    BITS product = XENOS_BITCAST(BITS, a * b); \
++    return XENOS_BITCAST(TYPE, selectWrapper( \
++        ((aBits & 0x7F800000u) == 0u) | ((bBits & 0x7F800000u) == 0u), \
++        (BITS)0u, product)); \
++}
++XENOS_MUL_OVERLOAD(float, uint)
++XENOS_MUL_OVERLOAD(float2, uint2)
++XENOS_MUL_OVERLOAD(float3, uint3)
++XENOS_MUL_OVERLOAD(float4, uint4)
++#undef XENOS_MUL_OVERLOAD
++
++float xenosDot(float2 a, float2 b) {
++    float2 p = xenosMul(a, b);
++    return p.x + p.y;
++}
++float xenosDot(float3 a, float3 b) {
++    float3 p = xenosMul(a, b);
++    return (p.x + p.y) + p.z;
++}
++float xenosDot(float4 a, float4 b) {
++    float4 p = xenosMul(a, b);
++    return ((p.x + p.y) + p.z) + p.w;
++}
+ 
+ #ifdef __air__
+ #define frac(X) fract(X)
 diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
-index bb8a47e..6a0aca4 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -1,3 +1,4 @@
@@ -898,7 +950,7 @@ index bb8a47e..6a0aca4 100644
  #include "shader_recompiler.h"
  #include "shader_common.h"
  
-@@ -17,7 +18,13 @@ static constexpr const char* USAGE_TYPES[] =
+@@ -17,7 +18,13 @@
  {
      "float4", // POSITION
      "float4", // BLENDWEIGHT
@@ -912,7 +964,7 @@ index bb8a47e..6a0aca4 100644
      "float4", // NORMAL
      "float4", // PSIZE
      "float4", // TEXCOORD
-@@ -97,6 +104,28 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
+@@ -97,6 +104,28 @@
      { DeclUsage::Color, 0, 17 },
      { DeclUsage::BlendIndices, 0, 18 },
      { DeclUsage::BlendWeight, 0, 19 },
@@ -941,7 +993,7 @@ index bb8a47e..6a0aca4 100644
  };
  
  static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
-@@ -121,13 +150,30 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+@@ -121,12 +150,29 @@
      { DeclUsage::Color, 1 }
  };
  
@@ -953,7 +1005,7 @@ index bb8a47e..6a0aca4 100644
 +    "3D",
      "Cube" 
  };
- 
++
 +#ifdef GTA4_RECOMP
 +static constexpr uint32_t TEXTURE_DESCRIPTOR_COUNT = 26;
 +#else
@@ -969,11 +1021,10 @@ index bb8a47e..6a0aca4 100644
 +{
 +    return textureDescriptorWord(dimension, slot) * sizeof(uint32_t);
 +}
-+
+ 
  static FetchDestinationSwizzle getDestSwizzle(uint32_t dstSwizzle, uint32_t index)
  {
-     return FetchDestinationSwizzle((dstSwizzle >> (index * 3)) & 0x7);
-@@ -243,7 +289,11 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+@@ -243,7 +289,11 @@
  
  void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
  {
@@ -986,10 +1037,11 @@ index bb8a47e..6a0aca4 100644
          return;
  
      if (instr.isPredicated)
-@@ -264,6 +314,31 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -263,6 +313,31 @@
+             for (size_t i = 0; i < componentCount; i++)
                  out += SWIZZLES[((instr.srcSwizzle >> (i * 2))) & 0x3];
          };
- 
++
 +#ifdef GTA4_RECOMP
 +    // setTexLOD updates per-invocation state, not a sampler or a destination
 +    // register. Keep the assignment inside the instruction's predicate scope.
@@ -1014,11 +1066,10 @@ index bb8a47e..6a0aca4 100644
 +    const bool useComputedLod = instr.useCompLod &&
 +        (isPixelShader || instr.useRegGradients);
 +#endif
-+
+ 
      std::string constName;
      const char* constNamePtr = nullptr;
- #ifdef UNLEASHED_RECOMP
-@@ -339,7 +414,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -339,7 +414,7 @@
          componentCount = 2;
          break;
      case TextureDimension::Texture3D:
@@ -1027,7 +1078,7 @@ index bb8a47e..6a0aca4 100644
          componentCount = 3;
          break;
      case TextureDimension::TextureCube:
-@@ -349,6 +424,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -349,6 +424,10 @@
      }
  
      out += dimension;
@@ -1038,7 +1089,7 @@ index bb8a47e..6a0aca4 100644
  
  #ifdef UNLEASHED_RECOMP
      if (bicubic)
-@@ -378,6 +457,19 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+@@ -378,6 +457,19 @@
              break;
      }
  
@@ -1058,7 +1109,76 @@ index bb8a47e..6a0aca4 100644
      out += ").";
  
      printDstSwizzle(instr.dstSwizzle, true);
-@@ -1283,21 +1375,151 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+@@ -770,7 +862,9 @@
+                 auto v1 = op(VECTOR_1);
+                 operationResultComponentCount = std::max(v0.componentCount, v1.componentCount);
+ 
+-                print("{} * {}", v0.expression, v1.expression);
++                const auto type = operationResultComponentCount == 1 ? "float" :
++                    fmt::format("float{}", operationResultComponentCount);
++                print("xenosMul(({})({}), ({})({}))", type, v0.expression, type, v1.expression);
+                 break;
+             }
+ 
+@@ -869,7 +963,9 @@
+                 auto v2 = op(VECTOR_2);
+                 operationResultComponentCount = std::max(std::max(v0.componentCount, v1.componentCount), v2.componentCount);
+ 
+-                print("{} * {} + {}", v0.expression, v1.expression, v2.expression);
++                const auto type = operationResultComponentCount == 1 ? "float" :
++                    fmt::format("float{}", operationResultComponentCount);
++                print("xenosMul(({})({}), ({})({})) + {}", type, v0.expression, type, v1.expression, v2.expression);
+                 break;
+             }
+ 
+@@ -908,16 +1004,19 @@
+ 
+         case AluVectorOpcode::Dp4:
+         case AluVectorOpcode::Dp3:
++        {
+             operationResultComponentCount = 1;
+-            print("dot({}, {})", op(VECTOR_0).expression, op(VECTOR_1).expression);
+-            break;
++            const auto type = instr.vectorOpcode == AluVectorOpcode::Dp3 ? "float3" : "float4";
++            print("xenosDot(({})({}), ({})({}))", type, op(VECTOR_0).expression, type, op(VECTOR_1).expression);
++            break;
++        }
+ 
+         case AluVectorOpcode::Dp2Add:
+             {
+                 auto v2 = op(VECTOR_2);
+                 operationResultComponentCount = v2.componentCount;
+ 
+-                print("dot({}, {}) + {}", op(VECTOR_0).expression, op(VECTOR_1).expression, v2.expression);
++                print("xenosDot((float2)({}), (float2)({})) + {}", op(VECTOR_0).expression, op(VECTOR_1).expression, v2.expression);
+                 break;
+             }
+ 
+@@ -1050,12 +1149,12 @@
+             break;
+ 
+         case AluScalarOpcode::Muls:
+-            print("{} * {}", op(SCALAR_0).expression, op(SCALAR_1).expression);
++            print("xenosMul({}, {})", op(SCALAR_0).expression, op(SCALAR_1).expression);
+             break;
+ 
+         case AluScalarOpcode::MulsPrev:
+         case AluScalarOpcode::MulsPrev2:
+-            print("{} * ps", op(SCALAR_0).expression);
++            print("xenosMul({}, ps)", op(SCALAR_0).expression);
+             break;
+ 
+         case AluScalarOpcode::Maxs:
+@@ -1174,7 +1273,7 @@
+ 
+         case AluScalarOpcode::Mulsc0:
+         case AluScalarOpcode::Mulsc1:
+-            print("{} * {}", op(SCALAR_CONSTANT_0).expression, op(SCALAR_CONSTANT_1).expression);
++            print("xenosMul({}, {})", op(SCALAR_CONSTANT_0).expression, op(SCALAR_CONSTANT_1).expression);
+             break;
+ 
+         case AluScalarOpcode::Addsc0:
+@@ -1283,20 +1382,150 @@
      }
  }
  
@@ -1099,7 +1219,7 @@ index bb8a47e..6a0aca4 100644
  
      const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
      constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
- 
++
 +    // ---------------------------------------------------------------------
 +    // Pre-scan the Xenos microcode for every tfetch constIndex referenced.
 +    //
@@ -1208,11 +1328,10 @@ index bb8a47e..6a0aca4 100644
 +        // every possible slot has an exact bit in this 32-bit interface mask.
 +        usedTextureMask |= uint32_t{1} << slot;
 +    }
-+
+ 
      out += "#ifdef __spirv__\n\n";
  
- #ifdef UNLEASHED_RECOMP
-@@ -1359,11 +1581,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1359,17 +1588,38 @@
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
@@ -1229,10 +1348,11 @@ index bb8a47e..6a0aca4 100644
  
              samplers.emplace(constantInfo->registerIndex, constantName);
              break;
-@@ -1372,6 +1597,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
-     }
  
+         }
++    }
++
 +    // Synthesize declarations for tfetch slots that weren't declared by the
 +    // CTAB loop above (HLSL compiler stripped them). See the pre-scan
 +    // comment block earlier for context. The tfetch emitter falls back to
@@ -1249,12 +1369,10 @@ index bb8a47e..6a0aca4 100644
 +        }
 +        println("#define s{}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
 +            slot, textureDescriptorByteOffset(std::size(TEXTURE_DIMENSIONS), slot));
-+    }
-+
-     out += "\n#elif defined(__air__)\n\n";
+     }
  
-     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
-@@ -1408,7 +1651,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     out += "\n#elif defined(__air__)\n\n";
+@@ -1408,7 +1658,9 @@
              {
                  uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
  
@@ -1265,7 +1383,7 @@ index bb8a47e..6a0aca4 100644
                      constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1);
              }
              else
-@@ -1428,11 +1673,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1428,17 +1680,35 @@
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
                  println("#define {}_Texture{}DescriptorIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + {})))",
@@ -1282,10 +1400,11 @@ index bb8a47e..6a0aca4 100644
  
              samplers.emplace(constantInfo->registerIndex, constantName);
              break;
-@@ -1441,6 +1689,21 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
          }
-     }
  
+         }
++    }
++
 +    // Synthesize Metal declarations for tfetch slots missing from the CTAB
 +    // (mirror of the SPIR-V synthesis above — same reasoning).
 +    for (uint32_t slot : referencedTfetchSlots)
@@ -1299,21 +1418,21 @@ index bb8a47e..6a0aca4 100644
 +        }
 +        println("#define s{}_SamplerDescriptorIndex (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + {})))",
 +            slot, textureDescriptorByteOffset(std::size(TEXTURE_DIMENSIONS), slot));
-+    }
-+
-     out += "\n#else\n\n";
+     }
  
-     println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
-@@ -1486,12 +1749,39 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     out += "\n#else\n\n";
+@@ -1486,12 +1756,39 @@
  
              for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
              {
 +                const uint32_t word = textureDescriptorWord(j, constantInfo->registerIndex);
                  println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
 -                    constantName, TEXTURE_DIMENSIONS[j], j * 4 + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]);
+-            }
+-
 +                    constantName, TEXTURE_DIMENSIONS[j], word / 4, SWIZZLES[word % 4]);
-             }
- 
++            }
++
 +            const uint32_t samplerWord =
 +                textureDescriptorWord(std::size(TEXTURE_DIMENSIONS), constantInfo->registerIndex);
              println("\tuint {}_SamplerDescriptorIndex : packoffset(c{}.{});",
@@ -1346,16 +1465,16 @@ index bb8a47e..6a0aca4 100644
          }
      }
  
-@@ -1515,8 +1805,6 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1514,8 +1811,6 @@
+     }
  
      out += '\n';
- 
--    const auto shader = reinterpret_cast<const Shader*>(shaderData + shaderContainer->shaderOffset);
 -
+-    const auto shader = reinterpret_cast<const Shader*>(shaderData + shaderContainer->shaderOffset);
+ 
      println("struct {}", isPixelShader ? "Interpolators" : "VertexShaderInput");
      out += "{\n";
- 
-@@ -1653,6 +1941,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1653,6 +1948,10 @@
  
          if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
              out += "\tfloat4 oC0 : SV_Target0;\n";
@@ -1366,7 +1485,7 @@ index bb8a47e..6a0aca4 100644
          if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR1)
              out += "\tfloat4 oC1 : SV_Target1;\n";
          if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR2)
-@@ -1692,11 +1984,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1692,11 +1991,19 @@
      out += "#ifdef __air__\n";
  
      if (isPixelShader)
@@ -1387,7 +1506,7 @@ index bb8a47e..6a0aca4 100644
  
      if (isPixelShader)
          out += "[shader(\"pixel\")]\n";
-@@ -1705,6 +2005,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1705,6 +2012,15 @@
  
      out += "#endif\n";
  
@@ -1403,7 +1522,7 @@ index bb8a47e..6a0aca4 100644
      println("{} shaderMain(", isPixelShader ? "PixelShaderOutput" : "Interpolators");
  
      if (isPixelShader)
-@@ -1716,10 +2025,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1716,10 +2032,11 @@
  
          out += "\tconstant Texture2DDescriptorHeap* g_Texture2DDescriptorHeap [[buffer(0)]],\n";
          out += "\tconstant Texture2DArrayDescriptorHeap* g_Texture2DArrayDescriptorHeap [[buffer(1)]],\n";
@@ -1418,7 +1537,7 @@ index bb8a47e..6a0aca4 100644
  #endif
          out += "\tconstant PushConstants& g_PushConstants [[buffer(8)]]\n";
  
-@@ -1738,6 +2048,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1738,6 +2055,18 @@
      else
      {
          out += "#ifdef __air__\n";
@@ -1437,19 +1556,19 @@ index bb8a47e..6a0aca4 100644
          out += "\tconstant PushConstants& g_PushConstants [[buffer(8)]],\n";
          out += "\tVertexShaderInput input [[stage_in]]\n";
          out += "#else\n";
-@@ -1770,6 +2092,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1769,6 +2098,11 @@
+     out += "#else\n";
      println("\t{0} output = ({0})0;", outputName);
      out += "#endif\n";
- 
++
 +#ifdef GTA4_RECOMP
 +    if (hasAlphaTestCapability)
 +        out += "#ifdef __spirv__\n\toutput.oMask = 0xFFFFFFFFu;\n#endif\n";
 +#endif
-+
+ 
  #ifdef UNLEASHED_RECOMP
      if (hasMtxProjection)
-     {
-@@ -1863,6 +2190,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1863,6 +2197,15 @@
          }
      }
  
@@ -1465,7 +1584,7 @@ index bb8a47e..6a0aca4 100644
      if (!isPixelShader)
      {
      #ifdef UNLEASHED_RECOMP
-@@ -1883,7 +2219,11 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1883,7 +2226,11 @@
              print("\tfloat4 r{} = ", i);
              if (isPixelShader && i == ((shader->fieldC >> 8) & 0xFF))
              {
@@ -1477,7 +1596,7 @@ index bb8a47e..6a0aca4 100644
              }
          #ifdef UNLEASHED_RECOMP
              else if (!isPixelShader && hasIndexCount && i == 0)
-@@ -1902,6 +2242,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -1902,6 +2249,9 @@
      out += "\tint aL = 0;\n";
      out += "\tbool p0 = false;\n";
      out += "\tfloat ps = 0.0;\n";
@@ -1487,7 +1606,7 @@ index bb8a47e..6a0aca4 100644
      if (isPixelShader)
      {
  #ifdef UNLEASHED_RECOMP
-@@ -2049,6 +2392,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2049,6 +2399,9 @@
              uint32_t count = 0;
              uint32_t sequence = 0;
              bool shouldReturn = false;
@@ -1497,7 +1616,7 @@ index bb8a47e..6a0aca4 100644
  
              switch (cfInstr.opcode)
              {
-@@ -2067,7 +2413,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2067,7 +2420,26 @@
                  address = cfInstr.condExec.address;
                  count = cfInstr.condExec.count;
                  sequence = cfInstr.condExec.sequence;
@@ -1525,7 +1644,7 @@ index bb8a47e..6a0aca4 100644
                  break;
  
              case ControlFlowOpcode::CondExecPred:
-@@ -2131,11 +2496,17 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2131,11 +2503,17 @@
                      }
                      else
                      {
@@ -1544,26 +1663,31 @@ index bb8a47e..6a0aca4 100644
                          // println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
                      }
  
-@@ -2234,35 +2605,67 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2234,35 +2612,67 @@
              {
                  if (isPixelShader)
                  {
 -                    specConstantsMask |= SPEC_CONSTANT_ALPHA_TEST;
-+                    if (hasAlphaTestCapability)
-+                    {
-+                        specConstantsMask |= SPEC_CONSTANT_ALPHA_TEST_CAPABILITY_MASK;
- 
+-
 -                    indent();
 -                    out += "BRANCH if (g_SpecConstants() & SPEC_CONSTANT_ALPHA_TEST)\n";
 -                    indent();
 -                    out += "{\n";
+-
+-                    indent();
+-                    out += "\tclip(output.oC0.w - g_AlphaThreshold);\n";
+-
+-                    indent();
+-                    out += "}\n";
++                    if (hasAlphaTestCapability)
++                    {
++                        specConstantsMask |= SPEC_CONSTANT_ALPHA_TEST_CAPABILITY_MASK;
++
 +                        indent();
 +                        out += "BRANCH if (g_SpecConstants() & SPEC_CONSTANT_ALPHA_TEST)\n";
 +                        indent();
 +                        out += "{\n";
- 
--                    indent();
--                    out += "\tclip(output.oC0.w - g_AlphaThreshold);\n";
++
 +                        indent();
 +                        out += "\tuint alphaTestFunction = (g_SpecConstants() >> SPEC_CONSTANT_ALPHA_TEST_FUNCTION_SHIFT) & 7u;\n";
 +                        indent();
@@ -1586,36 +1710,37 @@ index bb8a47e..6a0aca4 100644
 +                        out += "\t\t(alphaTestFunction == 7u && true);\n";
 +                        indent();
 +                        out += "\tclip(alphaTestPass ? 1.0 : -1.0);\n";
- 
--                    indent();
--                    out += "}\n";
++
 +                        indent();
 +                        out += "}\n";
  
                  #ifdef UNLEASHED_RECOMP
 -                    specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
-+                        specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
- 
+-
 -                    indent();
 -                    out += "else if (g_SpecConstants() & SPEC_CONSTANT_ALPHA_TO_COVERAGE)\n";
 -                    indent();
 -                    out += "{\n";
-+                        indent();
-+                        out += "else if (g_SpecConstants() & SPEC_CONSTANT_ALPHA_TO_COVERAGE)\n";
-+                        indent();
-+                        out += "{\n";
- 
+-
 -                    indent();
 -                    out += "\toutput.oC0.w *= 1.0 + computeMipLevel(pixelCoord) * 0.25;\n";
 -                    indent();
 -                    out += "\toutput.oC0.w = 0.5 + (output.oC0.w - g_AlphaThreshold) / max(fwidth(output.oC0.w), 1e-6);\n";
+-
+-                    indent();
+-                    out += "}\n";
++                        specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
++
++                        indent();
++                        out += "else if (g_SpecConstants() & SPEC_CONSTANT_ALPHA_TO_COVERAGE)\n";
++                        indent();
++                        out += "{\n";
++
 +                        indent();
 +                        out += "\toutput.oC0.w *= 1.0 + computeMipLevel(pixelCoord) * 0.25;\n";
 +                        indent();
 +                        out += "\toutput.oC0.w = 0.5 + (output.oC0.w - g_AlphaThreshold) / max(fwidth(output.oC0.w), 1e-6);\n";
- 
--                    indent();
--                    out += "}\n";
++
 +                        indent();
 +                        out += "}\n";
                  #endif
@@ -1632,7 +1757,7 @@ index bb8a47e..6a0aca4 100644
                  }
                  else
                  {
-@@ -2289,6 +2692,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+@@ -2289,6 +2699,14 @@
                      out += "\t\t\tbreak;\n";
                  }
              }
@@ -1648,10 +1773,9 @@ index bb8a47e..6a0aca4 100644
  
          controlFlowCode += 3;
 diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
-index 4f468ec..d485264 100644
 --- a/XenosRecomp/shader_recompiler.h
 +++ b/XenosRecomp/shader_recompiler.h
-@@ -33,6 +33,7 @@ struct ShaderRecompiler : StringBuffer
+@@ -33,6 +33,7 @@
      std::unordered_map<uint32_t, const char*> samplers;
      std::unordered_map<uint32_t, uint32_t> ifEndLabels;
      uint32_t specConstantsMask = 0;
@@ -1659,7 +1783,7 @@ index 4f468ec..d485264 100644
  
  #ifdef UNLEASHED_RECOMP
      bool hasMtxProjection = false;
-@@ -52,5 +53,5 @@ struct ShaderRecompiler : StringBuffer
+@@ -52,5 +53,5 @@
      void recompile(const TextureFetchInstruction& instr, bool bicubic);
      void recompile(const AluInstruction& instr);
  
@@ -1668,7 +1792,6 @@ index 4f468ec..d485264 100644
  };
 diff --git a/XenosRecomp/shader_source_preservation.h b/XenosRecomp/shader_source_preservation.h
 new file mode 100644
-index 0000000..d8c85da
 --- /dev/null
 +++ b/XenosRecomp/shader_source_preservation.h
 @@ -0,0 +1,151 @@
@@ -1825,7 +1948,6 @@ index 0000000..d8c85da
 +}
 diff --git a/shader_override_compiler.py b/shader_override_compiler.py
 new file mode 100644
-index 0000000..83ee667
 --- /dev/null
 +++ b/shader_override_compiler.py
 @@ -0,0 +1,677 @@
@@ -2508,7 +2630,6 @@ index 0000000..83ee667
 +    raise SystemExit(main())
 diff --git a/tests/conditional_exec_gpu_test.mm b/tests/conditional_exec_gpu_test.mm
 new file mode 100644
-index 0000000..a1fd146
 --- /dev/null
 +++ b/tests/conditional_exec_gpu_test.mm
 @@ -0,0 +1,62 @@
@@ -2576,7 +2697,6 @@ index 0000000..a1fd146
 +}
 diff --git a/tests/deferred_alpha_gpu_test.mm b/tests/deferred_alpha_gpu_test.mm
 new file mode 100644
-index 0000000..1971f4c
 --- /dev/null
 +++ b/tests/deferred_alpha_gpu_test.mm
 @@ -0,0 +1,98 @@
@@ -2680,7 +2800,6 @@ index 0000000..1971f4c
 +}
 diff --git a/tests/run_conditional_exec_gpu_test.py b/tests/run_conditional_exec_gpu_test.py
 new file mode 100644
-index 0000000..168a019
 --- /dev/null
 +++ b/tests/run_conditional_exec_gpu_test.py
 @@ -0,0 +1,98 @@
@@ -2784,7 +2903,6 @@ index 0000000..168a019
 +    main()
 diff --git a/tests/run_deferred_alpha_gpu_test.py b/tests/run_deferred_alpha_gpu_test.py
 new file mode 100644
-index 0000000..0941ffc
 --- /dev/null
 +++ b/tests/run_deferred_alpha_gpu_test.py
 @@ -0,0 +1,87 @@
@@ -2877,7 +2995,6 @@ index 0000000..0941ffc
 +    main()
 diff --git a/tests/run_texture_lod_gpu_test.py b/tests/run_texture_lod_gpu_test.py
 new file mode 100644
-index 0000000..231a93c
 --- /dev/null
 +++ b/tests/run_texture_lod_gpu_test.py
 @@ -0,0 +1,87 @@
@@ -2970,7 +3087,6 @@ index 0000000..231a93c
 +    main()
 diff --git a/tests/shader_overrides/example_pixel.glsl b/tests/shader_overrides/example_pixel.glsl
 new file mode 100644
-index 0000000..dc91b63
 --- /dev/null
 +++ b/tests/shader_overrides/example_pixel.glsl
 @@ -0,0 +1,7 @@
@@ -2983,7 +3099,6 @@ index 0000000..dc91b63
 +}
 diff --git a/tests/shader_overrides/example_vertex.hlsl b/tests/shader_overrides/example_vertex.hlsl
 new file mode 100644
-index 0000000..1c79c3c
 --- /dev/null
 +++ b/tests/shader_overrides/example_vertex.hlsl
 @@ -0,0 +1,9 @@
@@ -2998,7 +3113,6 @@ index 0000000..1c79c3c
 +}
 diff --git a/tests/shader_overrides/manifest.json b/tests/shader_overrides/manifest.json
 new file mode 100644
-index 0000000..b58a4bc
 --- /dev/null
 +++ b/tests/shader_overrides/manifest.json
 @@ -0,0 +1,21 @@
@@ -3025,7 +3139,6 @@ index 0000000..b58a4bc
 +}
 diff --git a/tests/test_conditional_exec_translation.py b/tests/test_conditional_exec_translation.py
 new file mode 100644
-index 0000000..7b4e7e6
 --- /dev/null
 +++ b/tests/test_conditional_exec_translation.py
 @@ -0,0 +1,249 @@
@@ -3136,7 +3249,7 @@ index 0000000..7b4e7e6
 +    def test_vertex_deck_angle_only_runs_for_false_b1(self):
 +        guard, body, tail = scope(translate('gta_normal_vs4'))
 +        self.assertEqual(guard, 'if ((g_Booleans & 2u) == 0u)')
-+        self.assertIn('ps = gWorldView(2).z * r0.y;', body)
++        self.assertIn('ps = xenosMul(gWorldView(2).z, r0.y);', body)
 +        self.assertIn('r3.z = ps;', body)
 +        self.assertNotIn('output.oColor0', body)
 +        self.assertIn('output.oColor0', tail)
@@ -3280,7 +3393,6 @@ index 0000000..7b4e7e6
 +    unittest.main()
 diff --git a/tests/test_override_sampler_lod_bias.py b/tests/test_override_sampler_lod_bias.py
 new file mode 100644
-index 0000000..0be4a0b
 --- /dev/null
 +++ b/tests/test_override_sampler_lod_bias.py
 @@ -0,0 +1,136 @@
@@ -3422,7 +3534,6 @@ index 0000000..0be4a0b
 +    unittest.main()
 diff --git a/tests/test_shader_override_compiler.py b/tests/test_shader_override_compiler.py
 new file mode 100644
-index 0000000..f7300e9
 --- /dev/null
 +++ b/tests/test_shader_override_compiler.py
 @@ -0,0 +1,363 @@
@@ -3791,7 +3902,6 @@ index 0000000..f7300e9
 +    unittest.main()
 diff --git a/tests/test_ssaa_fragment_coordinate_mapping.py b/tests/test_ssaa_fragment_coordinate_mapping.py
 new file mode 100644
-index 0000000..17c74f6
 --- /dev/null
 +++ b/tests/test_ssaa_fragment_coordinate_mapping.py
 @@ -0,0 +1,37 @@
@@ -3834,7 +3944,6 @@ index 0000000..17c74f6
 +    unittest.main()
 diff --git a/tests/test_texture_lod_translation.py b/tests/test_texture_lod_translation.py
 new file mode 100644
-index 0000000..02ced7b
 --- /dev/null
 +++ b/tests/test_texture_lod_translation.py
 @@ -0,0 +1,181 @@
@@ -4021,7 +4130,6 @@ index 0000000..02ced7b
 +    unittest.main()
 diff --git a/tests/texture_lod_gpu_test.mm b/tests/texture_lod_gpu_test.mm
 new file mode 100644
-index 0000000..25923a6
 --- /dev/null
 +++ b/tests/texture_lod_gpu_test.mm
 @@ -0,0 +1,116 @@
@@ -4143,7 +4251,6 @@ index 0000000..25923a6
 +}
 diff --git a/validate_smaa_pipeline.py b/validate_smaa_pipeline.py
 new file mode 100644
-index 0000000..d6804e4
 --- /dev/null
 +++ b/validate_smaa_pipeline.py
 @@ -0,0 +1,160 @@
@@ -4307,3 +4414,157 @@ index 0000000..d6804e4
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/tests/run_xenos_mul_gpu_test.py b/tests/run_xenos_mul_gpu_test.py
+new file mode 100644
+--- /dev/null
++++ b/tests/run_xenos_mul_gpu_test.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python3
++"""Exercise SM3 zero/denormal multiplication on Metal in strict and relaxed modes.
++
++Uses the production helper and runtime operand bits, including genuine nonzero
++NaNs which must remain NaN. Requires NumPy and the macOS Metal toolchain.
++"""
++from pathlib import Path
++import argparse
++import itertools
++import json
++import struct
++import subprocess
++
++import numpy as np
++
++METAL = r'''
++#define __air__
++#define GTA4_RECOMP
++#include "COMMON_PATH"
++struct Operands { uint4 a, b, c; };
++struct Results { uint4 vector4, scalar, mad, dots, smaller; };
++kernel void testMul(device const Operands* inputs [[buffer(0)]],
++                    device Results* outputs [[buffer(1)]], uint i [[thread_position_in_grid]]) {
++    float4 a = as_type<float4>(inputs[i].a);
++    float4 b = as_type<float4>(inputs[i].b);
++    float4 c = as_type<float4>(inputs[i].c);
++    Results result;
++    result.vector4 = as_type<uint4>(xenosMul(a, b));
++    result.scalar = as_type<uint4>(float4(xenosMul(a.x, b.x), xenosMul(a.y, b.y),
++                                        xenosMul(a.z, b.z), xenosMul(a.w, b.w)));
++    result.mad = as_type<uint4>(xenosMul(a, b) + c);
++    result.dots = as_type<uint4>(float4(xenosDot(a.xy, b.xy), xenosDot(a.xyz, b.xyz),
++                                       xenosDot(a, b), xenosDot(a.xy, b.xy) + c.x));
++    result.smaller = as_type<uint4>(float4(xenosMul(a.xy, b.xy), xenosMul(a.xyz, b.xyz).yz));
++    outputs[i] = result;
++}
++'''
++
++
++def bits(value):
++    return struct.unpack('<I', struct.pack('<f', value))[0]
++
++
++def value(raw):
++    return np.float32(struct.unpack('<f', struct.pack('<I', raw))[0])
++
++
++def product(a, b):
++    # Shader Model 3: either zero/denormal input forces positive zero.
++    if not a & 0x7F800000 or not b & 0x7F800000:
++        return np.float32(0)
++    return np.float32(value(a) * value(b))
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--output-directory', required=True, type=Path)
++    args = parser.parse_args()
++    out = args.output_directory.resolve()
++    out.mkdir(parents=True, exist_ok=True)
++    common = Path(__file__).resolve().parents[1] / 'XenosRecomp/shader_common.h'
++    source = out / 'test.metal'
++    source.write_text(METAL.replace('COMMON_PATH', str(common)))
++    candidates = [bits(x) for x in (0.0, -0.0, 1.0, -2.0, 0.5, float('inf'), -float('inf'))]
++    candidates += [1, 0x80000001, 0x007FFFFF, 0x807FFFFF, 0x7FC12345]
++    vectors, expected = bytearray(), []
++    with np.errstate(all='ignore'):
++        for a, b in itertools.product(candidates, repeat=2):
++            av = [a, bits(2), bits(-1), b]
++            bv = [b, bits(0.5), bits(3), a]
++            cv = [bits(x) for x in (0.25, 2, -1, 0.5)]
++            vectors.extend(struct.pack('<12I', *(av + bv + cv)))
++            p = [product(x, y) for x, y in zip(av, bv)]
++            d2 = np.float32(p[0] + p[1])
++            d3 = np.float32(d2 + p[2])
++            d4 = np.float32(d3 + p[3])
++            expected.append(p + p + [np.float32(x + value(y)) for x, y in zip(p, cv)] +
++                            [d2, d3, d4, np.float32(d2 + value(cv[0]))] + [p[0], p[1], p[1], p[2]])
++    vector_path = out / 'operands.bin'
++    vector_path.write_bytes(vectors)
++    executable = out / 'gpu-test'
++    subprocess.run(['xcrun', 'clang++', '-std=c++17', '-fobjc-arc',
++                    str(Path(__file__).with_name('xenos_mul_gpu_test.mm')),
++                    '-framework', 'Foundation', '-framework', 'Metal', '-o', str(executable)], check=True)
++    reports = []
++    for mode, flags in [('strict', ['-fno-fast-math']), ('relaxed', ['-fmetal-math-mode=relaxed'])]:
++        air, library, output = (out / (mode + suffix) for suffix in ('.air', '.metallib', '.bin'))
++        subprocess.run(['xcrun', 'metal', '-std=metal3.0', *flags, '-c', str(source), '-o', str(air)], check=True)
++        subprocess.run(['xcrun', 'metallib', str(air), '-o', str(library)], check=True)
++        size = len(expected) * len(expected[0]) * struct.calcsize('<I')
++        subprocess.run([str(executable), str(library), str(vector_path), str(output), str(len(expected)), str(size)], check=True)
++        actual = np.frombuffer(output.read_bytes(), dtype='<u4').reshape(len(expected), -1)
++        for row, values in enumerate(expected):
++            for column, want in enumerate(values):
++                got = int(actual[row, column])
++                matches = np.isnan(value(got)) if np.isnan(want) else got == bits(want)
++                if not matches:
++                    raise AssertionError(f'{mode} case={row} component={column}: got={got:08X} expected={bits(want):08X}')
++        reports.append({'mode': mode, 'cases': len(expected), 'verified_components': actual.size, 'result': 'passed'})
++    (out / 'result.json').write_text(json.dumps(reports, indent=2) + '\n')
++    print(json.dumps(reports))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tests/xenos_mul_gpu_test.mm b/tests/xenos_mul_gpu_test.mm
+new file mode 100644
+--- /dev/null
++++ b/tests/xenos_mul_gpu_test.mm
+@@ -0,0 +1,39 @@
++#import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++#include <cstdio>
++
++// The Python driver supplies raw operand bits and checks the GPU output bits.
++int main(int argc, const char** argv) {
++  @autoreleasepool {
++    if (argc != 6) return 2;
++    auto device = MTLCreateSystemDefaultDevice();
++    if (!device) return 2;
++    NSError* error = nil;
++    auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error];
++    if (!library) { NSLog(@"%@", error); return 2; }
++    auto pipeline = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"testMul"] error:&error];
++    if (!pipeline) { NSLog(@"%@", error); return 2; }
++    auto data = [NSData dataWithContentsOfFile:@(argv[2])];
++    if (!data.length) return 2;
++    auto input = [device newBufferWithBytes:data.bytes length:data.length options:MTLResourceStorageModeShared];
++    const NSUInteger count = [@(argv[4]) integerValue];
++    const NSUInteger outputSize = [@(argv[5]) integerValue];
++    auto output = [device newBufferWithLength:outputSize options:MTLResourceStorageModeShared];
++    if (!input || !output || !count) return 2;
++    auto queue = [device newCommandQueue];
++    auto command = [queue commandBuffer];
++    auto encoder = [command computeCommandEncoder];
++    [encoder setComputePipelineState:pipeline];
++    [encoder setBuffer:input offset:0 atIndex:0];
++    [encoder setBuffer:output offset:0 atIndex:1];
++    [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
++    [encoder endEncoding];
++    [command commit];
++    [command waitUntilCompleted];
++    if (command.status != MTLCommandBufferStatusCompleted) { NSLog(@"%@", command.error); return 2; }
++    auto result = [NSData dataWithBytes:output.contents length:outputSize];
++    if (![result writeToFile:@(argv[3]) atomically:YES]) return 2;
++    std::printf("device=%s cases=%lu\n", device.name.UTF8String, (unsigned long)count);
++  }
++  return 0;
++}

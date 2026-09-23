@@ -20,7 +20,7 @@ parser.add_argument('--compiler', default='clang++')
 parser.add_argument('--sanitize', action='store_true')
 parser.add_argument('--case', action='append', choices=[
     'touch_runtime', 'coordinator_runtime', 'touch_context_runtime', 'touch_layout_runtime',
-    'touch_pointer_runtime', 'touch_editor_mouse_runtime', 'touch_icon_runtime', 'motion_runtime'])
+    'touch_pointer_runtime', 'touch_editor_mouse_runtime', 'touch_icon_runtime', 'motion_runtime', 'touch_activity_runtime', 'touch_activity_draw_runtime', 'touch_transport_runtime'])
 args = parser.parse_args()
 sdk = Path(__file__).resolve().parents[1]
 source = sdk / 'gta4-recomp/src'
@@ -91,8 +91,10 @@ subprocess.run([sys.executable, str(sdk/'tests/regression/controls/touch_samples
                 '--output', str(out/'touch_samples.h')], check=True)
 subprocess.run([sys.executable, str(sdk/'tests/regression/controls/touch_icon_samples.py'),
                 '--output', str(out/'touch_icon_samples.h')], check=True)
+subprocess.run([sys.executable, str(sdk.parent.parent/'tools/tests/generate_touch_activity_samples.py'),
+                '--output', str(out/'touch_activity_samples.h')], check=True)
 results = {}
-for name in ['touch_runtime', 'coordinator_runtime', 'touch_context_runtime', 'touch_layout_runtime', 'touch_pointer_runtime', 'touch_editor_mouse_runtime', 'touch_icon_runtime', 'motion_runtime']:
+for name in ['touch_runtime', 'coordinator_runtime', 'touch_context_runtime', 'touch_layout_runtime', 'touch_pointer_runtime', 'touch_editor_mouse_runtime', 'touch_icon_runtime', 'motion_runtime', 'touch_activity_runtime', 'touch_activity_draw_runtime', 'touch_transport_runtime']:
     if args.case and name not in args.case:
         continue
     cpp = sdk/'tests/regression/controls'/f'{name}.cpp'
@@ -100,6 +102,18 @@ for name in ['touch_runtime', 'coordinator_runtime', 'touch_context_runtime', 't
                '-I'+str(stubs), '-I'+str(source), '-I'+str(sdk/'include'), '-I'+str(out), str(cpp)]
     if name in ['touch_runtime', 'coordinator_runtime']:
         command += [str(source/'input/context_touch_layout.cpp'), str(source/'input/context_touch_settings.cpp'), str(sdk/'src/input/mnk/controller_compatibility.cpp'), str(sdk/'src/input/mnk/pointer_motion.cpp')]
+    if name in ['touch_runtime', 'coordinator_runtime', 'touch_layout_runtime']:
+        command += [str(source/'input/context_touch_activity.cpp'), str(source/'input/context_touch_activity_layout.cpp')]
+    if name == 'touch_activity_draw_runtime':
+        command += ['-I'+str(sdk/'thirdparty/imgui')]
+        command += [str(sdk/'thirdparty/imgui'/f) for f in ['imgui.cpp','imgui_draw.cpp','imgui_tables.cpp','imgui_widgets.cpp']]
+        command += [str(source/'input'/f) for f in ['context_touch_activity.cpp','context_touch_activity_layout.cpp','context_touch_layout.cpp','context_touch_draw.cpp']]
+    if name == 'touch_transport_runtime':
+        command += [str(sdk/'src/input/absolute_pointer.cpp'), str(source/'input/context_touch_activity.cpp')]
+    if name == 'touch_activity_runtime':
+        command += [str(source/'input/context_touch_activity.cpp'), str(source/'input/context_touch_activity_context.cpp'), str(source/'input/context_touch_activity_layout.cpp'), str(source/'input/context_touch_layout.cpp')]
+    if name == 'touch_context_runtime':
+        command += [str(source/'input/context_touch_activity.cpp'), str(source/'input/context_touch_activity_context.cpp')]
     if name == 'coordinator_runtime':
         command += [str(source/'gta4_touch_coordinator.cpp')]
     if name == 'touch_context_runtime':
@@ -110,6 +124,9 @@ for name in ['touch_runtime', 'coordinator_runtime', 'touch_context_runtime', 't
         command += [str(sdk/'src/input/absolute_pointer.cpp')]
     if name == 'touch_icon_runtime':
         command += [str(sdk/'src/ui/image_decode.cpp'), '-I'+str(sdk/'thirdparty/stb')]
+    if sys.platform == 'darwin':
+        sysroot = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip()
+        command += ['-isysroot', sysroot]
     if args.sanitize:
         command += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
     command += ['-o',str(out/name)]
@@ -141,6 +158,12 @@ manifest = {str(p.relative_to(sdk)): hashlib.sha256(p.read_bytes()).hexdigest() 
     source/'gta4_touch_coordinator.cpp', source/'input/context_touch_controls.cpp',
     source/'input/context_touch_layout.cpp', source/'gta4_motion_bridge.cpp',
     source/'gta4_motion_reload_policy.h', source/'gta4_motion_action_policy.h',
-    source/'gta4_motion_vehicle_hooks.cpp', sdk/'include/rex/input/motion_sample_cache.h']}
+    source/'gta4_motion_vehicle_hooks.cpp', sdk/'include/rex/input/motion_sample_cache.h',
+    *sorted((source/'input').glob('context_touch_*')),
+    source/'gta4_quicksave_hooks.cpp',
+    sdk/'src/input/absolute_pointer.cpp', sdk/'include/rex/input/absolute_pointer.h',
+    sdk/'include/rex/input/pointer_clock.h', sdk/'src/input/sdl/sdl_input_driver.cpp',
+    *sorted((sdk/'tests/regression/controls').glob('touch_*')),
+    sdk/'tools/verify_controls_regressions.py'] if p.is_file()}
 (out/'results.json').write_text(json.dumps({'results':results,'sanitized':args.sanitize,
     'source_checks':1,'sources':manifest},indent=2)+'\n')

@@ -1,3 +1,11 @@
+// Stage 2 is replaced only after the complete host DoF chain succeeds.
+#if defined(__spirv__)
+#define LibertySplitPostFxApplied vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 596)
+#elif defined(__air__)
+#define LibertySplitPostFxApplied (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 596)))
+#else
+#define LibertySplitPostFxApplied 0.0f
+#endif
 // Exact XenosRecomp translation of TLAD PS_GTACompositeMBNoise. The film-grain
 // lookup is modernized to preserve Rockstar's authored intensity and temporal
 // offset while keeping a constant screen-space grain size at every resolution.
@@ -1004,6 +1012,8 @@ struct PixelShaderOutput
 #if !defined(__spirv__)
 [shader("pixel")]
 #endif
+#include "../fusion_tone.hlsli"
+
 #ifndef XENOS_RECOMP_LATE_FRAGMENT_TESTS
 [earlydepthstencil]
 #endif
@@ -1268,6 +1278,17 @@ PixelShaderOutput shaderMain(
 	r2.xyz = (float3)((r1.zzz * r7.zyx + r2.xyz));
 	r2.xyz = (float3)((r1.zzz * r6.zyx + r2.xyz));
 	r2.xyz = (float3)((r5.wzy * r0.zzz + r2.zyx));
+
+	// Retain all title tone mapping, bloom, motion blur and grain after this point.
+	if (LibertySplitPostFxApplied != 0.0f)
+	{
+		r2.xyz = tfetch2D(
+#ifdef __air__
+			g_Texture2DDescriptorHeap, g_SamplerDescriptorHeap,
+#endif
+			HDRSampler_Texture2DDescriptorIndex, HDRSampler_SamplerDescriptorIndex,
+			input.iTexCoord0.xy, float2(0, 0), GetTextureLodBias(2)).xyz;
+	}
 	if (p0)
 	{
 		r4.zw = (float2)((r2.xy * c254.xx));
@@ -1556,7 +1577,11 @@ PixelShaderOutput shaderMain(
 	r1.w = (float)((r0.y * NoiseParams.z));
 	ps = clamp(rcp(r0.w), -FLT_MAX, FLT_MAX);
 	r0.x = ps;
+	if (FusionModernEnabled()) {
+	  r0.xyz = FusionBloomThreshold(r3.xyz, r0.x * ToneMapParams.x);
+	} else {
 	r0.xyz = (float3)((-r0.xxx * ToneMapParams.xxx + r3.xyz));
+	}
 	r0.xyz = (float3)((max(r0.xyz, c250.xxx)));
 	r1.xyz = (float3)((r0.xyz * ToneMapParams.zzz));
 	r1.xyzw = (float4)((r1.xyzw * c250.zzzw));
@@ -1590,5 +1615,6 @@ PixelShaderOutput shaderMain(
 		bool alphaTestPass = AlphaTestPass(output.oC0.w, g_AlphaThreshold, alphaTestFunction);
 		clip(alphaTestPass ? 1.0 : -1.0);
 	}
+	output.oC0.rgb = FusionToneMap(output.oC0.rgb);
 	return output;
 }

@@ -236,6 +236,7 @@ endif()
 
 # Third-party dependencies (vendored sources only)
 add_subdirectory(thirdparty)
+include("${REXGLUE_ROOT}/cmake/rexglue_dlss.cmake")
 
 # Enable warnings after thirdparty
 add_compile_options(

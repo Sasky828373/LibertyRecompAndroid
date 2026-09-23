@@ -101,6 +101,7 @@ endif()
 
 add_library(rexui OBJECT ${REXUI_SOURCES})
 add_library(rex::ui ALIAS rexui)
+rexglue_enable_dlss(rexui)
 
 target_include_directories(rexui PUBLIC
     $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
@@ -157,6 +158,11 @@ if(REXGLUE_USE_VULKAN)
         GPUOpen::VulkanMemoryAllocator
         SPIRV-Tools-static
     )
+endif()
+
+# Native Apple presentation is independent of Vulkan execution.
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    add_subdirectory(metal)
 endif()
 
 # Platform-specific dependencies

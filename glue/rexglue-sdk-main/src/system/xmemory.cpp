@@ -891,6 +891,8 @@ BaseHeap::~BaseHeap() = default;
 void BaseHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType heap_type,
                           uint32_t heap_base, uint32_t heap_size, uint32_t page_size,
                           uint32_t host_address_offset) {
+  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
   memory_ = memory;
   membase_ = membase;
   heap_type_ = heap_type;
@@ -905,6 +907,8 @@ void BaseHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType hea
 }
 
 void BaseHeap::Dispose() {
+  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
   // Walk table and release all regions.
   for (uint32_t page_number = 0; page_number < page_table_.size(); ++page_number) {
     auto& page_entry = page_table_[page_number];
@@ -1026,6 +1030,8 @@ bool BaseHeap::Save(stream::ByteStream* stream) {
 }
 
 bool BaseHeap::Restore(stream::ByteStream* stream) {
+  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
   REXSYS_DEBUG("Heap {:08X}-{:08X}", heap_base_, heap_base_ + (heap_size_ - 1));
 
   for (size_t i = 0; i < page_table_.size(); i++) {
@@ -1068,6 +1074,8 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
 }
 
 void BaseHeap::Reset() {
+  std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
   // TODO(DrChat): protect pages.
   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
@@ -1140,6 +1148,7 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
   }
 
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
 
   // - If we are reserving the entire range requested must not be already
   //   reserved.
@@ -1232,6 +1241,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
   }
 
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
 
   // Find a free page range.
   // The base page must match the requested alignment, so we first scan for
@@ -1363,6 +1373,7 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
   end_page_number = std::min(uint32_t(page_table_.size()) - 1, end_page_number);
 
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
 
   // Release from host.
   // TODO(benvanik): find a way to actually decommit memory;
@@ -1386,6 +1397,7 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
 
 bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
 
   // Given address must be a region base address.
   uint32_t base_page_number = (base_address - heap_base_) >> page_size_shift_;
@@ -1481,6 +1493,7 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32
   }
 
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+  AccessEpoch::Change access_change(access_epoch_);
 
   // Ensure all pages are in the same reserved region and all are committed.
   uint32_t first_base_address = UINT_MAX;

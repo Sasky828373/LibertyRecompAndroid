@@ -86,7 +86,10 @@ class AbsolutePointerService {
  public:
   static constexpr size_t kDefaultMaxQueuedMoves = 128;
 
-  explicit AbsolutePointerService(size_t max_queued_moves = kDefaultMaxQueuedMoves);
+  // Latest-position queues remain available to callers that do not interpret
+  // trajectories. The production touch service opts into bounded full history.
+  explicit AbsolutePointerService(size_t max_queued_moves = kDefaultMaxQueuedMoves,
+                                  bool preserve_motion_history = false);
 
   void UpdatePresentation(const rex::ui::GuestOutputTransform& transform, int32_t safe_area_x,
                           int32_t safe_area_y, int32_t safe_area_width, int32_t safe_area_height,
@@ -159,6 +162,7 @@ class AbsolutePointerService {
   TouchPresentationState BuildPresentationStateLocked() const;
 
   const size_t max_queued_moves_;
+  const bool preserve_motion_history_;
   mutable std::mutex mutex_;
   rex::ui::GuestOutputTransform transform_;
   int32_t safe_area_x_ = 0;

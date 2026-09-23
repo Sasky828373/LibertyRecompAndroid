@@ -17,6 +17,7 @@
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/input/absolute_pointer.h>
+#include <rex/input/pointer_clock.h>
 #include <rex/input/flags.h>
 #include <rex/input/input_trace.h>
 #include <rex/input/sdl/sdl_input_driver.h>
@@ -268,9 +269,11 @@ void SDLInputDriver::OnTouchEvent(rex::ui::TouchEvent& event) {
       return;
   }
 
-  RefreshPointerPresentation(event.timestamp_ns());
+  const uint64_t source_now = SDL_GetTicksNS();
+  const uint64_t timestamp = RebasePointerTimestamp(event.timestamp_ns(), source_now, PointerMonotonicNanoseconds());
+  RefreshPointerPresentation(timestamp);
   GetAbsolutePointerService().SubmitPointer(event.device_id(), event.pointer_id(), phase, event.x(),
-                                            event.y(), event.pressure(), event.timestamp_ns());
+                                            event.y(), event.pressure(), timestamp);
 }
 
 bool SDLCALL SDLInputDriver::EventWatch(void* userdata, SDL_Event* event) {

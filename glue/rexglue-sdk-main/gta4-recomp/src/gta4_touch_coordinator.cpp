@@ -455,6 +455,12 @@ void UpdateWeaponGeometry(const gta4::input::TouchContextSnapshot& context, bool
 }
 
 bool ProcessWeaponHudEvent(const AbsolutePointerEvent& event, uint64_t epoch) {
+  if (gta4::input::ContextTouchWeaponHudSelectorActive()) {
+    // The contextual runtime owns tap/swipe/hold on the observed native icon.
+    // Returning false routes this contact to that single input owner below.
+    g_weapon_transaction.Reset();
+    return false;
+  }
   const Point point = NormalizedPoint(event);
   const auto& geometry = g_weapon_geometry;
   if (event.phase == AbsolutePointerPhase::kDown) {

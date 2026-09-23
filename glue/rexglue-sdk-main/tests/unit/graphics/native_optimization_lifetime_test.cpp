@@ -112,7 +112,7 @@ TEST_CASE("Shared semantic key encoding includes every field without padding", "
   FIELD(cached_descriptor_epoch);FIELD(environmental_data_hash);FIELD(environmental_sequence);FIELD(device);
   FIELD(descriptor_copy);FIELD(descriptor_page);FIELD(width);FIELD(height);FIELD(logical_width);FIELD(logical_height);
   FIELD(sample_count);FIELD(alpha_reference_bits);FIELD(alpha_to_mask);FIELD(color_output_mask);FIELD(clip_plane_enable_mask);
-  FIELD(vertex_booleans);FIELD(pixel_booleans);FIELD(descriptor_backend);FIELD(environment_present);
+  FIELD(vertex_booleans);FIELD(pixel_booleans);FIELD(descriptor_backend);FIELD(environment_present);FIELD(split_postfx_applied);
 #undef FIELD
   for(size_t i=0;i<4;++i){differs([&](auto& k){k.color_output_info[i]=1;});differs([&](auto& k){k.clip_plane_bits[i]=0x7fc00001;});}
   REQUIRE(NativeSharedKeyWords(baseline)==encoded);

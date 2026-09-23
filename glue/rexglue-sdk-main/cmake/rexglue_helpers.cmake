@@ -210,18 +210,40 @@ function(rexglue_configure_target target_name)
             COMMAND_EXPAND_LISTS
             VERBATIM
         )
-        # FidelityFX is linked PRIVATE by rexui (to avoid propagating DLL
-        # requirements to tool-mode targets), so copy its DLLs explicitly.
-        foreach(_fx amd_fidelityfx_vk amd_fidelityfx_dx12)
-            if(TARGET ${_fx})
+    endif()
+
+    # Temporal providers are private dependencies of the renderer/runtime.
+    # Stage their actual runtime on every platform before bundle signing, and
+    # restage it when a provider rebuilds even if application sources did not.
+    foreach(_fx amd_fidelityfx_vk amd_fidelityfx_dx12)
+        if(TARGET ${_fx})
+            get_target_property(_fx_type ${_fx} TYPE)
+            if(_fx_type STREQUAL "SHARED_LIBRARY")
+                add_dependencies(${target_name} ${_fx})
+                set_property(TARGET ${target_name} APPEND PROPERTY
+                    LINK_DEPENDS $<TARGET_FILE:${_fx}>)
                 add_custom_command(TARGET ${target_name} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         $<TARGET_FILE:${_fx}>
                         $<TARGET_FILE_DIR:${target_name}>
-                    VERBATIM
-                )
+                    VERBATIM)
             endif()
-        endforeach()
+        endif()
+    endforeach()
+    if((TARGET amd_fidelityfx_vk OR TARGET amd_fidelityfx_dx12) AND
+       EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/LICENSE.txt")
+        get_target_property(_fx_bundle ${target_name} MACOSX_BUNDLE)
+        if(_fx_bundle)
+            set(_fx_license_dir "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/Resources")
+        else()
+            set(_fx_license_dir "$<TARGET_FILE_DIR:${target_name}>")
+        endif()
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_fx_license_dir}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${REXGLUE_FIDELITYFX_SOURCE_DIR}/LICENSE.txt"
+                "${_fx_license_dir}/AMD-FidelityFX-LICENSE.txt"
+            VERBATIM)
     endif()
 
     if(APPLE)

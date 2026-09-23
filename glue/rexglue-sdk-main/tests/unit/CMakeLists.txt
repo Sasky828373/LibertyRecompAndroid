@@ -1,5 +1,13 @@
 # Unit Tests for ReXGlue core components
 
+if(REXGLUE_USE_VULKAN)
+    add_executable(dlss_temporal_contract_tests EXCLUDE_FROM_ALL
+        graphics/dlss_temporal_contract_test.cpp)
+    target_include_directories(dlss_temporal_contract_tests PRIVATE "${REXGLUE_ROOT}/src")
+    target_link_libraries(dlss_temporal_contract_tests PRIVATE rexruntime)
+    add_test(NAME dlss_temporal_contract_tests COMMAND dlss_temporal_contract_tests)
+endif()
+
 add_executable(unit_tests
     memory/heap_allocation_test.cpp
     kernel/object_table_test.cpp
@@ -21,6 +29,9 @@ add_executable(unit_tests
     graphics/native_clip_control_test.cpp
     graphics/native_fixed_function_policy_test.cpp
     graphics/native_hotspot_fixes_test.cpp
+    graphics/native_throughput_test.cpp
+    graphics/native_queue_handoff_test.cpp
+    graphics/native_resolve_reuse_test.cpp
     graphics/native_pipeline_policy_test.cpp
     graphics/native_pipeline_recipe_test.cpp
     graphics/native_pipeline_compiler_test.cpp
@@ -57,8 +68,10 @@ add_executable(unit_tests
     graphics/native_frame_context_test.cpp
     graphics/native_gpu_attribution_test.cpp
     graphics/native_gpu_pass_origin_test.cpp
+    graphics/native_gpu_scope_summary_test.cpp
     graphics/native_reflection_registry_test.cpp
     graphics/native_resolve_policy_test.cpp
+    graphics/native_resolve_descriptor_cache_test.cpp
     graphics/native_submission_lifetime_test.cpp
     graphics/vulkan_submission_completion_test.cpp
     graphics/native_virtual_resource_registry_test.cpp
@@ -146,6 +159,8 @@ endif()
 
 target_sources(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/gta4-recomp/src/input/context_touch_layout.cpp
+    ${PROJECT_SOURCE_DIR}/gta4-recomp/src/input/context_touch_activity.cpp
+    ${PROJECT_SOURCE_DIR}/gta4-recomp/src/input/context_touch_activity_layout.cpp
     ${PROJECT_SOURCE_DIR}/gta4-recomp/src/install/gta4_source_inspector.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/gta4_native/native_performance_samples.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/gta4_native/native_memory_samples.cpp
@@ -184,6 +199,7 @@ add_executable(native_lighting_tests
     graphics/native_fixed_function_policy_test.cpp
     graphics/native_clip_control_test.cpp
     graphics/native_resolve_policy_test.cpp
+    graphics/native_resolve_descriptor_cache_test.cpp
     graphics/shader_override_policy_test.cpp
     graphics/gta4_native_surface_view_test.cpp
 )
@@ -500,11 +516,12 @@ endif()
 
 # Live menu settings, shader-family selection, frame latching and TLAD precedence.
 add_executable(modern_shader_tests
+    graphics/modern_shader_diagnostics_test.cpp
+    graphics/fusion_modern_test.cpp
     graphics/modern_shader_policy_test.cpp
     graphics/shader_override_policy_test.cpp
     graphics/native_pipeline_lookup_memo_test.cpp
     system/gta4_frontend_menu_policy_test.cpp
-    ${PROJECT_SOURCE_DIR}/src/graphics/gta4_native/modern_shader_options.cpp
     ${PROJECT_SOURCE_DIR}/gta4-recomp/src/gta4_presentation_options.cpp
 )
 target_include_directories(modern_shader_tests PRIVATE
@@ -542,8 +559,34 @@ set_target_properties(native_upload_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
 catch_discover_tests(native_upload_tests TEST_PREFIX "unit.native-upload.")
 
+# Focused configuration coverage without compiling unrelated guest test suites.
+add_executable(cvar_tests core/cvar_test.cpp)
+target_link_libraries(cvar_tests PRIVATE rexruntime Catch2::Catch2WithMain)
+catch_discover_tests(cvar_tests TEST_PREFIX "unit.cvar.")
+
 # One presentation schedule and cancellation-safe producer handoff.
 add_executable(frame_pacer_tests rexglue/frame_pacer_test.cpp)
 target_include_directories(frame_pacer_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(frame_pacer_tests PRIVATE Catch2::Catch2WithMain)
 catch_discover_tests(frame_pacer_tests TEST_PREFIX "unit.frame-pacer.")
+
+# Bounded streaming policy and exact production ordered I/O queue tests.
+add_executable(streaming_modernization_tests system/streaming_modernization_test.cpp)
+target_include_directories(streaming_modernization_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+set_target_properties(streaming_modernization_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+add_test(NAME unit.streaming-modernization COMMAND streaming_modernization_tests)
+set_tests_properties(unit.streaming-modernization PROPERTIES LABELS "unit;streaming" TIMEOUT 60)
+add_test(NAME unit.streaming-guest-contracts
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/gta4-recomp/tools/derive_streaming_hooks.py)
+set_tests_properties(unit.streaming-guest-contracts PROPERTIES LABELS "unit;streaming" TIMEOUT 60)
+
+if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
+    add_test(NAME unit.streaming-guest-equivalence
+        COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/gta4-recomp/tools/run_streaming_guest_tests.py
+            --output-dir ${CMAKE_CURRENT_BINARY_DIR}/streaming-guest-equivalence
+            --build-dir ${CMAKE_BINARY_DIR} --sanitize)
+    set_tests_properties(unit.streaming-guest-equivalence PROPERTIES
+        LABELS "unit;streaming" TIMEOUT 180)
+endif()

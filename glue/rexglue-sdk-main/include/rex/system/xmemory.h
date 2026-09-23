@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <rex/memory/utils.h>
+#include <rex/memory/access_epoch.h>
 #include <rex/ppc/context.h>  // PPCFunc type (minimal header)
 #include <rex/system/mmio_handler.h>
 #include <rex/thread/mutex.h>
@@ -215,6 +216,9 @@ class BaseHeap {
   // range.
   rex::memory::PageAccess QueryRangeAccess(uint32_t low_address, uint32_t high_address);
 
+  // Stable only outside a mutation; may validate a cached permissions query.
+  uint64_t access_epoch() const { return access_epoch_.Read(); }
+
   bool Save(stream::ByteStream* stream);
   bool Restore(stream::ByteStream* stream);
 
@@ -237,6 +241,7 @@ class BaseHeap {
   uint32_t unreserved_page_count_ = 0;
   rex::thread::global_critical_region global_critical_region_;
   std::recursive_mutex heap_mutex_;
+  AccessEpoch access_epoch_;
   std::vector<PageEntry> page_table_;
 };
 

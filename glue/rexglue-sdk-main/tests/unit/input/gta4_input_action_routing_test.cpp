@@ -82,6 +82,16 @@ TEST_CASE("Flight controller inputs do not duplicate native interface actions",
   }
 }
 
+TEST_CASE("E retains its previous frontend action only while the frontend owns it",
+          "[input][gta4][keyboard]") {
+  const bool frontend = GENERATE(false, true);
+  const bool flight = GENERATE(false, true);
+  const KeyboardInterfaceContext context{.frontend_active = frontend,
+                                         .helicopter_controls = flight};
+  CHECK(ShouldInjectKeyboardInterfaceAction(80, VirtualKey::kE, context) == frontend);
+  CHECK(ClassifyKeyboardActionRoute(23) == KeyboardActionRoute::kGameplayReplay);
+}
+
 TEST_CASE("Frontend fallback retires keyboard state without losing controller input",
           "[input][gta4][keyboard][replay]") {
   using rex::input::mnk::EncodeActionMagnitude;

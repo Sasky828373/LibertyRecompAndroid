@@ -233,6 +233,13 @@ struct PersistentDecoder::Impl {
                        reinterpret_cast<mspack_file*>(&output),
                        static_cast<int>(window_bits), 0,
                        static_cast<int>(kInputBufferSize), 0, 0);
+    if (stream) {
+      // Xbox XMem resources omit CAB's pad byte after an odd raw block.
+      // Retail sub_82A226B8 consumes exactly the raw length; sub_82A222D8
+      // reloads the next header at that position. Keep generic lzx_decompress
+      // on libmspack's padded default. Reset re-applies this per-stream mode.
+      stream->uncompressed_block_padding = 0;
+    }
     poisoned = stream == nullptr;
     total_output = 0;
     return stream != nullptr;

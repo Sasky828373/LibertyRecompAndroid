@@ -31,12 +31,14 @@ std::vector<uint8_t> Table(std::initializer_list<uint32_t> markers = {1, 2, 0, 3
 struct ResetOptions {
   ResetOptions() {
     rex::cvar::SetFlagByName("gta4_skip_intro", "false");
+    rex::cvar::SetFlagByName("gta4_motion_blur", "true");
     rex::cvar::SetFlagByName("gta4_disable_tlad_film_grain", "false");
     rex::cvar::SetFlagByName("gta4_trace_presentation_options", "false");
     options::InitializeOptions();
   }
   ~ResetOptions() {
     rex::cvar::SetFlagByName("gta4_skip_intro", "false");
+    rex::cvar::SetFlagByName("gta4_motion_blur", "true");
     rex::cvar::SetFlagByName("gta4_disable_tlad_film_grain", "false");
     rex::cvar::SetFlagByName("gta4_trace_presentation_options", "false");
     options::InitializeOptions();
@@ -242,5 +244,31 @@ TEST_CASE("Grain snapshot reads do not touch mutable cvar storage", "[presentati
     REQUIRE(rex::cvar::SetFlagByName("gta4_disable_tlad_film_grain", (i & 1) ? "false" : "true"));
   reader.join();
   CHECK(done.load());
+  CHECK_FALSE(options::DisableTladFilmGrain());
+}
+
+TEST_CASE("Motion blur chooses complete original non-blur passes across episodes", "[presentation][motion-blur]") {
+  for (uint32_t episode : {0u, 1u, 2u, 3u, UINT32_MAX})
+    for (uint32_t pass = 0; pass < 64; ++pass)
+      for (bool blur : {false, true}) for (bool grain_off : {false, true})
+        for (bool valid : {false, true}) for (uint32_t caller : {p::kCompositeCaller, 0u}) {
+          const auto grain = p::SelectCompositePass(pass, grain_off, episode, caller, valid);
+          uint32_t expected = grain;
+          const bool known = episode <= 2 && (grain == 11 || grain == 13 || grain == 15 || grain == 17 ||
+              (episode != 0 && (grain == 25 || grain == 27)) || (episode == 2 && grain == 29));
+          if (!blur && valid && caller == p::kCompositeCaller && known) expected = grain - 1;
+          CHECK(p::SelectMotionBlurPass(grain, blur, episode, caller, valid) == expected);
+        }
+  CHECK(p::SelectMotionBlurPass(UINT32_MAX, false, 2, p::kCompositeCaller, true) == UINT32_MAX);
+}
+TEST_CASE("Motion blur defaults on and updates through the existing live settings registry", "[presentation][motion-blur]") {
+  ResetOptions guard;
+  const auto* entry = rex::cvar::GetFlagInfo("gta4_motion_blur"); REQUIRE(entry);
+  CHECK(entry->default_value == "true"); CHECK(entry->lifecycle == rex::cvar::Lifecycle::kHotReload);
+  CHECK(options::MotionBlurEnabled());
+  REQUIRE(rex::cvar::SetFlagByName("gta4_motion_blur", "false"));
+  CHECK_FALSE(options::MotionBlurEnabled());
+  CHECK(rex::cvar::SerializeToTOML().find("gta4_motion_blur = false") != std::string::npos);
+  REQUIRE(rex::cvar::SetFlagByName("gta4_motion_blur", "true")); CHECK(options::MotionBlurEnabled());
   CHECK_FALSE(options::DisableTladFilmGrain());
 }

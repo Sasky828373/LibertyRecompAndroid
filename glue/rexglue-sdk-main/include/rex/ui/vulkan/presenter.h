@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -24,6 +25,8 @@
 #include <rex/ui/presentation_clock.h>
 #include <rex/ui/surface.h>
 #include <rex/ui/vulkan/device.h>
+#include <rex/ui/vulkan/generated_frame.h>
+#include <rex/ui/vulkan/image_access.h>
 #include <rex/ui/vulkan/present_mode_policy.h>
 #include <rex/ui/vulkan/instance.h>
 #include <rex/ui/vulkan/submission_tracker.h>
@@ -88,12 +91,14 @@ class VulkanPresenter final : public Presenter {
   static constexpr VkImageLayout kGuestOutputInternalLayout =
       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-  // The callback must use the graphics and compute queue 0 of the device.
+  // Native callbacks use queue_family_native_offscreen(); all consumers use
+  // the original graphics queue. Shared-image accesses carry an explicit timeline.
   class VulkanGuestOutputRefreshContext final : public GuestOutputRefreshContext {
    public:
     VulkanGuestOutputRefreshContext(bool& is_8bpc_out_ref, VkImage image, VkImageView image_view,
                                     uint64_t image_version, bool image_ever_written_previously,
-                                    bool hdr_output, float hdr_headroom, float sdr_white_level)
+                                    bool hdr_output, float hdr_headroom, float sdr_white_level,
+                                    ImageAccessTicket image_access = {}, VkExtent2D extent = {})
         : GuestOutputRefreshContext(is_8bpc_out_ref),
           image_(image),
           image_view_(image_view),
@@ -101,7 +106,7 @@ class VulkanPresenter final : public Presenter {
           image_ever_written_previously_(image_ever_written_previously),
           hdr_output_(hdr_output),
           hdr_headroom_(hdr_headroom),
-          sdr_white_level_(sdr_white_level) {}
+          sdr_white_level_(sdr_white_level), image_access_(image_access), extent_(extent) {}
 
     // The format is kGuestOutputFormat.
     // Supports usage as a color attachment and as a sampled image, as well as
@@ -117,6 +122,29 @@ class VulkanPresenter final : public Presenter {
     bool hdr_output() const { return hdr_output_; }
     float hdr_headroom() const { return hdr_headroom_; }
     float sdr_white_level() const { return sdr_white_level_; }
+    const ImageAccessTicket& image_access() const { return image_access_; }
+    void MarkImageAccessSubmitted() { image_access_submitted_ = true; }
+    bool image_access_submitted() const { return image_access_submitted_; }
+
+    // The callback must submit both images in the SAME submission as image(),
+    // in kGuestOutputInternalLayout, then call MarkImageAccessSubmitted before
+    // returning success. Images use kGuestOutputFormat and concurrent sharing
+    // across native/display families when those differ. Retain the lease until
+    // producer completion; the presenter retains it through both display reads.
+    // Never recycle either image while any copy of the lease remains alive.
+    bool SetGeneratedFrame(VkImage generated, VkImageView generated_view, VkImage real,
+                           VkImageView real_view, VkExtent2D extent, std::shared_ptr<void> lease,
+                           uint64_t epoch, uint64_t interval_ns) {
+      GeneratedFrame frame{generated, generated_view, real, real_view, extent,
+                           std::move(lease), epoch, interval_ns};
+      if (!frame.valid(image_, extent_)) return false;
+      generated_frame_ = std::make_shared<GeneratedFrame>(std::move(frame));
+      return true;
+    }
+    const std::shared_ptr<GeneratedFrame>& generated_frame() const { return generated_frame_; }
+    std::optional<bool> PairedPresentation() const override {
+      return generated_frame_ && image_access_submitted_;
+    }
 
    private:
     VkImage image_;
@@ -126,6 +154,10 @@ class VulkanPresenter final : public Presenter {
     bool hdr_output_;
     float hdr_headroom_;
     float sdr_white_level_;
+    ImageAccessTicket image_access_{};
+    bool image_access_submitted_ = false;
+    VkExtent2D extent_{};
+    std::shared_ptr<GeneratedFrame> generated_frame_;
   };
 
   static std::unique_ptr<VulkanPresenter> Create(HostGpuLossCallback host_gpu_loss_callback,
@@ -170,6 +202,11 @@ class VulkanPresenter final : public Presenter {
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
 
   bool CaptureGuestOutput(RawImage& image_out) override;
+  // The Vulkan path preserves both members of an interpolation pair on FIFO
+  // surfaces. Render workers can avoid interpolation work on other surfaces.
+  bool CanPresentGeneratedFrames() const {
+    return generated_frame_presentation_enabled_.load(std::memory_order_acquire);
+  }
 
   void AwaitUISubmissionCompletionFromUIThread(uint64_t submission_index) {
     ui_submission_tracker_.AwaitSubmissionCompletion(submission_index);
@@ -188,17 +225,19 @@ class VulkanPresenter final : public Presenter {
                               bool& is_8bpc_out_ref) override;
 
   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
+  bool UsesExplicitPaintDemand() const override { return true; }
 
  private:
   // Usable for both the guest output image itself and for intermediate images.
   class GuestOutputImage {
    public:
     static std::unique_ptr<GuestOutputImage> Create(const VulkanDevice* const vulkan_device,
-                                                    const uint32_t width, const uint32_t height) {
+                                                    const uint32_t width, const uint32_t height,
+                                                    bool shared_with_native = false) {
       assert_not_zero(width);
       assert_not_zero(height);
       auto image =
-          std::unique_ptr<GuestOutputImage>(new GuestOutputImage(vulkan_device, width, height));
+          std::unique_ptr<GuestOutputImage>(new GuestOutputImage(vulkan_device, width, height, shared_with_native));
       if (!image->Initialize()) {
         return nullptr;
       }
@@ -214,11 +253,25 @@ class VulkanPresenter final : public Presenter {
     VkImage image() const { return image_; }
     VkDeviceMemory memory() const { return memory_; }
     VkImageView view() const { return view_; }
+    ImageAccessTimeline::Lease AcquireAccess() {
+      return access_owner_ ? access_owner_->AcquireAccess() : accesses_.Acquire();
+    }
+    static std::shared_ptr<GuestOutputImage> ReferenceGenerated(
+        const VulkanDevice* device, const std::shared_ptr<GeneratedFrame>& frame, bool real,
+        const std::shared_ptr<GuestOutputImage>& access_owner) {
+      auto image = std::shared_ptr<GuestOutputImage>(
+          new GuestOutputImage(device, frame->extent.width, frame->extent.height, false));
+      image->image_ = real ? frame->real : frame->generated;
+      image->view_ = real ? frame->real_view : frame->generated_view;
+      image->external_owner_ = frame;
+      image->access_owner_ = access_owner;
+      return image;
+    }
 
    private:
     GuestOutputImage(const VulkanDevice* const vulkan_device, const uint32_t width,
-                     const uint32_t height)
-        : vulkan_device_(vulkan_device) {
+                     const uint32_t height, bool shared_with_native)
+        : vulkan_device_(vulkan_device), shared_with_native_(shared_with_native) {
       extent_.width = width;
       extent_.height = height;
     }
@@ -231,10 +284,21 @@ class VulkanPresenter final : public Presenter {
     VkImage image_ = VK_NULL_HANDLE;
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
     VkImageView view_ = VK_NULL_HANDLE;
+    bool shared_with_native_ = false;
+    VkSemaphore access_semaphore_ = VK_NULL_HANDLE;
+    ImageAccessTimeline accesses_;
+    std::shared_ptr<GeneratedFrame> external_owner_;
+    std::shared_ptr<GuestOutputImage> access_owner_;
+  };
+
+  struct GeneratedFrameImages {
+    std::shared_ptr<GuestOutputImage> generated, real;
+    uint64_t interval_ns = 0;
+    bool hdr = false;
   };
 
   bool CaptureGuestOutputImage(const std::shared_ptr<GuestOutputImage>& guest_output_image,
-                               RawImage& image_out);
+                               RawImage& image_out, ImageAccessTimeline::Lease& image_access);
 
   struct GuestOutputImageInstance {
     // Refresher-side reference (painting has its own references for the purpose
@@ -243,6 +307,7 @@ class VulkanPresenter final : public Presenter {
     uint64_t version = UINT64_MAX;
     uint64_t last_refresher_submission = 0;
     std::shared_ptr<GuestOutputRefreshContext::Completion> refresher_completion;
+    std::shared_ptr<GeneratedFrameImages> generated_frame;
     // For choosing the barrier stage and access mask and layout depending on
     // whether the image has previously been written. If an image is active
     // after a refresh, it can be assumed that this is true.
@@ -253,6 +318,7 @@ class VulkanPresenter final : public Presenter {
       version = new_version;
       last_refresher_submission = 0;
       refresher_completion.reset();
+      generated_frame.reset();
       ever_successfully_refreshed = false;
     }
   };
@@ -562,15 +628,6 @@ class VulkanPresenter final : public Presenter {
   [[nodiscard]] VkPipeline CreateGuestOutputPaintPipeline(GuestOutputPaintEffect effect,
                                                           VkRenderPass render_pass);
 
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-  bool EnsureTemporalUpscalerContext(uint32_t render_width, uint32_t render_height,
-                                     uint32_t output_width, uint32_t output_height);
-  bool DispatchTemporalUpscaler(VkCommandBuffer command_buffer, VkImage input_image,
-                                uint32_t input_width, uint32_t input_height, VkImage output_image,
-                                uint32_t output_width, uint32_t output_height,
-                                const GuestOutputPaintConfig& config);
-  void DestroyTemporalUpscalerContext();
-#endif
 
   const VulkanDevice* vulkan_device_;
   const UISamplers* ui_samplers_;
@@ -619,15 +676,12 @@ class VulkanPresenter final : public Presenter {
   // DisconnectPaintingFromSurfaceFromUIThreadImpl) by the thread doing it, as
   // well as by presenter initialization and shutdown.
   PaintContext paint_context_;
-
-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
-  void* temporal_upscaler_context_ = nullptr;
-  uint32_t temporal_upscaler_max_render_width_ = 0;
-  uint32_t temporal_upscaler_max_render_height_ = 0;
-  uint32_t temporal_upscaler_max_output_width_ = 0;
-  uint32_t temporal_upscaler_max_output_height_ = 0;
-  bool temporal_upscaler_provider_logged_ = false;
-#endif
+  std::atomic<bool> generated_frame_presentation_enabled_{false};
+  GeneratedFrameDelivery generated_delivery_;
+  std::shared_ptr<GeneratedFrameImages> pending_generated_frame_;
+  GuestOutputProperties pending_generated_properties_{};
+  GuestOutputPaintConfig pending_generated_configuration_;
+  uint64_t pending_generated_mailbox_version_ = 0;
 };
 
 }  // namespace vulkan

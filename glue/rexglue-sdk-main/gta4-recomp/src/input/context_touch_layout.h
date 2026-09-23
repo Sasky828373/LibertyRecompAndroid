@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include "input/context_touch_activity_types.h"
 #include <optional>
 #include <span>
 
@@ -52,7 +53,8 @@ enum class TouchAction : uint16_t {
   kNativeLeftTrigger, kNativeRightTrigger, kNativeLeftStick, kNativeRightStick,
   kScript, kZoomIn, kZoomOut, kEditDone, kEditReset, kEditSmaller, kEditLarger,
   kEditOpacity, kEditHandedness, kEditFloating, kEditCameraSpeed, kEditAimSpeed,
-  kWeaponSelect, kActivityRightStick, kEditVehicleSpeed, kEditFlightSpeed, kEditInvertY, kCount,
+  kWeaponSelect, kActivityRightStick, kEditVehicleSpeed, kEditFlightSpeed, kEditInvertY,
+  kActivityPrimary, kActivitySecondary, kCount,
 };
 
 enum class ContextTouchControlKind : uint8_t {
@@ -64,6 +66,7 @@ enum class ContextTouchControlKind : uint8_t {
   kNativeTrigger,
   kRightStick,
   kUtility,
+  kActivitySurface,
 };
 
 struct ContextTouchViewport {
@@ -128,6 +131,8 @@ struct ContextTouchControl {
   uint8_t trigger_value = 255;
   bool visible = true;
   uint8_t weapon_slot = 255;
+  TouchActivityGesture activity_gesture = TouchActivityGesture::kNone;
+  bool native_hud = false;
 };
 
 struct ContextTouchHudBounds {
@@ -149,6 +154,10 @@ struct ContextTouchLayoutOptions {
   bool can_enter_vehicle = false;
   bool editing = false;
   bool weapon_wheel_open = false;
+  TouchActivitySnapshot activity{};
+  uint64_t context_generation = 0;
+  uint32_t current_weapon_slot = 0;
+  bool inventory_known = false;
   std::array<uint32_t, 11> weapon_types{};
   std::array<bool, 11> weapon_selectable{};
   std::array<std::array<char, 24>, 11> weapon_names{};
@@ -167,6 +176,7 @@ struct ContextTouchLayout {
   std::array<ContextTouchControl, kMaximumControls> controls{};
   size_t control_count = 0;
   float opacity = 0.65f;
+  TouchActivitySnapshot activity{};
 };
 
 struct ContextTouchOverlayTransform {

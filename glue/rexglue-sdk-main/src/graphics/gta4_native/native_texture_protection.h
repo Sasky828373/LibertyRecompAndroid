@@ -6,6 +6,22 @@
 
 namespace rex::graphics::gta4_native {
 
+// Include implicit host-pass inputs as well as title sampler bindings. A queued
+// composite owns its half-scene generation even when the title never binds it.
+template <typename Command, typename Visitor>
+void VisitNativeCommandTextureGenerations(const Command& command, Visitor&& visit) {
+  const auto texture = [&](const auto& resource) {
+    if (!resource) return;
+    visit(resource->generation);
+    if (resource->packed_depth_source) visit(resource->packed_depth_source->generation);
+  };
+  texture(command.resolve_destination);
+  texture(command.depth_handoff_source);
+  texture(command.present_source);
+  texture(command.postfx_half_scene);
+  for (const auto& resource : command.textures) texture(resource);
+}
+
 // Queue lock owns this index. Counts are logical references, not shared_ptrs or
 // GPU ownership. Every zero count is removed immediately. If an invariant is
 // violated the renderer falls back to its original queue scan, never guessing

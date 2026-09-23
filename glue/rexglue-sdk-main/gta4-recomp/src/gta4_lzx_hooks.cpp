@@ -1,13 +1,12 @@
-#include <atomic>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <span>
-#include <string_view>
 #include <unordered_map>
+#include <utility>
 
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -15,6 +14,7 @@
 
 #include "gta4_init.h"
 
+namespace gta4::lzx {
 namespace {
 
 // All offsets and limits below come directly from generated sub_82A21BF0,
@@ -32,15 +32,10 @@ constexpr uint32_t kMaximumFrameSize = 0x8000;
 constexpr uint32_t kMaximumCompressedFrameSize = 0xFFFF;
 constexpr uint32_t kRetailReadPadding = 0x4;
 constexpr uint64_t kGuestAddressSpaceSize = uint64_t{1} << 32;
+constexpr uint32_t kDecoderSpan = kOutputProtectionOffset + sizeof(uint8_t);
 
-enum class LzxMode : uint8_t {
-  kGuest,
-  kVerify,
-  kHost,
-};
-
-struct NativeDecoderEntry {
-  explicit NativeDecoderEntry(uint32_t window_size)
+struct DecoderState {
+  explicit DecoderState(uint32_t window_size)
       : decoder(rex::lzx::PersistentDecoder::Create(window_size)),
         input_snapshot(new (std::nothrow)
                            uint8_t[kMaximumCompressedFrameSize + kRetailReadPadding]) {}
@@ -48,30 +43,18 @@ struct NativeDecoderEntry {
   std::mutex mutex;
   std::unique_ptr<rex::lzx::PersistentDecoder> decoder;
   std::unique_ptr<uint8_t[]> input_snapshot;
-  bool host_failed = false;
+  bool failed = false;
 };
 
 std::mutex g_registry_mutex;
-std::unordered_map<uint32_t, std::shared_ptr<NativeDecoderEntry>> g_registry;
-std::atomic<bool> g_native_verification_enabled{true};
-std::atomic<uint64_t> g_verified_frames{0};
+std::unordered_map<uint32_t, std::shared_ptr<DecoderState>> g_registry;
 
-LzxMode GetMode() {
-  static const LzxMode mode = [] {
-    const char* value = std::getenv("REX_GTA4_LZX_MODE");
-    if (!value) {
-      return LzxMode::kGuest;
-    }
-    const std::string_view requested(value);
-    if (requested == "verify") {
-      return LzxMode::kVerify;
-    }
-    if (requested == "host") {
-      return LzxMode::kHost;
-    }
-    return LzxMode::kGuest;
-  }();
-  return mode;
+// Announce at initialization, not in the per-frame decoding path. Native
+// decoding is unconditional; comparison with retail lives in the test harness.
+void LogBackendOnce() {
+  static std::once_flag once;
+  std::call_once(once,
+                 [] { REXLOG_INFO("gta4-lzx: backend=libmspack mode=native-only format=xmem"); });
 }
 
 bool IsGuestRange(uint32_t address, uint64_t size) {
@@ -81,48 +64,66 @@ bool IsGuestRange(uint32_t address, uint64_t size) {
   if (address == 0 || size > kGuestAddressSpaceSize) {
     return false;
   }
-  return static_cast<uint64_t>(address) + size <= kGuestAddressSpaceSize;
+  const uint64_t end = static_cast<uint64_t>(address) + size;
+  return end <= kGuestAddressSpaceSize && !(address < 0xE0000000u && end > 0xE0000000ull);
 }
 
-std::shared_ptr<NativeDecoderEntry> FindEntry(uint32_t decoder_address) {
+std::shared_ptr<DecoderState> FindEntry(uint32_t decoder_address) {
   std::lock_guard lock(g_registry_mutex);
   const auto found = g_registry.find(decoder_address);
   return found == g_registry.end() ? nullptr : found->second;
 }
 
-std::shared_ptr<NativeDecoderEntry> GetOrCreateEntry(uint32_t decoder_address,
-                                                     uint32_t window_size) {
-  std::lock_guard lock(g_registry_mutex);
-  const auto found = g_registry.find(decoder_address);
-  if (found != g_registry.end()) {
-    return found->second;
+std::shared_ptr<DecoderState> GetOrCreateEntry(uint32_t decoder_address, uint32_t window_size) {
+  {
+    std::lock_guard lock(g_registry_mutex);
+    const auto found = g_registry.find(decoder_address);
+    if (found != g_registry.end()) {
+      return found->second;
+    }
   }
-
+  // Decoder/window allocation is independent across streams and does not hold
+  // the registry lock. Another creator can win publication; use its entry.
   try {
-    auto entry = std::shared_ptr<NativeDecoderEntry>(
-        new (std::nothrow) NativeDecoderEntry(window_size));
-    if (!entry || !entry->decoder || !entry->input_snapshot) {
+    auto entry = std::make_shared<DecoderState>(window_size);
+    if (!entry->decoder || !entry->input_snapshot) {
       return nullptr;
     }
-    g_registry.emplace(decoder_address, entry);
-    return entry;
+    std::lock_guard lock(g_registry_mutex);
+    return g_registry.try_emplace(decoder_address, std::move(entry)).first->second;
   } catch (const std::bad_alloc&) {
     return nullptr;
   }
 }
 
 void RemoveEntry(uint32_t decoder_address) {
-  std::lock_guard lock(g_registry_mutex);
-  g_registry.erase(decoder_address);
+  std::shared_ptr<DecoderState> retired;
+  {
+    std::lock_guard lock(g_registry_mutex);
+    const auto found = g_registry.find(decoder_address);
+    if (found == g_registry.end()) {
+      return;
+    }
+    retired = std::move(found->second);
+    g_registry.erase(found);
+  }
+  // A decoder in use retains its entry; its native storage cannot be freed
+  // underneath DecodeFrame. Destruction never holds the global registry lock.
 }
 
-void ResetEntry(uint32_t decoder_address) {
-  const auto entry = FindEntry(decoder_address);
+void ResetDecoder(PPCContext& ctx, uint8_t* base) {
+  const uint32_t decoder_address = ctx.r3.u32;
+  const auto entry =
+      IsGuestRange(decoder_address, kDecoderSpan) ? FindEntry(decoder_address) : nullptr;
   if (!entry) {
+    __imp__sub_82A21BA8(ctx, base);
     return;
   }
+  // Reset the guest counters and native dictionary under the same stream lock
+  // used by decoding. Neither half of a reset may be observed independently.
   std::lock_guard lock(entry->mutex);
-  entry->host_failed = !entry->decoder->Reset();
+  __imp__sub_82A21BA8(ctx, base);
+  entry->failed = !entry->decoder->Reset();
 }
 
 void SetRetailDecodeBookkeeping(PPCContext& ctx, uint8_t* base, uint32_t decoder_address,
@@ -138,14 +139,12 @@ void SetRetailDecodeBookkeeping(PPCContext& ctx, uint8_t* base, uint32_t decoder
   __imp__MmQueryAddressProtect(protection_query.ctx, base);
   REX_STORE_U8(decoder_address + kOutputProtectionOffset,
                (protection_query.ctx.r3.u32 & 0x600) != 0 ? 1 : 0);
-
-  const uint32_t count = REX_LOAD_U32(decoder_address + kDecodeCountOffset);
-  REX_STORE_U32(decoder_address + kDecodeCountOffset, count + 1);
 }
 
-void CompleteHostDecode(PPCContext& ctx, uint8_t* base, uint32_t decoder_address,
-                        uint32_t bytes_written_address, bool success,
-                        uint32_t bytes_written) {
+void CompleteDecode(PPCContext& ctx, uint8_t* base, uint32_t decoder_address,
+                    uint32_t bytes_written_address, bool success, uint32_t bytes_written) {
+  const uint32_t count = REX_LOAD_U32(decoder_address + kDecodeCountOffset);
+  REX_STORE_U32(decoder_address + kDecodeCountOffset, count + 1);
   REX_STORE_U32(bytes_written_address, success ? bytes_written : 0);
   if (success) {
     const uint32_t total = REX_LOAD_U32(decoder_address + kTotalOutputOffset);
@@ -170,106 +169,29 @@ DecodeArguments ReadArguments(const PPCContext& ctx) {
   // retail sub_82A21BF0 never reads it. Deliberately ignoring r8 is required
   // for ABI fidelity; r4 is the sole decode-size argument.
   return {
-      ctx.r3.u32,
-      ctx.r4.u32,
-      ctx.r5.u32,
-      ctx.r6.u32,
-      ctx.r7.u32,
-      ctx.r9.u32,
+      ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r9.u32,
   };
 }
 
 bool ValidateArguments(const DecodeArguments& args) {
-  const uint64_t decoder_span =
-      static_cast<uint64_t>(kOutputProtectionOffset) + sizeof(uint8_t);
   const uint64_t padded_input_size =
       static_cast<uint64_t>(args.compressed_size) + kRetailReadPadding;
   const uint64_t input_end = static_cast<uint64_t>(args.input) + padded_input_size;
   return args.expected_output <= kMaximumFrameSize &&
          args.compressed_size <= kMaximumCompressedFrameSize &&
-         IsGuestRange(args.decoder, decoder_span) &&
-         input_end < kGuestAddressSpaceSize &&
+         IsGuestRange(args.decoder, kDecoderSpan) && input_end < kGuestAddressSpaceSize &&
          IsGuestRange(args.input, padded_input_size) &&
          IsGuestRange(args.output, args.expected_output) &&
          IsGuestRange(args.bytes_written, sizeof(uint32_t));
 }
 
-void DisableVerification(uint32_t decoder, const char* reason, uint32_t guest_status,
-                         uint32_t native_status, uint32_t guest_size,
-                         uint32_t native_size) {
-  bool expected = true;
-  if (g_native_verification_enabled.compare_exchange_strong(expected, false)) {
-    REXLOG_ERROR(
-        "gta4-lzx: native verification disabled context={:08X} reason={} "
-        "guest_status={} native_status={} guest_size={} native_size={}",
-        decoder, reason, guest_status, native_status, guest_size, native_size);
-  }
-}
-
-void RunVerify(PPCContext& ctx, uint8_t* base, const DecodeArguments& args) {
-  if (!g_native_verification_enabled.load(std::memory_order_acquire) ||
-      !ValidateArguments(args) || REX_LOAD_U32(args.decoder + kWindowSizeOffset) !=
-                                      kRetailWindowSize) {
-    __imp__sub_82A21BF0(ctx, base);
-    return;
-  }
-
-  const auto entry = GetOrCreateEntry(args.decoder, kRetailWindowSize);
-  std::unique_ptr<uint8_t[]> scratch(
-      args.expected_output ? new (std::nothrow) uint8_t[args.expected_output] : nullptr);
-  if (!entry || (args.expected_output != 0 && !scratch)) {
-    __imp__sub_82A21BF0(ctx, base);
-    DisableVerification(args.decoder, "allocation", 0, 1, 0, 0);
-    return;
-  }
-
-  rex::lzx::DecodeFrameResult native_result;
-  {
-    std::lock_guard lock(entry->mutex);
-    native_result = entry->decoder->DecodeFrame(
-        std::span<const uint8_t>(base + args.input,
-                                 static_cast<size_t>(args.compressed_size) +
-                                     kRetailReadPadding),
-        std::span<uint8_t>(scratch.get(), args.expected_output));
-  }
-
-  __imp__sub_82A21BF0(ctx, base);
-  const uint32_t guest_status = ctx.r3.u32;
-  const uint32_t guest_size = REX_LOAD_U32(args.bytes_written);
-  const uint32_t native_status = native_result ? 0 : 1;
-  const uint32_t native_size =
-      native_result ? static_cast<uint32_t>(native_result.bytes_written) : 0;
-
-  const bool status_matches = guest_status == native_status;
-  const bool size_matches = guest_size == native_size;
-  const bool bytes_match = guest_status != 0 || !status_matches || !size_matches ||
-                           guest_size == 0 ||
-                           std::memcmp(base + args.output, scratch.get(), guest_size) == 0;
-  if (!status_matches || !size_matches || !bytes_match || !native_result) {
-    DisableVerification(args.decoder,
-                        !native_result       ? "native-decode"
-                        : !status_matches    ? "status"
-                        : !size_matches      ? "size"
-                                             : "payload",
-                        guest_status, native_status, guest_size, native_size);
-    return;
-  }
-
-  const uint64_t verified = g_verified_frames.fetch_add(1, std::memory_order_relaxed) + 1;
-  if (verified == 1) {
-    REXLOG_INFO("gta4-lzx: native verifier active (retail 128 KiB window)");
-  }
-}
-
-void RunHost(PPCContext& ctx, uint8_t* base, const DecodeArguments& args) {
+void DecodeFrame(PPCContext& ctx, uint8_t* base, const DecodeArguments& args) {
   if (!ValidateArguments(args)) {
-    const uint64_t decoder_span =
-        static_cast<uint64_t>(kOutputProtectionOffset) + sizeof(uint8_t);
-    if (IsGuestRange(args.decoder, decoder_span) &&
+    if (IsGuestRange(args.decoder, kDecoderSpan) &&
         REX_LOAD_U32(args.decoder + kWindowSizeOffset) == kRetailWindowSize) {
       if (const auto entry = GetOrCreateEntry(args.decoder, kRetailWindowSize)) {
         std::lock_guard lock(entry->mutex);
-        entry->host_failed = true;
+        entry->failed = true;
       }
     }
     if (IsGuestRange(args.bytes_written, sizeof(uint32_t))) {
@@ -279,75 +201,69 @@ void RunHost(PPCContext& ctx, uint8_t* base, const DecodeArguments& args) {
     return;
   }
 
-  SetRetailDecodeBookkeeping(ctx, base, args.decoder, args.input, args.compressed_size,
-                             args.output);
-  if (REX_LOAD_U32(args.decoder + kWindowSizeOffset) != kRetailWindowSize) {
-    if (const auto entry = GetOrCreateEntry(args.decoder, kRetailWindowSize)) {
-      std::lock_guard lock(entry->mutex);
-      entry->host_failed = true;
-    }
-    CompleteHostDecode(ctx, base, args.decoder, args.bytes_written, false, 0);
-    return;
-  }
-
   const auto entry = GetOrCreateEntry(args.decoder, kRetailWindowSize);
   if (!entry) {
-    CompleteHostDecode(ctx, base, args.decoder, args.bytes_written, false, 0);
+    SetRetailDecodeBookkeeping(ctx, base, args.decoder, args.input, args.compressed_size,
+                               args.output);
+    CompleteDecode(ctx, base, args.decoder, args.bytes_written, false, 0);
     return;
   }
 
-  rex::lzx::DecodeFrameResult result;
-  {
-    std::lock_guard lock(entry->mutex);
-    if (entry->host_failed) {
-      CompleteHostDecode(ctx, base, args.decoder, args.bytes_written, false, 0);
-      return;
-    }
-    const size_t readable_input_size =
-        static_cast<size_t>(args.compressed_size) + kRetailReadPadding;
-    std::memcpy(entry->input_snapshot.get(), base + args.input, readable_input_size);
-    result = entry->decoder->DecodeFrame(
-        std::span<const uint8_t>(entry->input_snapshot.get(), readable_input_size),
-        std::span<uint8_t>(base + args.output, args.expected_output));
-    if (!result) {
-      entry->host_failed = true;
-    }
+  std::lock_guard lock(entry->mutex);
+  SetRetailDecodeBookkeeping(ctx, base, args.decoder, args.input, args.compressed_size,
+                             args.output);
+  // Never attach a fresh native dictionary partway into an existing stream.
+  // Initialization/reset hooks are the only permitted lifetime transitions.
+  if (REX_LOAD_U32(args.decoder + kWindowSizeOffset) != kRetailWindowSize ||
+      static_cast<uint32_t>(entry->decoder->total_output_bytes()) !=
+          REX_LOAD_U32(args.decoder + kTotalOutputOffset)) {
+    entry->failed = true;
+  }
+  if (entry->failed) {
+    CompleteDecode(ctx, base, args.decoder, args.bytes_written, false, 0);
+    return;
+  }
+  const size_t readable_input_size = static_cast<size_t>(args.compressed_size) + kRetailReadPadding;
+  std::memcpy(entry->input_snapshot.get(), REX_RAW_ADDR(args.input), readable_input_size);
+  const auto result = entry->decoder->DecodeFrame(
+      std::span<const uint8_t>(entry->input_snapshot.get(), readable_input_size),
+      std::span<uint8_t>(REX_RAW_ADDR(args.output), args.expected_output));
+  if (!result) {
+    entry->failed = true;
   }
 
-  CompleteHostDecode(ctx, base, args.decoder, args.bytes_written, static_cast<bool>(result),
-                     static_cast<uint32_t>(result.bytes_written));
+  CompleteDecode(ctx, base, args.decoder, args.bytes_written, static_cast<bool>(result),
+                 static_cast<uint32_t>(result.bytes_written));
 }
 
 }  // namespace
+}  // namespace gta4::lzx
 
 REX_HOOK_RAW(sub_82A21BF0) {
-  const DecodeArguments args = ReadArguments(ctx);
-  switch (GetMode()) {
-    case LzxMode::kVerify:
-      RunVerify(ctx, base, args);
-      return;
-    case LzxMode::kHost:
-      RunHost(ctx, base, args);
-      return;
-    case LzxMode::kGuest:
-    default:
-      __imp__sub_82A21BF0(ctx, base);
-      return;
-  }
+  gta4::lzx::DecodeFrame(ctx, base, gta4::lzx::ReadArguments(ctx));
 }
 
-REX_HOOK_RAW(sub_82A21680) {
-  const uint32_t outer_object = ctx.r3.u32;
-  __imp__sub_82A21680(ctx, base);
-  if (IsGuestRange(outer_object, kEmbeddedDecoderOffset + sizeof(uint32_t))) {
-    ResetEntry(outer_object + kEmbeddedDecoderOffset);
+REX_HOOK_RAW(sub_82A21BA8) {
+  gta4::lzx::ResetDecoder(ctx, base);
+}
+
+REX_HOOK_RAW(sub_82A21F70) {
+  gta4::lzx::LogBackendOnce();
+  const uint32_t outer = ctx.r3.u32;
+  const uint64_t embedded = static_cast<uint64_t>(outer) + ctx.r6.u32;
+  if (outer && embedded < gta4::lzx::kGuestAddressSpaceSize &&
+      gta4::lzx::IsGuestRange(static_cast<uint32_t>(embedded), gta4::lzx::kDecoderSpan)) {
+    // The same guest allocation can be initialized again without destruction.
+    // Do not let an old dictionary or failed-stream marker cross that boundary.
+    gta4::lzx::RemoveEntry(static_cast<uint32_t>(embedded));
   }
+  __imp__sub_82A21F70(ctx, base);
 }
 
 REX_HOOK_RAW(sub_82A15060) {
   const uint32_t outer_object = ctx.r3.u32;
-  if (IsGuestRange(outer_object, kEmbeddedDecoderOffset + sizeof(uint32_t))) {
-    RemoveEntry(outer_object + kEmbeddedDecoderOffset);
+  if (gta4::lzx::IsGuestRange(outer_object, gta4::lzx::kEmbeddedDecoderOffset + sizeof(uint32_t))) {
+    gta4::lzx::RemoveEntry(outer_object + gta4::lzx::kEmbeddedDecoderOffset);
   }
   __imp__sub_82A15060(ctx, base);
 }

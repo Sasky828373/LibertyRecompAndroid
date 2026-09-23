@@ -788,6 +788,7 @@ uint atomicFetchAddUint(RWStructuredBuffer<uint> buffer, uint index, uint value)
 #define dofProj vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 3344, 0x10)
 #define gDirectionalMotionBlurLength vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 3392, 0x10)
 #define LibertyMotionBlurTimeScale vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 592)
+#define LibertySplitPostFxApplied vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 596)
 #define globalScreenSize vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + 704, 0x10)
 #define motionBlurMatrix(INDEX) selectWrapper((INDEX) < 11, vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + (213 + min(INDEX, 10)) * 16, 0x10), 0.0)
 
@@ -839,6 +840,7 @@ uint atomicFetchAddUint(RWStructuredBuffer<uint> buffer, uint index, uint value)
 #define dofProj (*(reinterpret_cast<device float4*>(g_PushConstants.PixelShaderConstants + 3344)))
 #define gDirectionalMotionBlurLength (*(reinterpret_cast<device float4*>(g_PushConstants.PixelShaderConstants + 3392)))
 #define LibertyMotionBlurTimeScale (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 592)))
+#define LibertySplitPostFxApplied (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 596)))
 #define globalScreenSize (*(reinterpret_cast<device float4*>(g_PushConstants.PixelShaderConstants + 704)))
 #define motionBlurMatrix(INDEX) selectWrapper((INDEX) < 11, (*(reinterpret_cast<device float4*>(g_PushConstants.PixelShaderConstants + (213 + min((uint)(INDEX), (uint)10)) * 16))), 0.0)
 
@@ -900,6 +902,7 @@ cbuffer SharedConstants : register(b2, space4)
 	uint StencilCopySampler_SamplerDescriptorIndex : packoffset(c27.z);
 	DEFINE_SHARED_CONSTANTS();
 	float LibertyMotionBlurTimeScale : packoffset(c37.x);
+	float LibertySplitPostFxApplied : packoffset(c37.y);
 };
 
 #endif
@@ -963,6 +966,8 @@ struct PixelShaderOutput
 #if !defined(__spirv__)
 [shader("pixel")]
 #endif
+#include "../fusion_tone.hlsli"
+
 #ifndef XENOS_RECOMP_LATE_FRAGMENT_TESTS
 [earlydepthstencil]
 #endif
@@ -1226,14 +1231,16 @@ PixelShaderOutput shaderMain(
 	r3.zw = (float2)((r0.zz * r5.yz + r3.wz));
 	r0.z = (float)((r0.z * r5.x + r3.y));
 	r3.y = (float)((r0.z * r1.z));
-	// The native split post-FX chain has already applied stipple and DOF to stage 2.
-	// Use that prefiltered center color as the motion blur identity input.
+	// Both backends set this flag only after replacing stage 2 successfully.
+	if (LibertySplitPostFxApplied != 0.0f)
+	{
 	r3.yzw = tfetch2D(
 #ifdef __air__
 		g_Texture2DDescriptorHeap,
 		g_SamplerDescriptorHeap,
 #endif
 		HDRSampler_Texture2DDescriptorIndex, HDRSampler_SamplerDescriptorIndex, r0.xy, float2(0, 0), GetTextureLodBias(2)).xyz;
+	}
 	p0 = r4.w == 0.0;
 	ps = p0 ? 0.0 : 1.0;
 	if (p0)
@@ -1525,7 +1532,11 @@ PixelShaderOutput shaderMain(
 	r2.x = (float)((deSatContrastGamma.z + -c252.y));
 	ps = clamp(rcp(r0.w), -FLT_MAX, FLT_MAX);
 	r0.x = ps;
+	if (FusionModernEnabled()) {
+	  r0.xyz = FusionBloomThreshold(r4.xyz, r0.x * ToneMapParams.x);
+	} else {
 	r0.xyz = (float3)((-r0.xxx * ToneMapParams.xxx + r4.xyz));
+	}
 	r0.xyz = (float3)((max(r0.xyz, c252.xxx)));
 	r0.xyz = (float3)((r0.xyz * ToneMapParams.zzz));
 	r0.xyz = (float3)((r0.xyz * c250.xxx));
@@ -1555,5 +1566,6 @@ PixelShaderOutput shaderMain(
 		bool alphaTestPass = AlphaTestPass(output.oC0.w, g_AlphaThreshold, alphaTestFunction);
 		clip(alphaTestPass ? 1.0 : -1.0);
 	}
+	output.oC0.rgb = FusionToneMap(output.oC0.rgb);
 	return output;
 }

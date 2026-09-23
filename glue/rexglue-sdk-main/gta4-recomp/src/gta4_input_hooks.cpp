@@ -159,6 +159,8 @@ constexpr uint32_t kActionPreviousOffset = 3;
 // sub_8224FFC8 consumes it for right-stick vertical scroll edge events.
 constexpr uint32_t kFrontendScrollPreviousOffset = 4212;
 constexpr uint32_t kControlUserIndexOffset = 3412;
+// sub_825D1468 suppresses raw LB press edges while this byte is set.
+constexpr uint32_t kRawContextButtonDisabledOffset = 3408;
 constexpr uint32_t kLastInputTimeOffset = 4200;
 // Generated sub_828CC9D0 converts the XInput state into one of four retail
 // controller records before native PC actions are merged. The record geometry
@@ -2761,11 +2763,42 @@ void TraceUpScriptInputQuery(uint8_t* base, ScriptInputQueryTraceKind kind,
 }  // namespace
 }  // namespace gta4::input
 
+namespace gta4::input {
+void MergeKeyboardScriptContextButton(PPCContext& ctx, uint8_t* base,
+                                      uint32_t group, uint32_t button,
+                                      bool just_pressed) {
+  // The original main.sco police-computer launcher and wardrobe scripts ask
+  // for raw button 4 (LB), whereas most interactions ask for INPUT_PICKUP (23).
+  // Supply the PC Action key at this script query only. Publishing global LB
+  // would also feed vehicle attack and helicopter yaw through the retail poll.
+  // These helpers run below the original natives' input-suppression checks.
+  if (group != 0 || button != 4 || ctx.r3.u32 || !ReadTouchScriptThread(base)) {
+    return;
+  }
+  const auto epoch = ReadEpoch();
+  if (!epoch.valid || epoch.frontend_active || epoch.phone_visible) {
+    return;
+  }
+  PPCContext active = ctx;
+  sub_821B41E8(active, base);
+  const uint32_t control = active.r3.u32;
+  if (!control || LoadU32(base, control + kControlUserIndexOffset) != epoch.state.user_index ||
+      (just_pressed && LoadU8(base, control + kRawContextButtonDisabledOffset))) {
+    return;
+  }
+  const auto key = static_cast<size_t>(VirtualKey::kE);
+  if (just_pressed ? epoch.pressed_keys[key] : epoch.state.keys[key]) {
+    ctx.r3.u64 = just_pressed ? 1 : kPressed;
+  }
+}
+}  // namespace gta4::input
+
 extern "C" void sub_825D1308(PPCContext& ctx, uint8_t* base) {
   const uint32_t group = ctx.r3.u32;
   const uint32_t button = ctx.r4.u32;
   const uint32_t caller = ctx.lr;
   __imp__sub_825D1308(ctx, base);
+  gta4::input::MergeKeyboardScriptContextButton(ctx, base, group, button, false);
   gta4::input::TraceUpScriptInputQuery(
       base, gta4::input::ScriptInputQueryTraceKind::kRawHeld, group, button,
       caller, ctx.r3.u32);
@@ -2776,6 +2809,7 @@ extern "C" void sub_825D1468(PPCContext& ctx, uint8_t* base) {
   const uint32_t button = ctx.r4.u32;
   const uint32_t caller = ctx.lr;
   __imp__sub_825D1468(ctx, base);
+  gta4::input::MergeKeyboardScriptContextButton(ctx, base, group, button, true);
   gta4::input::TraceUpScriptInputQuery(
       base, gta4::input::ScriptInputQueryTraceKind::kRawPressed, group, button,
       caller, ctx.r3.u32);

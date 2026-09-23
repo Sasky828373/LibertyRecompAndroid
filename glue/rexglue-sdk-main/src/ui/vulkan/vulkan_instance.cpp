@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <map>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -22,6 +23,8 @@
 #include <rex/platform.h>
 #include <rex/ui/vulkan/instance.h>
 #include <rex/ui/vulkan/presenter.h>
+
+#include "graphics/gta4_native/temporal/dlss_bootstrap.h"
 
 #if REX_PLATFORM_MAC
 #include "vulkan_moltenvk.h"
@@ -177,6 +180,18 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     requested_extensions.emplace("VK_EXT_metal_surface",
                                  &vulkan_instance->extensions_.ext_EXT_metal_surface);
 #endif
+  }
+
+  const auto dlss_requirements =
+      graphics::gta4_native::temporal::QueryDlssInstanceExtensions();
+  const auto dlss_fg_requirements = graphics::gta4_native::temporal::QueryDlssInstanceExtensions(
+      graphics::gta4_native::temporal::DlssFeature::kFrameGeneration);
+  std::map<std::string, bool> dlss_extension_states;
+  for (const auto* requirements : {&dlss_requirements, &dlss_fg_requirements}) {
+    for (const auto& name : requirements->extensions) {
+      auto state = dlss_extension_states.emplace(name, false).first;
+      requested_extensions.try_emplace(name, &state->second);
+    }
   }
 
   std::vector<const char*> enabled_extensions;
@@ -414,6 +429,27 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
                  vk::to_string(vk::Result(instance_create_result)));
     return nullptr;
   }
+
+  const auto check_dlss_extensions = [&](const auto& requirements, bool& enabled,
+                                          std::string& reason) {
+    enabled = requirements.available;
+    reason = requirements.reason;
+    for (const auto& name : requirements.extensions) {
+      bool found = false;
+      for (uint32_t i = 0; i < instance_create_info.enabledExtensionCount; ++i) {
+        if (name == instance_create_info.ppEnabledExtensionNames[i]) { found = true; break; }
+      }
+      if (!found) {
+        enabled = false;
+        reason = "Missing required DLSS instance extension: " + name;
+        break;
+      }
+    }
+  };
+  check_dlss_extensions(dlss_requirements, vulkan_instance->dlss_extensions_enabled_,
+                         vulkan_instance->dlss_unavailable_reason_);
+  check_dlss_extensions(dlss_fg_requirements, vulkan_instance->dlss_fg_extensions_enabled_,
+                         vulkan_instance->dlss_fg_unavailable_reason_);
 
   // Load instance functions.
 

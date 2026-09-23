@@ -37,20 +37,47 @@ class NativeConstantUploadTracker {
     }
 
     size_t written = 0;
-    for (size_t relative = 0; relative < source.size(); relative += kRegisterBytes) {
-      std::array<uint32_t, kRegisterBytes / sizeof(uint32_t)> words;
-      std::memcpy(words.data(), source.data() + relative, kRegisterBytes);
-      if (guest_word_order) {
-        for (uint32_t& word : words) word = std::byteswap(word);
+    // Only the initialized, cached prefix may be read. Uninitialized tails and
+    // uncached heaps take a single sequential copy/conversion path instead of
+    // repeating comparison and initialization branches for every register.
+    const size_t existing = compare_existing
+        ? std::min(source.size(), initialized_bytes_ - offset) : 0;
+    const auto convert = [&](uint8_t* dst, const uint8_t* src, size_t bytes) {
+      if (!guest_word_order) { std::memcpy(dst, src, bytes); return; }
+      for (size_t i = 0; i < bytes; i += sizeof(uint32_t)) {
+        uint32_t word;
+        std::memcpy(&word, src + i, sizeof(word));
+        word = std::byteswap(word);
+        std::memcpy(dst + i, &word, sizeof(word));
       }
-      const size_t destination = offset + relative;
-      // Never inspect uninitialized backing memory. Once written, comparison is
-      // bit-exact, including NaN payloads, signed zero and integer fields.
-      if (!compare_existing || destination >= initialized_bytes_ ||
-          std::memcmp(storage.data() + destination, words.data(), kRegisterBytes) != 0) {
-        std::memcpy(storage.data() + destination, words.data(), kRegisterBytes);
+    };
+    size_t relative = 0;
+    // Reject equal cache-line-sized groups in one comparison. Changed groups
+    // still store/count only different registers, preserving exact bit patterns.
+    for (; existing - relative >= 64; relative += 64) {
+      alignas(16) std::array<uint8_t, 64> converted;
+      convert(converted.data(), source.data() + relative, converted.size());
+      uint8_t* destination = storage.data() + offset + relative;
+      if (std::memcmp(destination, converted.data(), converted.size()) == 0) continue;
+      for (size_t lane = 0; lane < converted.size(); lane += kRegisterBytes) {
+        if (std::memcmp(destination + lane, converted.data() + lane, kRegisterBytes) != 0) {
+          std::memcpy(destination + lane, converted.data() + lane, kRegisterBytes);
+          written += kRegisterBytes;
+        }
+      }
+    }
+    for (; relative < existing; relative += kRegisterBytes) {
+      std::array<uint8_t, kRegisterBytes> converted;
+      convert(converted.data(), source.data() + relative, converted.size());
+      uint8_t* destination = storage.data() + offset + relative;
+      if (std::memcmp(destination, converted.data(), converted.size()) != 0) {
+        std::memcpy(destination, converted.data(), converted.size());
         written += kRegisterBytes;
       }
+    }
+    if (relative < source.size()) {
+      convert(storage.data() + offset + relative, source.data() + relative, source.size() - relative);
+      written += source.size() - relative;
     }
     initialized_bytes_ = std::max(initialized_bytes_, offset + source.size());
     written_bytes_ += written;

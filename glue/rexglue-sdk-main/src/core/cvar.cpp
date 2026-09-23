@@ -67,6 +67,13 @@ std::unordered_map<std::string, PendingValues>& GetPendingValuesStorage() {
   return pending;
 }
 
+// Explicit launch arguments survive the later application config load. This
+// is startup precedence only: normal frontend SetFlagByName remains writable.
+std::unordered_map<std::string, std::string>& GetCommandLineValuesStorage() {
+  static std::unordered_map<std::string, std::string> values;
+  return values;
+}
+
 // Convert flag name to environment variable: gpu_vsync -> REX_GPU_VSYNC
 std::string FlagNameToEnvVar(std::string_view name) {
   std::string result = "REX_";
@@ -98,6 +105,10 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
         continue;
       }
 
+      {
+        std::lock_guard lock(GetRegistryMutex());
+        if (GetCommandLineValuesStorage().contains(full_key)) continue;
+      }
       if (GetFlagInfo(full_key) == nullptr) {
         std::lock_guard lock(GetRegistryMutex());
         GetPendingValuesStorage()[full_key].config = value_str;
@@ -211,14 +222,11 @@ std::optional<size_t> RegisterFlag(FlagEntry entry) {
   storage.push_back(std::move(entry));
 
   // Late registration: apply pending values in the startup order used for
-  // static cvars (command line, then environment, then config file).
+  // static cvars, with explicit command-line values applied last.
   if (g_init_done) {
     FlagEntry& stored = storage[pos];
     auto& pending = GetPendingValuesStorage();
     auto pending_it = pending.find(stored.name);
-    if (pending_it != pending.end() && pending_it->second.cmdline) {
-      stored.setter(*pending_it->second.cmdline);
-    }
     auto env_value = rex::platform::env::get(FlagNameToEnvVar(stored.name));
     if (env_value.has_value()) {
       stored.setter(*env_value);
@@ -226,6 +234,9 @@ std::optional<size_t> RegisterFlag(FlagEntry entry) {
     if (pending_it != pending.end()) {
       if (pending_it->second.config) {
         stored.setter(*pending_it->second.config);
+      }
+      if (pending_it->second.cmdline && stored.setter(*pending_it->second.cmdline)) {
+        GetCommandLineValuesStorage()[stored.name] = *pending_it->second.cmdline;
       }
       pending.erase(pending_it);
     }
@@ -538,11 +549,16 @@ std::vector<std::string> Init(int argc, char** argv) {
     if (entry.type == FlagType::Boolean) {
       app.add_flag_function(
           "--" + entry.name + ",!--no-" + entry.name,
-          [&entry](int64_t count) { entry.setter(count > 0 ? "true" : "false"); },
+          [name = entry.name](int64_t count) {
+            const std::string value = count > 0 ? "true" : "false";
+            if (SetFlagByName(name, value)) GetCommandLineValuesStorage()[name] = value;
+          },
           entry.description);
     } else {
       app.add_option_function<std::string>(
-          "--" + entry.name, [&entry](const std::string& val) { entry.setter(val); },
+          "--" + entry.name, [name = entry.name](const std::string& value) {
+            if (SetFlagByName(name, value)) GetCommandLineValuesStorage()[name] = value;
+          },
           entry.description);
     }
   }
@@ -602,6 +618,7 @@ void LoadConfig(const std::filesystem::path& config_path) {
 void ApplyEnvironment() {
   int count = 0;
   for (const auto& entry : GetRegistryStorage()) {
+    if (GetCommandLineValuesStorage().contains(entry.name)) continue;
     std::string env_name = FlagNameToEnvVar(entry.name);
     auto env_value = rex::platform::env::get(env_name);
     if (env_value.has_value()) {
@@ -671,6 +688,7 @@ void ResetAllForTesting() {
   ResetAllToDefaults();
   ClearPendingRestartFlags();
   GetPendingValuesStorage().clear();
+  GetCommandLineValuesStorage().clear();
   g_init_done = false;
   g_finalized = false;
 }

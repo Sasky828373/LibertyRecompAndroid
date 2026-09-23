@@ -28,6 +28,7 @@
 #include <rex/diagnostics/policy.h>
 #include <rex/graphics/gta4_native/anti_aliasing_policy.h>
 #include <rex/graphics/gta4_native/supersampling_policy.h>
+#include <rex/graphics/gta4_native/upscaling_policy.h>
 #include <rex/graphics/video_mode_util.h>
 #include <rex/graphics/gta4_native/light_trace_context.h>
 #include "rex/graphics/gta4_native/phone_trace.h"
@@ -36,6 +37,10 @@
 #include <rex/graphics/gta4_native/shadow_distance_util.h>
 #include <rex/graphics/gta4_native/surface_view.h>
 #include <rex/graphics/gta4_native/title_commands.h>
+#include <rex/graphics/gta4_native/temporal_commands.h>
+#include "../../src/graphics/gta4_metal/temporal/projection.h"
+#include "../../src/graphics/gta4_metal/temporal/history.h"
+#include <rex/graphics/gta4_native/fusion_timecycle.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/ui/flags.h>
@@ -63,6 +68,7 @@ REXCVAR_DECLARE(std::string, gta4_fsr1_quality);
 REXCVAR_DECLARE(std::string, gta4_aspect_ratio);
 REXCVAR_DECLARE(bool, gta4_force_highest_lod);
 REXCVAR_DECLARE(double, gta4_draw_distance_scale);
+REXCVAR_DECLARE(bool, gta4_modern_shaders);
 REXCVAR_DECLARE(uint32_t, gta4_drawable_reference_limit);
 REXCVAR_DEFINE_BOOL(gta4_native_pixel_snap_fonts, true, "GTA IV/Graphics/Text",
                     "Snap GTA IV font quads to native framebuffer pixels");
@@ -269,11 +275,29 @@ struct PendingDrawPrimitiveUp {
 struct CapturedSunPayload {
   std::array<float, 4> direction{};
   std::array<float, 4> color{};
+  std::array<float, 4> azimuth_color_height{};
+  std::array<float, 4> azimuth_east_strength{};
+  std::array<float, 4> sky_color_exposure{};
+  bool sky_valid = false;
   bool direction_valid = false;
   bool color_valid = false;
 };
 
 thread_local CapturedSunPayload g_captured_sun_payload;
+
+// Extended values follow the same per-view modifier calls and publication slots
+// as the retail 528-byte timecycle records. Never extend guest allocations.
+struct FusionCycleCapture {
+  uint32_t destination = 0;
+  FusionTimecycle values{};
+  bool valid = false;
+  std::unordered_map<uint32_t, FusionTimecycle> temporary_modifiers;
+};
+thread_local FusionCycleCapture* g_fusion_cycle_capture = nullptr;
+struct PublishedFusionCycle { FusionTimecycle values{}; bool valid = false; };
+std::mutex g_fusion_cycle_mutex;
+std::array<PublishedFusionCycle, 2> g_fusion_cycles{};
+
 
 thread_local PendingDrawPrimitiveUp g_pending_draw_primitive_up;
 thread_local uint32_t g_native_deferred_target_width = 0;
@@ -2614,6 +2638,30 @@ bool QueryNativeDeviceCapabilities(DeviceCapabilitiesResult& result) {
   return false;
 }
 
+bool QueryNativeTemporalUpscaler(uint32_t output_width, uint32_t output_height,
+                                uint64_t sequence, TemporalUpscalerResult& result) {
+  const auto requested = rex::cvar::GetFlagByName("gta4_native_upscaler");
+  if (requested != "fsr3" && requested != "dlss") return false;
+  QueryTemporalUpscalerCommand command;
+  command.provider = requested == "fsr3" ? TemporalUpscalerProvider::kFsr3
+                                        : TemporalUpscalerProvider::kDlss;
+  const auto quality = rex::cvar::GetFlagByName("gta4_temporal_upscaler_quality");
+  if (quality == "native") command.quality = TemporalUpscalerQuality::kNative;
+  else if (quality == "quality") command.quality = TemporalUpscalerQuality::kQuality;
+  else if (quality == "balanced") command.quality = TemporalUpscalerQuality::kBalanced;
+  else if (quality == "performance") command.quality = TemporalUpscalerQuality::kPerformance;
+  else if (quality == "ultra_performance") command.quality = TemporalUpscalerQuality::kUltraPerformance;
+  else return false;
+  command.output_width = output_width;
+  command.output_height = output_height;
+  command.sequence = sequence;
+  if (auto* graphics = GetNativeGraphicsSystem()) {
+    return graphics->ExecuteTitleCommand(kTitleId, kTitleCommandAbi, &command, sizeof(command),
+                                         &result, sizeof(result));
+  }
+  return false;
+}
+
 SupersampledExtent GetNativePrimaryPhysicalExtent(uint32_t logical_width, uint32_t logical_height) {
   const uint32_t pixel_factor =
       g_native_supersampling_effective_factor.load(std::memory_order_acquire);
@@ -2796,39 +2844,53 @@ NativeResolutionOverride GetNativeResolutionOverride(uint32_t requested_width,
   g_native_supersampling_effective_factor.store(effective_ssaa_factor, std::memory_order_release);
 
   const bool ssaa_active = requested_ssaa_factor > 1u;
-  const bool fsr1_requested = REXCVAR_GET(gta4_native_upscaler) == "fsr1" && !ssaa_active;
+  const bool fsr1_requested = REXCVAR_GET(gta4_native_upscaler) == "fsr1";
+  const bool metalfx_requested=REXCVAR_GET(gta4_native_upscaler)=="metalfx";
   const bool hdr_requested = rex::cvar::Query<bool>("vulkan_hdr");
-  if (fsr1_requested && !hdr_requested) {
-    const std::string& quality = REXCVAR_GET(gta4_fsr1_quality);
-    const double scale = quality == "ultra_quality" ? 1.3
-                         : quality == "balanced"    ? 1.7
-                         : quality == "performance" ? 2.0
-                                                    : 1.5;
-    const uint32_t candidate_width =
-        uint32_t(std::max(1.0, std::round(double(result.display_width) / scale)));
-    const uint32_t candidate_height =
-        uint32_t(std::max(1.0, std::round(double(result.display_height) / scale)));
-    if (candidate_width >= 640 && candidate_height >= 360) {
-      result.width = candidate_width;
-      result.height = candidate_height;
-      result.fsr1_active =
-          result.width < result.display_width || result.height < result.display_height;
-    } else {
-      static std::atomic<bool> logged_small_fsr_input{false};
-      if (!logged_small_fsr_input.exchange(true)) {
-        REXLOG_WARN(
-            "gta4-native-upscaler: FSR 1 {} input {}x{} for display {}x{} is below "
-            "the validated 640x360 render floor; using native resolution",
-            quality, candidate_width, candidate_height, result.display_width,
-            result.display_height);
-      }
+  DeviceCapabilitiesResult upscaling_capabilities{};
+  const bool perceptual_before_hdr = fsr1_requested && hdr_requested &&
+      QueryNativeDeviceCapabilities(upscaling_capabilities) &&
+      (upscaling_capabilities.capabilities & kCapabilityPerceptualPresentationBeforeHdr);
+  const auto upscaling = metalfx_requested
+      ? SelectMetalFxRenderExtent(result.display_width,result.display_height,true,REXCVAR_GET(gta4_fsr1_quality),ssaa_active)
+      : SelectFsr1RenderExtent(result.display_width, result.display_height,
+          fsr1_requested, REXCVAR_GET(gta4_fsr1_quality), ssaa_active, hdr_requested, perceptual_before_hdr);
+  result.width = upscaling.width; result.height = upscaling.height;
+  result.fsr1_active = fsr1_requested&&upscaling.active();
+  const auto selected_upscaler = REXCVAR_GET(gta4_native_upscaler);
+  if (selected_upscaler == "fsr3" || selected_upscaler == "dlss") {
+    TemporalUpscalerResult temporal;
+    const bool ready = !ssaa_active &&
+        QueryNativeTemporalUpscaler(result.display_width, result.display_height, 0, temporal) &&
+        temporal.status == TemporalUpscalerStatus::kReady &&
+        temporal.render_width >= 640 && temporal.render_height >= 360 &&
+        temporal.render_width <= result.display_width && temporal.render_height <= result.display_height;
+    if (ready) {
+      result.width = temporal.render_width;
+      result.height = temporal.render_height;
     }
-  } else if (fsr1_requested && hdr_requested) {
-    static std::atomic<bool> logged_hdr_fsr_fallback{false};
-    if (!logged_hdr_fsr_fallback.exchange(true)) {
-      REXLOG_WARN(
-          "gta4-native-upscaler: FSR 1 requires normalized perceptual input; "
-          "HDR requested, so internal rendering remains native resolution");
+    static std::atomic<uint32_t> temporal_extent_logs{0};
+    if (temporal_extent_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+      REXLOG_INFO("gta4-temporal-upscaler: requested={} quality={} ready={} status={} render={}x{} output={}x{}",
+          selected_upscaler, rex::cvar::GetFlagByName("gta4_temporal_upscaler_quality"), ready,
+          uint32_t(temporal.status), result.width, result.height, result.display_width, result.display_height);
+      if (!ready) REXLOG_WARN("{} is unavailable for this scene/backend; rendering at native resolution", selected_upscaler);
+    }
+  }
+  if(metalfx_requested){
+    static std::atomic<uint32_t> metalfx_extent_logs{0};
+    if(metalfx_extent_logs.fetch_add(1)<8)REXLOG_INFO("gta4-metalfx-upscaler: quality={} selection={} input={}x{} output={}x{}",REXCVAR_GET(gta4_fsr1_quality),uint32_t(upscaling.selection),result.width,result.height,result.display_width,result.display_height);
+  }
+  if (fsr1_requested) {
+    static std::atomic<uint32_t> logged_upscaling{0};
+    if (logged_upscaling.fetch_add(1, std::memory_order_relaxed) < 8) {
+      REXLOG_INFO("gta4-native-upscaler: quality={} selection={} render={}x{} display={}x{} hdr={} perceptual-before-hdr={}",
+          REXCVAR_GET(gta4_fsr1_quality), uint32_t(upscaling.selection), result.width, result.height,
+          result.display_width, result.display_height, hdr_requested, perceptual_before_hdr);
+      if (upscaling.selection == Fsr1Selection::kHdrInputUnsupported)
+        REXLOG_WARN("gta4-native-upscaler: active backend converts to HDR before upscaling; using native resolution");
+      else if (upscaling.selection == Fsr1Selection::kBelowRenderFloor)
+        REXLOG_WARN("gta4-native-upscaler: FSR1 input would fall below the validated 640x360 scene floor; using native resolution");
     }
   }
   {
@@ -3332,14 +3394,52 @@ bool LoadFiniteGuestFloats(uint8_t* base, uint32_t address, std::array<float, Co
   return true;
 }
 
-EnvironmentalDataV1 CaptureEnvironmentalData(uint8_t* base, uint32_t postfx) {
+const FusionTimecycle* CapturedFusionModifier(uint8_t* base, uint32_t address) {
+  if (!g_fusion_cycle_capture) return nullptr;
+  auto it = g_fusion_cycle_capture->temporary_modifiers.find(address);
+  if (it != g_fusion_cycle_capture->temporary_modifiers.end()) return &it->second;
+  // Retail modifier table: 200 records, 188 bytes each, name hash at offset zero.
+  if (address >= 0x82D2BD18 && address < 0x82D34FF8 &&
+      (address - 0x82D2BD18) % 188 == 0)
+    return FindFusionModifier(LoadU32(base, address));
+  return nullptr;
+}
+
+EnvironmentalDataV2 CaptureEnvironmentalData(uint8_t* base, uint32_t postfx) {
   static std::atomic<uint64_t> source_sequence{0};
-  EnvironmentalDataV1 data{};
+  EnvironmentalDataV2 data{};
   data.byte_size = sizeof(data);
   data.source_sequence = source_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
 
-  // No retail clock/weather ABI or timecycext producer has been established.
-  // Leave fog fields invalid; fixed host-effect defaults are not guest data.
+  const uint32_t render_index = LoadU32(base, kPostFxTimecycleIndexGlobal);
+  if (render_index < g_fusion_cycles.size()) {
+    std::lock_guard lock(g_fusion_cycle_mutex);
+    const auto& cycle = g_fusion_cycles[render_index];
+    data.fog_far_clip = std::bit_cast<float>(LoadU32(base,
+        kCloudDoubleBufferBase + render_index * kCloudDoubleBufferStride + 68));
+    if (std::isfinite(data.fog_far_clip) && data.fog_far_clip > 0)
+      data.valid_fields |= EnvironmentalFieldBit(EnvironmentalField::kFogFarClip);
+    if (cycle.valid) {
+      data.fog_density = cycle.values.values[0];
+      data.fog_height_falloff = cycle.values.values[1];
+      data.fog_altitude_tweak = cycle.values.values[2];
+      data.fog_power = cycle.values.values[3];
+      data.sun_shafts_intensity = cycle.values.values[4];
+      data.valid_fields |= EnvironmentalFieldBit(EnvironmentalField::kFogDensity) |
+          EnvironmentalFieldBit(EnvironmentalField::kFogHeightFalloff) |
+          EnvironmentalFieldBit(EnvironmentalField::kFogAltitudeTweak) |
+          EnvironmentalFieldBit(EnvironmentalField::kFogPower) |
+          EnvironmentalFieldBit(EnvironmentalField::kSunShaftIntensity);
+    }
+  }
+  if (g_captured_sun_payload.sky_valid) {
+    data.azimuth_color_height = g_captured_sun_payload.azimuth_color_height;
+    data.azimuth_east_strength = g_captured_sun_payload.azimuth_east_strength;
+    data.sky_color_exposure = g_captured_sun_payload.sky_color_exposure;
+    data.valid_fields |= EnvironmentalFieldBit(EnvironmentalField::kAzimuthColorHeight) |
+        EnvironmentalFieldBit(EnvironmentalField::kAzimuthEastStrength) |
+        EnvironmentalFieldBit(EnvironmentalField::kSkyColorExposure);
+  }
 
   if (g_captured_sun_payload.direction_valid) {
     data.sun_direction = g_captured_sun_payload.direction;
@@ -3390,6 +3490,8 @@ EnvironmentalDataV1 CaptureEnvironmentalData(uint8_t* base, uint32_t postfx) {
     if (LoadFiniteGuestFloats(base, viewport + kViewportViewProjectionOffset,
                               data.view_projection_matrix)) {
       data.valid_fields |= EnvironmentalFieldBit(EnvironmentalField::kViewProjectionMatrix);
+      if (InvertEnvironmentalMatrix(data.view_projection_matrix, data.inverse_view_projection_matrix))
+        data.valid_fields |= EnvironmentalFieldBit(EnvironmentalField::kInverseViewProjectionMatrix);
     }
     if (LoadFiniteGuestFloats(base, viewport + kViewportCameraPositionOffset,
                               data.camera_position)) {
@@ -3419,6 +3521,8 @@ void SubmitEnvironmentalData(uint8_t* base, uint32_t device, uint32_t postfx) {
   }
 }
 
+#include "gta4_temporal_hooks.inc"
+
 bool ShouldLogNativeHookCall(uint64_t call_count) {
   return call_count != 0 && rex::diagnostics::IsEnabled(rex::diagnostics::Category::kGuestHooks) &&
          (call_count <= 32 || !(call_count % 4096));
@@ -3432,7 +3536,7 @@ uint64_t NextNativeHookDiagnosticCall(std::atomic<uint64_t>& counter) {
 }
 
 void SubmitRenderPhaseMarker(uint32_t device, RenderPhase phase, RenderPhaseEvent event,
-                             uint32_t object, uint32_t caller) {
+                             uint32_t object, uint32_t caller, uint32_t half_scene_texture = 0) {
   if (!device) {
     return;
   }
@@ -3442,14 +3546,16 @@ void SubmitRenderPhaseMarker(uint32_t device, RenderPhase phase, RenderPhaseEven
   marker.event = event;
   marker.object = object;
   marker.caller = caller;
+  marker.half_scene_texture = half_scene_texture;
   SubmitNativeCommand(marker);
 }
 
 class ScopedRenderPhaseMarker {
  public:
-  ScopedRenderPhaseMarker(uint32_t device, RenderPhase phase, uint32_t object, uint32_t caller)
+  ScopedRenderPhaseMarker(uint32_t device, RenderPhase phase, uint32_t object, uint32_t caller,
+                          uint32_t half_scene_texture = 0)
       : device_(device), phase_(phase), object_(object), caller_(caller) {
-    SubmitRenderPhaseMarker(device_, phase_, RenderPhaseEvent::kBegin, object_, caller_);
+    SubmitRenderPhaseMarker(device_, phase_, RenderPhaseEvent::kBegin, object_, caller_, half_scene_texture);
   }
 
   ~ScopedRenderPhaseMarker() {
@@ -3917,15 +4023,20 @@ bool SubmitCapturedNativeCommand(PPCContext& ctx, uint8_t* base, uint32_t device
         PhoneGuestStateText(phone_replay.live)));
   }
   bool accepted = false;
+  const bool trace_fire_replay = FireTraceConfig().enabled &&
+      (g_fire_context.occurrence || captured.fire_capture);
+  const auto fire_live = trace_fire_replay ? CaptureFireReplayState(base, device) : FireReplayState{};
   {
     ScopedReplayDrawState replay_state(base, device, captured.draw_snapshot);
+    const auto fire_applied = trace_fire_replay ? CaptureFireReplayState(base, device) : FireReplayState{};
     if (trace_gbuffer_replay) {
       const auto [constants_hash, transform_hash] = capture_live_hashes();
       log_replay_state("cached-draw-replay-applied", CaptureLiveVertexTransform(base, device),
                        constants_hash, transform_hash, false);
     }
+    if(IsDrawCommandType(captured.type))temporal_host::Draw(base,device);
     accepted = (g_fire_context.occurrence || captured.fire_capture)
-        ? SubmitFireTracedCommand(bytes.data(), bytes.size(), device, captured.fire_capture.get(), command_list, replay_command_ordinal)
+        ? SubmitFireTracedCommand(bytes.data(), bytes.size(), device, captured.fire_capture.get(), command_list, replay_command_ordinal, &fire_live, &fire_applied)
         : TvDetailActive() ? SubmitTvTracedCommand(bytes.data(), bytes.size(), device)
         : SubmitPhoneTracedCommand(bytes.data(), bytes.size(), device,
                                    trace_phone_replay ? &phone_replay : nullptr);
@@ -4390,9 +4501,21 @@ extern "C" void sub_828C6620(PPCContext& ctx, uint8_t* base) {
 }
 
 extern "C" void sub_828C4338(PPCContext& ctx, uint8_t* base) {
+  // The executed model, not its outer model-list, distinguishes rigid submodels
+  // that share a vertex stream. r5 is a material bucket in this entry point.
+  temporal_host::Scope temporal_scope(temporal_host::instance.matrix, ctx.r3.u32,
+                                      temporal_host::instance.pose);
   FireModelEntry(ctx, base);
   TraceKnownOffscreenTransformTransition("offscreen-transition-model-materials", ctx, base,
                                          __imp__sub_828C4338);
+}
+
+extern "C" void sub_828C4578(PPCContext& ctx, uint8_t* base) {
+  // Skinned submodels retain the owning transform/skeleton from D4268 while
+  // capturing the model actually being executed in this nested call.
+  temporal_host::Scope temporal_scope(temporal_host::instance.matrix, ctx.r3.u32,
+                                      temporal_host::instance.pose);
+  __imp__sub_828C4578(ctx, base);
 }
 
 extern "C" void sub_821BE8A0(PPCContext& ctx, uint8_t* base) {
@@ -4401,11 +4524,14 @@ extern "C" void sub_821BE8A0(PPCContext& ctx, uint8_t* base) {
 }
 
 extern "C" void sub_828D41A8(PPCContext& ctx, uint8_t* base) {
+  // This rigid-model entry passes r6 through as the material bucket, not a pose.
+  temporal_host::Scope temporal_scope(ctx.r5.u32, ctx.r3.u32, 0);
   TraceKnownOffscreenTransformTransition("offscreen-transition-model-list-caller", ctx, base,
                                          __imp__sub_828D41A8);
 }
 
 extern "C" void sub_828D4268(PPCContext& ctx, uint8_t* base) {
+  temporal_host::Scope temporal_scope(ctx.r5.u32?ctx.r5.u32:ctx.r6.u32,ctx.r3.u32,ctx.r6.u32);
   TraceKnownOffscreenTransformTransition("offscreen-transition-model-transform-caller", ctx, base,
                                          __imp__sub_828D4268);
 }
@@ -4586,20 +4712,95 @@ extern "C" void sub_8266F7D8(PPCContext& ctx, uint8_t* base) {
 }
 
 extern "C" void sub_82670840(PPCContext& ctx, uint8_t* base) {
-  if (IsNativeMode() && ctx.r3.u32) {
-    CapturedSunPayload captured = g_captured_sun_payload;
-    captured.direction_valid =
-        LoadFiniteGuestFloats(base, ctx.r3.u32 + kSkySunDirectionOffset, captured.direction);
-    captured.color_valid =
-        LoadFiniteGuestFloats(base, ctx.r3.u32 + kSkySunColorOffset, captured.color);
-    if (captured.direction_valid) {
-      // The Xbox upload replaces the fourth source lane with abs(direction.y).
-      // The native projection contract consumes a world-space direction (w=0).
-      captured.direction[3] = 0.0f;
-    }
-    g_captured_sun_payload = captured;
-  }
+  const uint32_t sky = ctx.r3.u32;
+  const uint32_t render_context = ctx.r4.u32;
   __imp__sub_82670840(ctx, base);
+  if (!IsNativeMode() || !sky) return;
+  CapturedSunPayload captured{};
+  captured.direction_valid =
+      LoadFiniteGuestFloats(base, sky + kSkySunDirectionOffset, captured.direction);
+  captured.color_valid =
+      LoadFiniteGuestFloats(base, sky + kSkySunColorOffset, captured.color);
+  if (captured.direction_valid) {
+    // Sky shader coordinates are Y-up; viewport/world coordinates are Z-up.
+    captured.direction = {captured.direction[0], -captured.direction[2],
+                          captured.direction[1], 0.0f};
+  }
+  captured.color[3] = std::bit_cast<float>(LoadU32(base, sky + 0x40));
+  captured.color_valid &= std::isfinite(captured.color[3]);
+  captured.sky_valid =
+      LoadFiniteGuestFloats(base, sky + 0x110, captured.azimuth_color_height) &&
+      LoadFiniteGuestFloats(base, sky + 0x120, captured.azimuth_east_strength) &&
+      LoadFiniteGuestFloats(base, sky + 0x100, captured.sky_color_exposure);
+  captured.azimuth_color_height[3] = std::bit_cast<float>(LoadU32(base, sky + 0x140));
+  captured.azimuth_east_strength[3] = std::bit_cast<float>(LoadU32(base, sky + 0x144));
+  captured.sky_color_exposure[3] = std::bit_cast<float>(LoadU32(base, sky + 0x30));
+  captured.sky_valid &= std::isfinite(captured.azimuth_color_height[3]) &&
+      std::isfinite(captured.azimuth_east_strength[3]) &&
+      std::isfinite(captured.sky_color_exposure[3]);
+  g_captured_sun_payload = captured;
+  // Publish before deferred fog, rather than waiting until the final composite.
+  if (render_context) SubmitEnvironmentalData(base, LoadU32(base, render_context + 24), 0);
+}
+
+// sub_822CC388 interpolates the base cycle; sub_822CC940 then applies the
+// title's per-view far-clip modifiers. FusionFix's default baseline is 4500.
+extern "C" void sub_822CC388(PPCContext& ctx, uint8_t* base) {
+  const uint32_t cycle = ctx.r3.u32;
+  __imp__sub_822CC388(ctx, base);
+  if (IsNativeMode() && cycle && REXCVAR_GET(gta4_modern_shaders))
+    StoreU32(base, cycle + 68, std::bit_cast<uint32_t>(4500.0f));
+}
+
+extern "C" void sub_822CC940(PPCContext& ctx, uint8_t* base) {
+  if (!IsNativeMode()) { __imp__sub_822CC940(ctx, base); return; }
+  FusionCycleCapture capture;
+  capture.destination = ctx.r5.u32;
+  const int32_t hour_override = int32_t(LoadU32(base, 0x82DF3928));
+  const int32_t minute_override = int32_t(LoadU32(base, 0x82DF3920));
+  const float hour = float(hour_override == -1 ? LoadU32(base, 0x82DF3924) : hour_override);
+  const float minute = float(minute_override == -1 ? LoadU32(base, 0x82DF391C) : minute_override);
+  const float second = float(LoadU32(base, 0x82DF3918));
+  capture.valid = SampleFusionTimecycle(hour + minute / 60.0f + second / 3600.0f,
+      LoadU32(base, 0x82FEFD6C), LoadU32(base, 0x82FEFD68),
+      std::bit_cast<float>(LoadU32(base, 0x82FEFD58)), capture.values);
+  auto* previous = g_fusion_cycle_capture;
+  g_fusion_cycle_capture = &capture;
+  __imp__sub_822CC940(ctx, base);
+  g_fusion_cycle_capture = previous;
+  if (capture.destination >= kCloudDoubleBufferBase) {
+    const uint32_t relative = capture.destination - kCloudDoubleBufferBase;
+    const uint32_t index = relative / kCloudDoubleBufferStride;
+    if (relative % kCloudDoubleBufferStride == 0 && index < g_fusion_cycles.size()) {
+      std::lock_guard lock(g_fusion_cycle_mutex);
+      g_fusion_cycles[index] = {capture.values, capture.valid};
+    }
+  }
+}
+
+extern "C" void sub_822C7A08(PPCContext& ctx, uint8_t* base) {
+  if (g_fusion_cycle_capture && g_fusion_cycle_capture->valid)
+    g_fusion_cycle_capture->temporary_modifiers[ctx.r3.u32] = g_fusion_cycle_capture->values;
+  __imp__sub_822C7A08(ctx, base);
+}
+
+extern "C" void sub_822C7C00(PPCContext& ctx, uint8_t* base) {
+  if (g_fusion_cycle_capture && g_fusion_cycle_capture->valid) {
+    const auto* modifier = CapturedFusionModifier(base, ctx.r4.u32);
+    auto it = g_fusion_cycle_capture->temporary_modifiers.find(ctx.r3.u32);
+    if (modifier && it != g_fusion_cycle_capture->temporary_modifiers.end())
+      ApplyFusionModifier(it->second, *modifier, float(ctx.f1.f64));
+  }
+  __imp__sub_822C7C00(ctx, base);
+}
+
+extern "C" void sub_822C89D0(PPCContext& ctx, uint8_t* base) {
+  if (g_fusion_cycle_capture && g_fusion_cycle_capture->valid &&
+      ctx.r3.u32 == g_fusion_cycle_capture->destination) {
+    if (const auto* modifier = CapturedFusionModifier(base, ctx.r4.u32))
+      ApplyFusionModifier(g_fusion_cycle_capture->values, *modifier, float(ctx.f1.f64));
+  }
+  __imp__sub_822C89D0(ctx, base);
 }
 
 extern "C" void sub_821F1670(PPCContext& ctx, uint8_t* base) {
@@ -5586,6 +5787,7 @@ extern "C" void sub_82A3DF50(PPCContext& ctx, uint8_t* base) {
   for (size_t index = 0; index < command.dirty_state.words.size(); ++index) {
     command.dirty_state.words[index] |= commit_dirty_state.words[index];
   }
+  temporal_host::Draw(base,command.device);
   SubmitNativeCommand(command);
   FreeAlignedGuestAllocation(ctx, base, g_pending_draw_primitive_up.vertex_data);
   g_pending_draw_primitive_up = {};
@@ -5614,6 +5816,7 @@ extern "C" void sub_82A3DF60(PPCContext& ctx, uint8_t* base) {
   command.start_vertex = ctx.r5.u32;
   command.vertex_count = ctx.r6.u32;
   command.dirty_state = ConsumeNativeDrawDirtyState(base, device);
+  temporal_host::Draw(base,command.device);
   SubmitNativeCommand(command);
 }
 
@@ -5702,6 +5905,7 @@ void SubmitNativeResolve(uint8_t* base, uint32_t device, uint32_t flags,
     command.color_exp_bias = int32_t(LoadU32(base, parameters + 4));
     command.depth_format = LoadU32(base, parameters + 8);
   }
+  temporal_host::Draw(base,command.device);
   SubmitNativeCommand(command);
   RetireNativeBoundResource(base, device, destination_texture);
 }
@@ -6070,9 +6274,27 @@ extern "C" void sub_822D1710(PPCContext& ctx, uint8_t* base) {
   SubmitEnvironmentalData(base, device, postfx);
   ScopedNativeLightingExecution lighting_scope(
       base, 0x822D1710, RenderExecutionStage::kCompositePostFx, LightPassRole::kNone);
-  ScopedRenderPhaseMarker phase_scope(device, RenderPhase::kCompositePostFx, postfx, caller);
+  // sub_822D10C0 allocates postfx+12 at width/2 and height/2. Retail
+  // sub_828E0048 obtains its D3D handle through grcTexture's vtable+60.
+  uint32_t half_scene_texture = 0;
+  const uint32_t half_scene = postfx ? LoadU32(base, postfx + 12) : 0;
+  if (half_scene) {
+    const uint32_t vtable = LoadU32(base, half_scene);
+    const uint32_t accessor = vtable ? LoadU32(base, vtable + 60) : 0;
+    if (accessor) {
+      const PPCContext saved = ctx;
+      ctx.r3.u64 = half_scene;
+      REX_CALL_INDIRECT_FUNC(accessor);
+      half_scene_texture = ctx.r3.u32;
+      ctx = saved;
+    }
+  }
+  ScopedRenderPhaseMarker phase_scope(device, RenderPhase::kCompositePostFx, postfx, caller,
+                                     half_scene_texture);
 
+  temporal_host::Event(TemporalEvent::kBeforePostFx);
   __imp__sub_822D1710(ctx, base);
+  temporal_host::Event(TemporalEvent::kAfterPostFx);
 }
 
 extern "C" void sub_821BD0A0(PPCContext& ctx, uint8_t* base) {
@@ -6099,6 +6321,7 @@ extern "C" void sub_8267D528(PPCContext& ctx, uint8_t* base) {
   const uint32_t phase_object = ctx.r3.u32;
   const uint32_t caller = ctx.lr;
   const uint32_t device = LoadU32(base, kDeferredDeviceGlobal);
+  temporal_host::Begin(base,device,phase_object+176);
   ScopedNativeLightingExecution lighting_scope(
       base, 0x8267D528, RenderExecutionStage::kSceneToGBuffer, LightPassRole::kNone);
   ScopedRenderPhaseMarker phase_scope(device, RenderPhase::kSceneToGBuffer, phase_object, caller);
@@ -6840,6 +7063,7 @@ extern "C" void sub_82A3E348(PPCContext& ctx, uint8_t* base) {
         transform_before[10], transform_before[11], transform_before[12], transform_before[13],
         transform_before[14], transform_before[15]);
   }
+  temporal_host::Draw(base,command.device);
   SubmitNativeCommand(command);
 }
 

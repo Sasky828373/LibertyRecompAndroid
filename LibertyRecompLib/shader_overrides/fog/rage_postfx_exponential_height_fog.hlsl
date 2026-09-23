@@ -1,7 +1,7 @@
 // Xbox PS_GTADepthEffects (rage_postfx_ps19.bin) with its original depth,
-// HDR, luminance, and near/far-color topology preserved. Only the final stock
-// linear fog factor is replaced by FusionShaders' analytic exponential-height
-// transmittance when the typed environmental snapshot is valid.
+// HDR and depth-desaturation behavior preserved. A valid environmental snapshot
+// enables FusionShaders' radial height integration, sky-derived fog color, and
+// below-horizon sky treatment, using the Xbox reciprocal depth convention.
 
 #define SPEC_CONSTANT_ALPHA_TEST (1u << 1u)
 #define SPEC_CONSTANT_ALPHA_TEST_FUNCTION_SHIFT 8u
@@ -101,7 +101,8 @@ PixelShaderOutput shaderMain(Interpolators input) {
   r1.z = r0.w == 0.0;
   r0.y = rcp(r0.y);
   r0.y = r0.z * r0.y;
-  const float fog_distance = abs(r0.y);
+  const float decoded_depth = r0.y;
+  const bool is_geometry = r0.w != 0.0;
   r1.y = rcp(r0.x);
   r3.w = dot(float4(0.0722, 0.2125, 0.7154, 1.0e-7), r3.zxyw);
   r0.z = r0.y - globalFogParams.x;
@@ -126,31 +127,55 @@ PixelShaderOutput shaderMain(Interpolators input) {
   r3.xyz = globalFogColorN.xyz - r1.xyz;
   r0.xyz = r0.zzz * r3.xyz + r1.xyz;
 
+  PixelShaderOutput output;
+  output.oC0.xyz = lerp(r0.xyz, r2.xyz, r0.w);
   const uint valid =
       vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 0x2D0);
-  const uint required = 0x0000B0F0u;
+  const uint required = 0x001CB6F0u;
   if ((valid & required) == required && dot(input.iTexCoord2.xyz,
-                                             input.iTexCoord2.xyz) > 0.5) {
+                                             input.iTexCoord2.xyz) > 0.0) {
     const float4 fog =
         vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 0x260);
     const float camera_altitude =
         vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 0x270).z;
-    const float3 view_direction = normalize(input.iTexCoord2.xyz);
-    float slope = view_direction.z * max(fog.y, 1.0e-7);
-    if (abs(slope) < 1.0e-6) {
-      slope = 1.0e-6;
-    }
-    const float altitude_density =
-        exp2(-camera_altitude * max(fog.y, 1.0e-7) * saturate(fog.z));
-    const float line_integral =
-        (1.0 - exp2(-slope * fog_distance)) / slope;
-    const float optical_depth =
-        max(fog.x, 0.0) * altitude_density * max(line_integral, 0.0);
-    r0.w = pow(saturate(1.0 - exp2(-optical_depth)), max(fog.w, 0.0));
+    const float4 azimuth = vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 0x430);
+    const float4 east = vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 0x440);
+    const float4 sky = vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 0x450);
+    const float4 sun = vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 0x460);
+    const float3 sun_direction = vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 0x470).xyz;
+    float3 camera_to_world = -input.iTexCoord2.xyz * decoded_depth + 1.0e-6;
+    const float world_z = camera_to_world.z + camera_altitude;
+    float distance = length(camera_to_world);
+    const float3 direction = camera_to_world / max(distance, 1.0e-6);
+    if (!is_geometry && world_z < 0.0)
+      distance = max(camera_altitude / -direction.z, 0.0);
+
+    float3 sky_color = lerp(east.xyz, azimuth.xyz, direction.x * 0.5 + 0.5);
+    sky_color = sky_color * (east.w * (1.0 - saturate(direction.z * azimuth.w))) + sky.xyz;
+    const float sun_dot = dot(direction, sun_direction);
+    float a = saturate(sun_dot * -0.0625 + 0.9375);
+    a = a * a * a;
+    const float b = saturate(sun_dot * 0.5 + 0.5);
+    const float c = saturate((b - a * saturate(0.6 + abs(sun_direction.z))) * 0.5) * 4.0;
+    const float d = saturate(1.0 - c);
+    float3 scatter = c * sun.xyz;
+    scatter = scatter * scatter * scatter * scatter + c * sun.xyz;
+    sky_color = min((saturate(sky_color * d * sun.w) + scatter * sun.w) * sky.w, 30.0);
+    const float3 far_color = lerp(sky_color, globalFogColorN.xyz, globalFogParams.w);
+
+    float slope = direction.z * fog.y;
+    if (abs(slope) < 1.0e-6) slope = 1.0e-6;
+    const float integral = (1.0 - exp2(-slope * distance)) / slope;
+    const float density = exp2(-camera_altitude * fog.y * fog.z) * integral * fog.x;
+    const float amount = pow(saturate(1.0 - exp2(-density)), fog.w);
+    const float3 fog_color = lerp(globalFogColorN.xyz, far_color, is_geometry ? amount : 1.0);
+    // Sky below ground suppresses near-fog influence and has a black base.
+    const float near_weight = (!is_geometry && world_z < 0.0) ? 0.0 : globalFogParams.w;
+    float3 base_color = lerp(r1.xyz, globalFogColorN.xyz, near_weight);
+    if (!is_geometry && world_z < 0.0) base_color = 0.0;
+    output.oC0.xyz = lerp(base_color, fog_color, amount);
   }
 
-  PixelShaderOutput output;
-  output.oC0.xyz = lerp(r0.xyz, r2.xyz, r0.w);
   output.oC0.w = 1.0;
   if (g_SpecConstants & SPEC_CONSTANT_ALPHA_TEST) {
     const float alpha_threshold =

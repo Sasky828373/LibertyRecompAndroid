@@ -315,7 +315,8 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
 
   HostTaskAdmissionResult admission = HostTaskAdmissionResult::kNoMemory;
   try {
-    admission = REX_KERNEL_STATE()->QueueHostTask(
+    admission = REX_KERNEL_STATE()->QueueHostIoTask(
+        reinterpret_cast<uintptr_t>(file.get()),
         [completion, buffer_address = buffer.guest_address(),
          length = static_cast<uint32_t>(buffer_length), byte_offset]() {
           REXKRNL_DEBUG("[AsyncIO] worker start iosb={:08X} kind=read", completion.io_status_block);
@@ -404,7 +405,8 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
 
   HostTaskAdmissionResult admission = HostTaskAdmissionResult::kNoMemory;
   try {
-    admission = REX_KERNEL_STATE()->QueueHostTask(
+    admission = REX_KERNEL_STATE()->QueueHostIoTask(
+        reinterpret_cast<uintptr_t>(file.get()),
         [completion, segments = std::move(segments), length = static_cast<uint32_t>(length),
          byte_offset]() {
           REXKRNL_DEBUG("[AsyncIO] worker start iosb={:08X} kind=scatter",

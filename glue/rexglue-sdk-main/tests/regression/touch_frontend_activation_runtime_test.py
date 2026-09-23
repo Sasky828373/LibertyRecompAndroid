@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise production native Touch Controls activation with the real CVar registry.
+"""Exercise production frontend activation and capability filters with real CVars.
 
 The hook, descriptor checks, choice mutation, value resolver and save routine are
 extracted verbatim from the current source. Guest allocation/renderer submission
@@ -26,6 +26,8 @@ def function(text, signature):
 PREFIX = r"""
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <mutex>
 #include <bit>
 #include <cassert>
 #include <cstdint>
@@ -40,12 +42,60 @@ PREFIX = r"""
 #include <vector>
 #include <sys/mman.h>
 #include <rex/cvar.h>
+#include <rex/platform.h>
 #include <rex/graphics/gta4_native/anti_aliasing_policy.h>
 #include <rex/graphics/gta4_native/hdr_policy.h>
+#include <rex/graphics/gta4_native/temporal_commands.h>
 #include "gta4_frontend_menu_policy.h"
 #include "gta4_draw_distance_policy.h"
 #define REXLOG_INFO(...) ((void)0)
 #define REXLOG_ERROR(...) ((void)0)
+#define REXLOG_WARN(...) ((void)0)
+namespace frontend_fixture {
+bool runtime_present=true;
+bool graphics_present=true;
+bool query_succeeds=true;
+uint32_t title_abi=rex::graphics::gta4_native::kTitleCommandAbi;
+uint32_t capabilities=0;
+unsigned capability_queries=0;
+}
+// Only the runtime boundary is mocked. The production capability query and
+// every setting/filter/mutation helper below are extracted verbatim.
+namespace rex {
+struct FrontendGraphicsFixture {
+  uint32_t GetTitleCommandAbi(uint32_t title) {
+    assert(title==graphics::gta4_native::kTitleId);
+    return frontend_fixture::title_abi;
+  }
+  bool ExecuteTitleCommand(uint32_t title,uint32_t abi,const void* command,
+                           size_t command_size,void* output,size_t output_size) {
+    using namespace graphics::gta4_native;
+    assert(title==kTitleId && abi==kTitleCommandAbi);
+    assert(command_size==sizeof(QueryDeviceCapabilitiesCommand));
+    assert(output_size==sizeof(DeviceCapabilitiesResult));
+    const auto& query=*static_cast<const QueryDeviceCapabilitiesCommand*>(command);
+    assert(query.header.type==CommandType::kQueryDeviceCapabilities);
+    assert(query.header.size==sizeof(query));
+    ++frontend_fixture::capability_queries;
+    if(!frontend_fixture::query_succeeds) return false;
+    DeviceCapabilitiesResult result{};
+    result.capabilities=frontend_fixture::capabilities;
+    std::memcpy(output,&result,sizeof(result));
+    return true;
+  }
+};
+class Runtime {
+ public:
+  static Runtime* instance() {
+    static Runtime runtime;
+    return frontend_fixture::runtime_present ? &runtime : nullptr;
+  }
+  FrontendGraphicsFixture* graphics_system() {
+    static FrontendGraphicsFixture graphics;
+    return frontend_fixture::graphics_present ? &graphics : nullptr;
+  }
+};
+}
 union Register { uint64_t u64; int64_t s64; uint32_t u32; int32_t s32; uint8_t u8; };
 struct Cr { bool eq=false,lt=false,gt=false; template<class T> void compare(T a,T b,int) { eq=a==b;lt=a<b;gt=a>b; } };
 struct PPCContext { REGISTER_MEMBERS uint64_t lr=0; Cr cr6; int xer=0; };
@@ -82,9 +132,9 @@ bool IsGuestSpanValid(uint32_t address, size_t size) {
 }
 // These unrelated graphics APIs must not be reached by the touch setting.
 namespace rex::graphics::gta4_native {
-AntiAliasingMode GetConfiguredAntiAliasingMode() { std::abort(); }
-std::string_view GetConfiguredAntiAliasingModeName() { std::abort(); }
-AntiAliasingApplyResult SetConfiguredAntiAliasingMode(std::string_view) { std::abort(); }
+
+
+
 std::string_view GetConfiguredHdrModeName() { std::abort(); }
 bool SetConfiguredHdrMode(std::string_view) { std::abort(); }
 }
@@ -257,7 +307,8 @@ def main():
            "const NativePageState* CurrentNativePage", "bool OwnsPublishedDisplayDescriptor",
            "bool IsOwnedPrimaryPage", "bool IsOwnedAdvancedPage", "uint32_t OwnedDisplayRowAddress",
            "const Setting* FindSettingByRow", "bool IsOwnedJumpRow", "uint32_t TextAddress",
-           "std::string CurrentSettingValue", "const Choice& CurrentChoice", "uint8_t CurrentChoiceIndex",
+           "uint32_t TemporalCapabilities", "Setting ResolveSetting", "bool ChoiceAvailable",
+           "bool SettingAvailable", "std::string CurrentSettingValue", "const Choice& CurrentChoice", "uint8_t CurrentChoiceIndex",
            "double CurrentDrawDistanceScale", "bool WriteInlineKey", "bool WriteJumpRow", "bool WriteSettingRow",
            "void WriteSentinelRow", "void WriteStringPool", "void PublishDisplayDescriptor",
            "void TraceDescriptorPublish", "void PublishPrimaryPage", "void ChangeSetting",
@@ -265,6 +316,23 @@ def main():
     pieces=[PREFIX.replace("REGISTER_MEMBERS", ";".join(f"Register r{i}{{}}" for i in range(32)) + ";"),definitions,declarations]
     cvar=(SDK/"src/input/absolute_pointer.cpp").read_text()
     pieces.append(re.search(r'REXCVAR_DEFINE_STRING\(touch_controls,.*?;',cvar,re.S).group(0))
+    plugin_cvar=(SDK/"src/ui/rex_app.cpp").read_text()
+    pieces.append(re.search(r'REXCVAR_DEFINE_STRING\(gpu_plugin,.*?;\n',plugin_cvar,re.S).group(0))
+    app=(SDK/"gta4-recomp/src/gta4_app.cpp").read_text()
+    for cvar_name in ["gta4_frame_limit", "gta4_fsr1_quality", "gta4_native_anti_aliasing", "gta4_native_anti_aliasing_unified", "gta4_native_upscaler", "gta4_temporal_upscaler_quality", "gta4_metalfx_frame_generation", "gta4_native_frame_generation", "gta4_present_mode"]:
+        pieces.append(re.search(r'REXCVAR_DEFINE_\w+\('+cvar_name+r',.*?;\n',app,re.S).group(0))
+    shared=(SDK/"src/graphics/gta4_native/core/options.cpp").read_text()
+    for cvar_name in ["gta4_texture_filtering", "gta4_anisotropic_filtering", "gta4_native_msaa", "gta4_native_spatial_aa"]:
+        pieces.append(re.search(r'REXCVAR_DEFINE_\w+\('+cvar_name+r',.*?;\n',shared,re.S).group(0))
+    # Real AA state and setter; the unrelated SSAA GPU query is outside this fixture.
+    pieces.append(app[app.index("std::mutex g_anti_aliasing_controller_mutex;"):app.index("std::mutex g_hdr_controller_mutex;")])
+    pieces.append(function(app,"const char* AntiAliasingCompatibilityName"))
+    pieces.append(function(app,"void InitializeFrontendAntiAliasingControllerLocked"))
+    pieces.append("bool ValidateSupersamplingSelection(rex::graphics::gta4_native::AntiAliasingMode mode) { assert(!rex::graphics::gta4_native::UsesSceneSupersampling(mode)); return true; }")
+    pieces.append("namespace rex::graphics::gta4_native {")
+    for name in ["void InitializeAntiAliasingController", "AntiAliasingMode GetConfiguredAntiAliasingMode", "AntiAliasingMode GetActiveAntiAliasingMode", "std::string_view GetConfiguredAntiAliasingModeName", "std::string_view GetActiveAntiAliasingModeName", "AntiAliasingApplyResult SetConfiguredAntiAliasingMode"]:
+        pieces.append(function(app,name))
+    pieces.append("}")
     pieces.extend(function(source,name) for name in names)
     start=source.index("class ScopedAdjustment final")
     pieces.append(source[start:source.index("\n};",start)+len("\n};")])
@@ -272,11 +340,17 @@ def main():
     pieces.append(function(generated,"DEFINE_REX_FUNC(sub_82257450)"))
     for name in ["sub_82252A98","sub_82258FB0","sub_82253370","sub_82258388"]:
         pieces.append(function(source,'extern "C" void '+name+'('))
-    pieces.append(SUFFIX)
+    pieces.append((ROOT / "tools/tests/frontend_renderer_checks.inc").read_text())
+    pieces.append((ROOT / "tools/tests/frontend_graphics_checks.inc").read_text())
+    pieces.append((ROOT / "tools/tests/frontend_hybrid_aa_checks.inc").read_text())
+    pieces.append((ROOT / "tools/tests/frontend_temporal_checks.inc").read_text())
+    pieces.append(SUFFIX.replace('  auto activate=[&]', '  ExerciseRendererMenu(base);\n  ExerciseGraphicsMenuBindings(base);\n  ExerciseHybridAntiAliasingMenu();\n  ExerciseTemporalMenuBindings();\n  auto activate=[&]'))
     ninja=(args.build_directory/"build.ninja").read_text()
     stanza=re.search(r'^build [^\n]*gta4_frontend_hooks\.cpp\.o[^\n]*\n(?P<rest>(?:  [^\n]*\n)+)',ninja,re.M)
     values=dict(re.findall(r'^  (\w+) = (.*)$',stanza.group("rest"),re.M))
     includes=shlex.split(values.get("INCLUDES",""))
+    provider_defines=[value for value in shlex.split(values.get("DEFINES",""))
+                      if value.startswith(("-DLIBERTY_HAS_FSR3", "-DLIBERTY_HAS_DLSS"))]
     cache=(args.build_directory/"CMakeCache.txt").read_text()
     compiler=re.search(r'^CMAKE_CXX_COMPILER:[^=]*=(.*)$',cache,re.M).group(1)
     library=SDK/"out/mac-arm64"
@@ -284,12 +358,21 @@ def main():
         directory=Path(directory)
         cpp=directory/"test.cpp"
         cpp.write_text("\n\n".join(pieces))
-        binary=directory/"test"
-        subprocess.run([compiler,"-std=c++23","-O1","-UNDEBUG",*includes,
-                        "-I"+str(SDK/"gta4-recomp/src"), "-I"+str(SDK/"thirdparty/cli11/include"),str(cpp), str(SDK/"src/core/cvar.cpp"),
-                        "-L"+str(library),"-lrexruntime","-Wl,-rpath,"+str(library),
-                        "-o",str(binary)],check=True)
-        subprocess.run([str(binary),str(directory)],check=True)
+        # The first variant uses the actual app's provider build flags. The
+        # second exposes every provider to exercise hardware filtering without
+        # requiring an NVIDIA runtime on this host. All GPU queries stay mocked.
+        variants={"active-build":provider_defines,
+                  "all-provider-fixture":["-DLIBERTY_HAS_FSR3=1","-DLIBERTY_HAS_DLSS=1"]}
+        for variant,defines in variants.items():
+            binary=directory/variant
+            # Reuse the active SDK/architecture/deployment flags, not Clang defaults.
+            subprocess.run([compiler,*shlex.split(values.get("FLAGS","")),
+                            "-std=c++23","-O1","-UNDEBUG",*defines,*includes,
+                            "-I"+str(SDK/"gta4-recomp/src"), "-I"+str(SDK/"thirdparty/cli11/include"),str(cpp), str(SDK/"src/core/cvar.cpp"),
+                            "-L"+str(library),"-lrexruntime","-Wl,-rpath,"+str(library),
+                            "-o",str(binary)],check=True)
+            print(f"Running frontend regression: {variant}",flush=True)
+            subprocess.run([str(binary),str(directory)],check=True)
 
 
 if __name__=="__main__":

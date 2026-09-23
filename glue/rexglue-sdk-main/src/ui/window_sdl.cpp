@@ -26,6 +26,7 @@
 #include <rex/input/input_trace.h>
 #include <rex/input/absolute_pointer.h>
 #include <rex/logging.h>
+#include <rex/diagnostics/policy.h>
 #include <rex/platform.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/sdl_virtual_key.h>
@@ -57,11 +58,15 @@ struct DeferredPaintRequest {
   SDL_WindowID window_id;
   uint32_t ticket;
   std::shared_ptr<PaintWakeupState> state;
+  uint64_t due_host_ns = 0;
 };
 
 Uint64 DeferredPaintTimerCallback(void* userdata, SDL_TimerID, Uint64) {
   std::unique_ptr<DeferredPaintRequest> request(static_cast<DeferredPaintRequest*>(userdata));
   if (!request->state->IsCurrent(request->ticket)) return 0;
+  if (request->due_host_ns) REXLOG_INFO(
+      "FramePacer timer=fired ticket={} due-host-ns={} actual-host-ns={}",
+      request->ticket, request->due_host_ns, FramePacerNowNs());
   SDL_Event event{};
   event.type = request->event_type;
   event.user.windowID = request->window_id;
@@ -534,8 +539,12 @@ void WindowSDL::RequestPaintAfterNanosecondsImpl(uint64_t delay_ns) {
   delay_ns = std::clamp<uint64_t>(delay_ns, 1, 1'000'000'000);
   const uint32_t ticket = paint_wakeup_->Request(SDL_GetTicksNS() + delay_ns);
   if (!ticket) return;
+  const bool trace = rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter);
+  const uint64_t due_host_ns = trace ? FramePacer::Add(FramePacerNowNs(), delay_ns) : 0;
+  if (trace) REXLOG_INFO("FramePacer timer=request ticket={} delay-ns={} due-host-ns={}",
+                         ticket, delay_ns, due_host_ns);
   auto request = std::make_unique<DeferredPaintRequest>(DeferredPaintRequest{
-      sdl_app_context().paint_event_type(), sdl_window_id_, ticket, paint_wakeup_});
+      sdl_app_context().paint_event_type(), sdl_window_id_, ticket, paint_wakeup_, due_host_ns});
   if (!SDL_AddTimerNS(delay_ns, DeferredPaintTimerCallback, request.get())) {
     paint_wakeup_->Complete(ticket);
     REXLOG_WARN("SDL_AddTimerNS failed for paint scheduling: {}", SDL_GetError());
@@ -546,7 +555,11 @@ void WindowSDL::RequestPaintAfterNanosecondsImpl(uint64_t delay_ns) {
 }
 
 void WindowSDL::HandlePaintEvent(uint32_t ticket) {
-  if (paint_wakeup_->Complete(ticket)) OnPaint();
+  if (paint_wakeup_->Complete(ticket)) {
+    if (rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter))
+      REXLOG_INFO("FramePacer timer=event ticket={} actual-host-ns={}", ticket, FramePacerNowNs());
+    OnPaint();
+  }
 }
 
 void WindowSDL::HandleWindowEvent(SDL_Event& event) {

@@ -1,5 +1,5 @@
 // Exact rage_postfx_vs0 interface with one additional, otherwise-unused
-// TEXCOORD2 carrying a normalized world-space view ray for the fog compositor.
+// TEXCOORD2 carrying a unnormalized world-space view ray for the fog compositor.
 
 struct PushConstants {
   uint64_t VertexShaderConstants;
@@ -60,7 +60,7 @@ Interpolators shaderMain(VertexShaderInput input) {
     projected /= safe_scale;
     const float3 view_ray = float3(-projected, 1.0);
     output.oTexCoord2.xyz =
-        normalize(mul(float4(view_ray, 0.0), view_inverse).xyz);
+        mul(float4(view_ray, 0.0), view_inverse).xyz;
   }
 
   const float4 clip_plane =

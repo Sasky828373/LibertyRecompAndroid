@@ -104,6 +104,29 @@ TEST_CASE("Flight bindings follow helicopter driver ownership and yield to menus
   CHECK_FALSE(IsKeyboardControllerKey(rex::ui::VirtualKey::kNone, true));
 }
 
+TEST_CASE("E stays a PC context action without broadcasting a controller bumper",
+          "[input][gta4][keyboard][controller]") {
+  using rex::ui::VirtualKey;
+  using namespace rex::input;
+  const bool flight = GENERATE(false, true);
+  const auto bindings = KeyboardControllerBindings(flight);
+  bool keys[256]{};
+  keys[static_cast<size_t>(VirtualKey::kE)] = true;
+  CHECK_FALSE(IsKeyboardControllerKey(VirtualKey::kE, flight));
+  auto state = mnk::BuildNativeControllerCompatibilityGamepad(bindings, keys, std::size(keys));
+  CHECK(state.buttons == 0);
+  CHECK(state.left_trigger == 0);
+  CHECK(state.right_trigger == 0);
+  CHECK(state.thumb_lx == 0);
+  CHECK(state.thumb_ly == 0);
+  keys[static_cast<size_t>(VirtualKey::kNumpad4)] = true;
+  state = mnk::BuildNativeControllerCompatibilityGamepad(bindings, keys, std::size(keys));
+  CHECK(state.buttons == (flight ? X_INPUT_GAMEPAD_LEFT_SHOULDER : 0));
+  keys[static_cast<size_t>(VirtualKey::kNumpad4)] = false;
+  state = mnk::BuildNativeControllerCompatibilityGamepad(bindings, keys, std::size(keys));
+  CHECK(state.buttons == 0);
+}
+
 TEST_CASE("Other PC controls remain outside the global controller bridge",
           "[input][gta4][keyboard][controller]") {
   using rex::ui::VirtualKey;

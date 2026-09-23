@@ -59,6 +59,7 @@ void CaptureTouchContext(PPCContext&, uint8_t*, uint64_t epoch, bool frontend, b
   review::facts.frontend = frontend;
   review::facts.map = map;
 }
+bool TouchActivityQueryMatches(uint8_t*, const TouchActivitySnapshot& a) noexcept { return !a.valid; }
 TouchContextSnapshot GetTouchContextSnapshot() noexcept { return review::facts; }
 TouchVisiblePromptSnapshot GetTouchVisiblePromptSnapshot(uint64_t, uint64_t generation) noexcept {
   return review::prompts.generation == generation ? review::prompts : TouchVisiblePromptSnapshot{};

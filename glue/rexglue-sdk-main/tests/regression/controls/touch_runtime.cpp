@@ -42,6 +42,8 @@ bool GetTouchPresentationState(TouchPresentationState* output) noexcept { *outpu
 void SetTouchGamepadProvider(TouchGamepadProvider value) noexcept { provider = value; }
 }
 namespace gta4::input {
+bool activity_query_admitted = true;
+bool TouchActivityQueryMatches(uint8_t*, const TouchActivitySnapshot&) noexcept { return activity_query_admitted; }
 TouchContextSnapshot GetTouchContextSnapshot() noexcept { return facts; }
 TouchVisiblePromptSnapshot GetTouchVisiblePromptSnapshot(uint64_t, uint64_t generation) noexcept {
   return generation == prompts.generation ? prompts : TouchVisiblePromptSnapshot{};
@@ -895,6 +897,8 @@ void BetweenPollSuspension() {
 }
 }
 
+#include "touch_activity_integration.inc"
+
 int main() {
   guest = static_cast<uint8_t*>(mmap(nullptr, touch_samples::kGuestBytes, PROT_READ | PROT_WRITE,
       MAP_PRIVATE | MAP_ANON, -1, 0));
@@ -906,5 +910,8 @@ int main() {
   OnFootAttackAlwaysAvailable();
   BetweenPollSuspension();
   ExplicitFrontendEditor();
+  ActivityTransactions();
+  NativeWeaponSelectorGestures();
+  ShutdownContextTouchControls();
   munmap(guest, touch_samples::kGuestBytes);
 }

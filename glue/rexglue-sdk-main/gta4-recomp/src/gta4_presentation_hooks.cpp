@@ -1,11 +1,13 @@
 #include "gta4_presentation_options.h"
 #include "gta4_presentation_policy.h"
+#include "gta4_gpu_pass_context.h"
 #include "input/context_touch_controls.h"
 
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <span>
 
@@ -32,10 +34,12 @@ std::atomic<uint32_t> composite_events{0};
 std::atomic<uint32_t> composite_changes{0};
 struct CompositeTraceKey {
   uint32_t episode, requested, selected;
-  bool disabled, eligible;
+  bool disabled, eligible, motion_blur;
   bool operator==(const CompositeTraceKey&) const = default;
 };
 thread_local std::optional<CompositeTraceKey> last_composite;
+gta4::temporal_boundary::Registry temporal_boundaries;
+std::mutex temporal_boundary_mutex;
 
 bool Diagnostics() noexcept {
   return gta4::presentation::TraceEnabled() &&
@@ -57,6 +61,17 @@ bool GuestSpan(uint8_t* base, uint32_t address, std::size_t size, bool writable 
   using rex::memory::PageAccess;
   return access == PageAccess::kReadWrite || access == PageAccess::kExecuteReadWrite ||
          (!writable && (access == PageAccess::kReadOnly || access == PageAccess::kExecuteReadOnly));
+}
+
+std::optional<uint32_t> BoundaryWord(uint8_t* base,uint32_t object,uint32_t offset=0) {
+  const uint64_t address=uint64_t(object)+offset;
+  if(!object||address>UINT32_MAX||!GuestSpan(base,uint32_t(address),sizeof(uint32_t)))return {};
+  return REX_LOAD_U32(uint32_t(address));
+}
+std::pair<uint32_t,uint64_t> BoundaryFrame(uint8_t* base) {
+  const auto device=BoundaryWord(base,0x831C22A4);
+  const auto submitted=device?BoundaryWord(base,*device,16544):std::nullopt;
+  return device&&submitted?std::pair{*device,uint64_t(*submitted)+1}:std::pair<uint32_t,uint64_t>{};
 }
 
 void TraceStartup(uint8_t* base, const char* point, uint32_t caller) {
@@ -89,6 +104,47 @@ class ParserScope final {
   bool previous_;
 };
 }  // namespace
+
+namespace gta4::temporal_boundary {
+Decision DeclaredBoundary(uint8_t* base,uint32_t device,uint64_t sequence,uint32_t phase) {
+  std::lock_guard lock(temporal_boundary_mutex);
+  const auto decision=temporal_boundaries.Find(device,sequence,phase);
+  if(!decision)return decision;
+  const auto gbuffer_type=BoundaryWord(base,phase);
+  const auto type=BoundaryWord(base,decision.composite_phase);
+  const auto flags=BoundaryWord(base,decision.composite_phase,kCompositeFlagsOffset);
+  const auto list=BoundaryWord(base,decision.composite_phase,kSceneListOffset);
+  if(!gbuffer_type||*gbuffer_type!=kGBufferVtable||!type||*type!=kDrawSceneVtable||
+      !flags||!list||!DeclaresComposite(*flags,*list))
+    return {0,"declared title composite is no longer eligible"};
+  return decision;
+}
+}  // namespace gta4::temporal_boundary
+
+// Vtable slot 4 of the exact retail DrawScene and GBuffer phases receives the
+// shared render context in r4. Observe AFTER the original camera/context update;
+// retain no guest object beyond the matching device/submitted-frame sequence.
+extern "C" void sub_8235DF98(PPCContext& ctx,uint8_t* base) {
+  const uint32_t phase=ctx.r3.u32,context=ctx.r4.u32;
+  const auto frame=BoundaryFrame(base);
+  __imp__sub_8235DF98(ctx,base);
+  const auto type=BoundaryWord(base,phase);
+  const auto flags=BoundaryWord(base,phase,gta4::temporal_boundary::kCompositeFlagsOffset);
+  const auto list=BoundaryWord(base,phase,gta4::temporal_boundary::kSceneListOffset);
+  if(!type||*type!=gta4::temporal_boundary::kDrawSceneVtable||!flags||!list||frame!=BoundaryFrame(base))return;
+  std::lock_guard lock(temporal_boundary_mutex);
+  temporal_boundaries.Composite(frame.first,frame.second,context,phase,
+      gta4::temporal_boundary::DeclaresComposite(*flags,*list));
+}
+extern "C" void sub_8267CFF8(PPCContext& ctx,uint8_t* base) {
+  const uint32_t phase=ctx.r3.u32,context=ctx.r4.u32;
+  const auto frame=BoundaryFrame(base);
+  __imp__sub_8267CFF8(ctx,base);
+  const auto type=BoundaryWord(base,phase);
+  if(!type||*type!=gta4::temporal_boundary::kGBufferVtable||frame!=BoundaryFrame(base))return;
+  std::lock_guard lock(temporal_boundary_mutex);
+  temporal_boundaries.GBuffer(frame.first,frame.second,phase,context);
+}
 
 extern "C" void sub_82145420(PPCContext& ctx, uint8_t* base) {
   const gta4::input::ContextTouchGameplayTransition touch_transition;
@@ -161,9 +217,15 @@ extern "C" void sub_82142230(PPCContext& ctx, uint8_t* base) {
 extern "C" void sub_822CF300(PPCContext& ctx, uint8_t* base) {
   const uint32_t requested = ctx.r6.u32;
   const uint32_t caller = ctx.lr;
+  // Retail sub_822CFC00's final call leaves r4 null to draw into the current
+  // framebuffer; its intermediate calls supply an offscreen destination.
+  // This scope follows actual execution, independent of queued phase markers.
+  const gta4::gpu_pass::ScopedFinalComposite final_composite_scope(
+      caller == policy::kCompositeCaller && ctx.r4.u32 == 0);
   const bool disable = gta4::presentation::DisableTladFilmGrain();
+  const bool motion_blur = gta4::presentation::MotionBlurEnabled();
   const bool trace = Diagnostics();
-  if (caller != policy::kCompositeCaller || (!disable && !trace) ||
+  if (caller != policy::kCompositeCaller || (!disable && motion_blur && !trace) ||
       !GuestSpan(base, kEpisode, sizeof(uint32_t))) {
     __imp__sub_822CF300(ctx, base);
     return;
@@ -171,14 +233,17 @@ extern "C" void sub_822CF300(PPCContext& ctx, uint8_t* base) {
   const uint32_t episode = REX_LOAD_U32(kEpisode);
   const uint32_t postfx = ctx.r3.u32;
   bool valid = false;
-  if (episode == 1 && policy::IsNoisePass(requested) && ctx.r4.u32 == 0 &&
+  const bool selected_feature = (episode == 1 && policy::IsNoisePass(requested)) ||
+      policy::IsMotionBlurPass(requested, episode);
+  if (selected_feature && ctx.r4.u32 == 0 &&
       GuestSpan(base, postfx, kCompositeTechniqueOffset + sizeof(uint32_t))) {
     const uint32_t effect = REX_LOAD_U32(postfx + kEffectLinkOffset);
     valid = ctx.r5.u32 != 0 && ctx.r5.u32 == REX_LOAD_U32(postfx + kCompositeTechniqueOffset) &&
             GuestSpan(base, effect, 28);
   }
-  const uint32_t selected = policy::SelectCompositePass(requested, disable, episode, caller, valid);
-  const CompositeTraceKey key{episode, requested, selected, disable, valid};
+  const uint32_t grain_selected = policy::SelectCompositePass(requested, disable, episode, caller, valid);
+  const uint32_t selected = policy::SelectMotionBlurPass(grain_selected, motion_blur, episode, caller, valid);
+  const CompositeTraceKey key{episode, requested, selected, disable, valid, motion_blur};
   const bool changed = trace && (!last_composite || *last_composite != key);
   const bool record_change =
       changed && composite_changes.fetch_add(1, std::memory_order_relaxed) < 32;
@@ -187,9 +252,9 @@ extern "C" void sub_822CF300(PPCContext& ctx, uint8_t* base) {
     last_composite = key;
   if (record_sample || record_change) {
     REXLOG_INFO(
-        "gta4-presentation: point=composite episode={} disabled={} caller={:08X} "
+        "gta4-presentation: point=composite episode={} disabled={} motion-blur={} caller={:08X} "
         "postfx={:08X} remap-eligible={} requested={} selected={} technique={:08X}",
-        episode, disable, caller, postfx, valid, requested, selected, ctx.r5.u32);
+        episode, disable, motion_blur, caller, postfx, valid, requested, selected, ctx.r5.u32);
   }
   // The original helper binds the chosen pass's own constants and texture slots.
   // Never change the script FORCE_NOISE_OFF byte or the profile's preference.

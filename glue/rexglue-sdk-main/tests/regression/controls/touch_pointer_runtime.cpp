@@ -1,4 +1,6 @@
 #include <rex/input/absolute_pointer.h>
+#include <rex/input/pointer_clock.h>
+#include "touch_activity_samples.h"
 #include <rex/input/input.h>
 #include <cassert>
 #include <iostream>
@@ -14,6 +16,15 @@ std::vector<AbsolutePointerEvent> Drain(AbsolutePointerService& service) {
 }
 
 int main() {
+  using namespace activity_samples;
+  assert(RebasePointerTimestamp(kBeginNs,kMoveNs,kMoveNs)==kBeginNs);
+  assert(RebasePointerTimestamp(kBeginNs,kBeginNs,kReverseNs)==kReverseNs);
+  assert(RebasePointerTimestamp(0,kMoveNs,kReverseNs)==kReverseNs);
+  assert(RebasePointerTimestamp(kReverseNs,kMoveNs,kBeginNs)==kBeginNs);
+  assert(RebasePointerTimestamp(kBeginNs,kReverseNs,0)==0);
+  const auto stamp=RebasePointerTimestamp(kBeginNs,kReverseNs,kExpiredNs);
+  assert(kExpiredNs-stamp==kReverseNs-kBeginNs);
+  std::cout<<"PASS pointer clock rebasing preserves queued age and rejects underflow without comparing unrelated epochs\n";
   rex::ui::GuestOutputTransform transform;
   transform.revision=1;transform.surface_width=2400;transform.surface_height=1080;
   transform.host_render_target_width=2400;transform.host_render_target_height=1080;

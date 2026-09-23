@@ -18,6 +18,8 @@
 
 #include <fmt/format.h>
 #include <rex/assert.h>
+#include <rex/cvar.h>
+#include <rex/system/ordered_io_queue.h>
 #include <rex/image_info.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -43,6 +45,10 @@
 #include <rex/system/xthread.h>
 #include <rex/system/xtimer.h>
 #include <rex/system/xam/arbitration_async.h>
+
+REXCVAR_DEFINE_UINT32(host_file_io_workers, 4, "Kernel/IO",
+                      "Ordered file-I/O lanes; zero uses the original shared kernel dispatcher")
+    .range(0, 4).lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex::system {
 
@@ -136,6 +142,7 @@ KernelState::KernelState(Runtime* emulator)
   // Deferred APIs may be used during module setup, before SetExecutableModule.
   // Start the bound worker as soon as its process/thread globals are valid.
   StartHostTaskWorker();
+  StartHostIoWorkers();
 
   live_compatibility_->SetInviteNotificationHandler(
       [this] { BroadcastNotification(0x02000002, 0); });
@@ -189,6 +196,7 @@ KernelState::~KernelState() {
 
   // Drain and join the bound host worker while all guest objects, threads and
   // memory referenced by accepted requests are still alive.
+  StopHostIoWorkers();
   StopHostTaskWorker();
 
   app_manager_.reset();
@@ -666,6 +674,7 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
   }
 
   StartHostTaskWorker();
+  StartHostIoWorkers();
 
   LoadAchievementsData();
 }
@@ -962,19 +971,24 @@ void KernelState::TerminateTitle() {
 
   constexpr uint32_t kCooperativeExitTimeoutMs = 200;
 
-  // Guest threads poll this flag in the kernel wait primitives
-  // (XThread::CheckTitleTermination) and self-exit.
-  terminating_title_.store(true, std::memory_order_release);
+  // Admission and cooperative guest exit are separate phases. Publishing
+  // terminating_title_ first would let CheckTitleTermination call Exit and
+  // FreeStack before an already accepted read has finished using its buffer.
+  {
+    auto admission_lock = global_critical_region_.Acquire();
+    dispatch_accepting_ = false;
+    host_io_accepting_ = false;
+  }
 
   // Retire every arbitration generation before guest objects or output
   // buffers can be destroyed or reused by a subsequent title.
   if (arbitration_async_manager_) arbitration_async_manager_->CancelAll();
 
-  // No new host work can be admitted after the flag above. Drain all work
-  // accepted before it before guest threads are allowed to exit or are removed
-  // from the object map; accepted I/O owns strong refs, but APC insertion also
-  // requires the guest thread's live kernel state.
+  // No producer can pass either admission fence. Complete transfers and release
+  // their retained objects before requesting guest-thread exit.
   WaitForHostTasks();
+  LogHostIoStatistics();
+  terminating_title_.store(true, std::memory_order_release);
 
   // Retained so a thread that wakes and exits below can't be freed mid-drain.
   std::vector<object_ref<XThread>> target_threads;
@@ -1293,6 +1307,9 @@ void KernelState::StartHostTaskWorker() {
         REX_FATAL("Host task worker threw non-std exception");
       }
 
+      // Release captured kernel objects before Drain observes idle, without
+      // holding the dispatcher lock during their destructors.
+      task = {};
       global_lock.lock();
       --dispatch_active_count_;
       host_tasks_completed_.fetch_add(1, std::memory_order_relaxed);
@@ -1368,12 +1385,114 @@ HostTaskAdmissionResult KernelState::QueueHostTask(std::function<void()> task,
   return HostTaskAdmissionResult::kAccepted;
 }
 
+void KernelState::StartHostIoWorkers() {
+  {
+    auto admission_lock = global_critical_region_.Acquire();
+    if (host_io_queue_) {
+      // Title termination drains but does not close the reusable worker lanes.
+      host_io_accepting_ = true;
+      return;
+    }
+    if (host_io_accepting_) return;
+  }
+  const uint32_t requested_lanes = REXCVAR_GET(host_file_io_workers);
+  bool failed = false;
+  if (requested_lanes != 0) {
+    try {
+      host_io_queue_ = std::make_unique<OrderedIoQueue>(requested_lanes);
+      host_io_workers_.reserve(host_io_queue_->lane_count());
+      for (size_t lane = 0; lane < host_io_queue_->lane_count(); ++lane) {
+        auto worker = object_ref<XHostThread>(new XHostThread(this, 128 * 1024, 0, [this, lane]() {
+          host_io_queue_->RunLane(lane);
+          return 0;
+        }));
+        worker->set_name(fmt::format("Kernel File IO {}", lane));
+        const X_STATUS status = worker->Create();
+        if (XFAILED(status)) {
+          REXLOG_WARN("host-file-io: worker creation failed ({:#x}); preserving shared dispatcher", status);
+          failed = true;
+          break;
+        }
+        host_io_workers_.push_back(std::move(worker));
+      }
+    } catch (const std::bad_alloc&) {
+      failed = true;
+    }
+    if (failed) {
+      // Do not unwind KernelState construction with already-running workers.
+      // Accepted transfers cannot exist yet; close/join before releasing state.
+      if (host_io_queue_) host_io_queue_->Close();
+      for (auto& worker : host_io_workers_) worker->Wait(0, 0, 0, nullptr);
+      host_io_workers_.clear();
+      host_io_queue_.reset();
+    }
+  }
+  auto lock = global_critical_region_.Acquire();
+  host_io_accepting_ = true;
+  if (host_io_queue_) {
+    REXLOG_INFO("host-file-io: lanes={} capacity=4096 per-file-order=preserved",
+                host_io_queue_->lane_count());
+  } else {
+    REXLOG_INFO("host-file-io: shared-dispatcher=true allocation-fallback={}", failed);
+  }
+}
+
+HostTaskAdmissionResult KernelState::QueueHostIoTask(
+    uintptr_t file_identity, std::function<void()> task,
+    std::function<void()> admitted_callback) {
+  // Shares the admission fence used by TerminateTitle's WaitForHostTasks.
+  // Without this fence a racing admission could occur after teardown's drain.
+  auto lock = global_critical_region_.Acquire();
+  if (!host_io_accepting_ || terminating_title_.load(std::memory_order_acquire)) {
+    return HostTaskAdmissionResult::kRejected;
+  }
+  if (!host_io_queue_) {
+    // QueueHostTask performs its own admission check under the same fence.
+    // Unlock first, so this does not depend on a recursive mutex contract.
+    lock.unlock();
+    return QueueHostTask(std::move(task), std::move(admitted_callback));
+  }
+  const auto result = host_io_queue_->Admit(file_identity, std::move(task),
+                                           std::move(admitted_callback));
+  switch (result) {
+    case OrderedIoQueue::Admission::kAccepted: return HostTaskAdmissionResult::kAccepted;
+    case OrderedIoQueue::Admission::kClosed: return HostTaskAdmissionResult::kRejected;
+    default: return HostTaskAdmissionResult::kNoMemory;
+  }
+}
+
+void KernelState::LogHostIoStatistics() {
+  auto lock = global_critical_region_.Acquire();
+  if (!host_io_queue_) return;
+  const auto stats = host_io_queue_->statistics();
+  REXLOG_INFO("host-file-io: accepted={} completed={} rejected={} queued={} active={} "
+              "high-water={} max-queue-ns={} max-service-ns={}",
+              stats.accepted, stats.completed, stats.rejected, stats.queued, stats.active,
+              stats.high_water, stats.maximum_queue_wait_ns, stats.maximum_service_ns);
+}
+
+void KernelState::StopHostIoWorkers() {
+  {
+    auto lock = global_critical_region_.Acquire();
+    host_io_accepting_ = false;
+    if (host_io_queue_) host_io_queue_->Close();
+  }
+  for (auto& worker : host_io_workers_) worker->Wait(0, 0, 0, nullptr);
+  LogHostIoStatistics();
+  host_io_workers_.clear();
+  auto lock = global_critical_region_.Acquire();
+  host_io_queue_.reset();
+}
+
 void KernelState::WaitForHostTasks() {
   auto global_lock = global_critical_region_.AcquireDeferred();
   global_lock.lock();
   dispatch_idle_cond_.wait(
       global_lock, [this]() { return dispatch_queue_.empty() && dispatch_active_count_ == 0; });
   global_lock.unlock();
+  // The global-lock acquisition above fences all earlier I/O admissions.
+  // TerminateTitle has disabled new admissions before reaching this drain.
+  if (host_io_queue_) host_io_queue_->Drain();
 }
 
 DPCImpersonationScope KernelState::BeginDPCImpersonation() {

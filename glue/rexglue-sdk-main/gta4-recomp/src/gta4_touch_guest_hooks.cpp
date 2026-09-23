@@ -14,6 +14,7 @@
 #include <limits>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 #include <rex/input/absolute_pointer.h>
 #include <rex/runtime.h>
 
@@ -30,6 +31,8 @@ constexpr uint32_t kTouchCutscenePreparing = 0x82B977FC;
 constexpr uint32_t kPhaseViewportOffset = 176;
 constexpr uint32_t kCopiedViewportOffset = 16;
 constexpr uint32_t kViewportCopySize = 1040;
+// sub_82155680 supplies this live HUD_RADAR rectangle to its camera setter.
+constexpr uint32_t kAuthoredRadarRect = 0x82AA0A88;
 constexpr size_t kMaximumRadarViewportCopies = 32768;
 
 bool RadarSpan(uint8_t* base, uint32_t address, size_t size, bool write = false) {
@@ -67,6 +70,10 @@ void ObserveTouchPresentationBlock(uint8_t* base) {
 }
 double RadarFloat(uint8_t* base, uint32_t address) {
   return std::bit_cast<float>(RadarRead(base, address));
+}
+void RadarFloat(uint8_t* base, uint32_t address, double value) {
+  const uint32_t bits = __builtin_bswap32(std::bit_cast<uint32_t>(float(value)));
+  std::memcpy(rex::memory::GuestPtr(base, address), &bits, sizeof(bits));
 }
 
 // sub_82163270 stores the runtime HUD_WEAPON_ICON index at config+1008.
@@ -181,6 +188,85 @@ gta4::aspect::Rect RadarViewportRect(uint8_t* base, uint32_t viewport, uint32_t 
 bool RadarRectValid(gta4::aspect::Rect rect) {
   return rect.right > rect.left && rect.bottom > rect.top;
 }
+
+struct HelpWrapState {
+  uint32_t stack = 0;
+  uint32_t wrap = 0;
+  double right = 0.0;
+};
+thread_local HelpWrapState help_wrap;
+
+void PlaceTouchHelp(PPCContext& context, uint8_t* base, uint32_t position, uint32_t wrap) {
+  help_wrap = {};
+  const auto facts = GetTouchContextSnapshot();
+  rex::input::TouchPresentationState presentation;
+  if (facts.frontend || facts.map || !ContextTouchHudLayoutActive() ||
+      !rex::input::GetTouchPresentationState(&presentation) || !presentation.valid ||
+      !presentation.focused || presentation.output_width <= 0 || presentation.output_height <= 0 ||
+      !RadarSpan(base, kAuthoredRadarRect, 16) || !RadarSpan(base, position, 8, true) ||
+      !RadarSpan(base, wrap, 8, true)) return;
+  const auto authored = RadarViewportRect(base, kAuthoredRadarRect, 0);
+  if (!RadarRectValid(authored)) return;
+  const double w = std::round(presentation.physical_output_width);
+  const double h = std::round(presentation.physical_output_height);
+  if (!std::isfinite(w) || !std::isfinite(h) || w <= 0 || h <= 0 ||
+      w > UINT32_MAX || h > UINT32_MAX) return;
+  const gta4::aspect::Extent output{uint32_t(w), uint32_t(h)};
+  const gta4::aspect::Rect safe{
+      double(presentation.safe_area_x) / presentation.output_width,
+      double(presentation.safe_area_y) / presentation.output_height,
+      (double(presentation.safe_area_x) + presentation.safe_area_width) / presentation.output_width,
+      (double(presentation.safe_area_y) + presentation.safe_area_height) / presentation.output_height};
+  gta4::aspect::Transform text_transform, radar_transform;
+#if !defined(GTA4_TOUCH_LEGACY_HOST)
+  const auto layout = gta4::aspect::CurrentUi(base);
+  if (!layout.active || layout.role != gta4::aspect::UiRole::kHelp) return;
+  text_transform = layout.transform;
+  radar_transform = gta4::aspect::RadarLayout(output);
+#endif
+  radar_transform = gta4::aspect::TopLeftRadarViewport(authored, safe.top, safe.bottom, radar_transform);
+  const auto radar = radar_transform.Map(authored);
+  const double old_left = RadarFloat(base, wrap), old_right = RadarFloat(base, wrap + 4);
+  const auto origin = text_transform.Map(gta4::aspect::Point{
+      RadarFloat(base, position), RadarFloat(base, position + 4)});
+  if (!std::isfinite(origin.x) || !std::isfinite(origin.y) ||
+      !std::isfinite(old_left) || !std::isfinite(old_right) || old_right <= old_left) return;
+
+  std::vector<gta4::aspect::Rect> obstacles;
+  const auto collect = [&](const ContextTouchLayout& layout) {
+    const auto frame = MapContextTouchHudBounds({0, 0, 1, 1}, layout.viewport);
+    if (!frame) return;
+    const double width = frame->right - frame->left, height = frame->bottom - frame->top;
+    for (size_t i = 0; i < std::min(layout.control_count, layout.controls.size()); ++i) {
+      const auto& c = layout.controls[i];
+      if (!c.visible || c.kind == ContextTouchControlKind::kLookSurface) continue;
+      const bool surface = c.kind == ContextTouchControlKind::kActivitySurface;
+      obstacles.push_back({
+          ((surface ? c.minimum_x : c.center_x - c.radius) - frame->left) / width,
+          ((surface ? c.minimum_y : c.center_y - c.radius) - frame->top) / height,
+          ((surface ? c.maximum_x : c.center_x + c.radius) - frame->left) / width,
+          ((surface ? c.maximum_y : c.center_y + c.radius) - frame->top) / height});
+    }
+  };
+  const auto overlay = GetContextTouchDrawableOverlaySnapshot();
+  if (overlay.visible) {
+    collect(overlay.layout);
+    if (overlay.outgoing_layout && overlay.outgoing_alpha > 0.0f) collect(*overlay.outgoing_layout);
+  } else {
+    const auto current = GetContextTouchOverlaySnapshot();
+    if (current.visible) collect(current.layout);
+  }
+  const auto area = gta4::aspect::TouchHelpArea(
+      radar, safe, origin, (old_right - old_left) * text_transform.sx, output, obstacles);
+  if (!area) return;
+  const auto target = text_transform.Unmap(gta4::aspect::Point{area->left, area->top});
+  const auto end = text_transform.Unmap(gta4::aspect::Point{area->right, area->top});
+  RadarFloat(base, position, target.x);
+  RadarFloat(base, position + 4, target.y);
+  RadarFloat(base, wrap, target.x);
+  RadarFloat(base, wrap + 4, end.x);
+  help_wrap = {context.r1.u32, wrap, end.x};
+}
 struct RadarViewportCopy {
   uint32_t token = 0;
   uint64_t serial = 0;
@@ -240,8 +326,7 @@ void CopyTouchRadarViewport(PPCContext& context, uint8_t* base) {
 #endif
         // The drawable snapshot retains visibility through the one-second
         // fade, while native frontend/map state always keeps its own viewport.
-        if (GetContextTouchDrawableOverlaySnapshot().visible ||
-            GetContextTouchOverlaySnapshot().visible || IsContextTouchEditorActive()) {
+        if (ContextTouchHudLayoutActive()) {
           const double top = double(presentation.safe_area_y) / presentation.output_height;
           const double bottom = (double(presentation.safe_area_y) + presentation.safe_area_height) /
                                 presentation.output_height;
@@ -319,6 +404,30 @@ bool TouchRadarLocalViewport(uint8_t* base) noexcept {
   return it != radar_viewport_copies.end() && it->second.token == token && it->second.pass.gameplay;
 }
 }  // namespace gta4::input
+
+extern "C" void sub_821C31A8(PPCContext& context, uint8_t* base) {
+  const uint32_t caller = uint32_t(context.lr);
+  const uint32_t position = context.r4.u32, wrap = context.r6.u32;
+  __imp__sub_821C31A8(context, base);
+  using namespace gta4::input;
+  // In compiled sub_82223CF8 this is after retail aspect conversion, before
+  // font setup, measurement, the optional icon, and either background path.
+  // Edit only this draw's stack locals. HUD definitions and other text retain
+  // their original coordinates; deferred commands own the resulting geometry.
+  if (caller == 0x8222438C) {
+    PlaceTouchHelp(context, base, position, wrap);
+  } else if (caller == 0x822244B4 && help_wrap.stack == context.r1.u32 &&
+             help_wrap.wrap && RadarSpan(base, context.r1.u32, 208) &&
+             RadarSpan(base, help_wrap.wrap, 8, true)) {
+    // The separate help icon adds both its width and left padding to the
+    // following text and wrap edge. Keep the final edge inside the same area.
+    const double icon = RadarFloat(base, context.r1.u32 + 192) +
+                        RadarFloat(base, context.r1.u32 + 200);
+    const double right = help_wrap.right - icon;
+    if (std::isfinite(icon) && icon >= 0 && right > RadarFloat(base, help_wrap.wrap))
+      RadarFloat(base, help_wrap.wrap + 4, right);
+  }
+}
 
 extern "C" void sub_821C62C0(PPCContext& context, uint8_t* base) {
   const gta4::input::WeaponHudPassScope pass(context, base);
