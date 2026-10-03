@@ -10,6 +10,9 @@ namespace gta4::draw_distance {
 
 inline constexpr double kMinimumScale = 1.0;
 inline constexpr double kMaximumScale = 4.0;
+// Below the retail distance, for CPU-bound hosts (the frontend slider still
+// starts at kMinimumScale).
+inline constexpr double kMinimumEngineScale = 0.25;
 inline constexpr int32_t kSliderIntervals = 30;
 inline constexpr uint8_t kSliderPositions = 31;
 inline constexpr uint8_t kSliderDisplayType = 101;
@@ -18,7 +21,7 @@ inline constexpr uint8_t kSliderDisplayType = 101;
 // world-distance scalar. Keep invalid host configuration out of guest state
 // and preserve the retail multiplier as the deterministic fallback.
 inline float ResolveEngineScale(double configured_scale) noexcept {
-  if (!std::isfinite(configured_scale) || configured_scale < 1.0 ||
+  if (!std::isfinite(configured_scale) || configured_scale < kMinimumEngineScale ||
       configured_scale > static_cast<double>(std::numeric_limits<float>::max())) {
     return 1.0f;
   }

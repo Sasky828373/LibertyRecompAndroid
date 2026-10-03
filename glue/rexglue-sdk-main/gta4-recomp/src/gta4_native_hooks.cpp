@@ -55,6 +55,10 @@
 #include "gta4_draw_distance_policy.h"
 
 REXCVAR_DECLARE(uint32_t, gta4_shadow_map_base_size);
+REXCVAR_DEFINE_UINT32(gta4_shadow_cascade_count, 0, "GTA IV/Graphics/Shadows",
+                      "Directional shadow cascades (0 keeps the stock 5)")
+    .range(0, 5)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DECLARE(double, gta4_shadow_distance_scale);
 REXCVAR_DECLARE(std::string, gta4_reflection_resolution);
 REXCVAR_DECLARE(std::string, gta4_reflection_resolution_cap);
@@ -219,6 +223,8 @@ constexpr uint32_t kPointShadowCacheBaseMultiplier = 8;
 constexpr uint32_t kShadowQualityTable = 0x82C595C0;
 constexpr uint32_t kShadowQualityContextStride = 0x100;
 constexpr uint32_t kShadowQualityRangeOffset = 0x14;
+// Directional cascade count (stock 5) in each shadow quality context.
+constexpr uint32_t kShadowQualityCascadeOffset = 0x08;
 // Native rendering consumes the resource descriptors, not their Xbox GPU
 // backing allocation. Keep the guest allocation at the API-valid minimum and
 // patch only the descriptor extents after the trusted D3D constructor returns.
@@ -2578,6 +2584,9 @@ double GetExteriorReflectionCaptureDistance() {
   if (selection == "far") {
     return 80.0;
   }
+  if (selection == "near") {
+    return 20.0;
+  }
   return 40.0;
 }
 
@@ -2688,6 +2697,17 @@ void ApplyShadowDistanceScale(uint8_t* base) {
   static std::array<float, kNativeShadowContextCount> original_ranges{};
 
   std::lock_guard lock(shadow_range_mutex);
+  // Fewer directional shadow cascades for CPU-bound hosts (0 keeps stock).
+  if (const uint32_t cascades = REXCVAR_GET(gta4_shadow_cascade_count); cascades != 0) {
+    for (uint32_t context = 0; context < kNativeShadowContextCount; ++context) {
+      const uint32_t address =
+          kShadowQualityTable + context * kShadowQualityContextStride + kShadowQualityCascadeOffset;
+      const uint32_t stock = LoadU32(base, address);
+      if (cascades < stock) {
+        StoreU32(base, address, cascades);
+      }
+    }
+  }
   if (!originals_captured) {
     std::array<float, kNativeShadowContextCount> candidate_ranges{};
     for (uint32_t context = 0; context < kNativeShadowContextCount; ++context) {

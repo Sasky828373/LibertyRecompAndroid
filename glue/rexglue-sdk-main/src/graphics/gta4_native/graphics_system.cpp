@@ -25,6 +25,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <random>
 #include <set>
@@ -5498,6 +5499,37 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
   bool startup_present_follows_texture_lock_flush = false;
   auto log_frame_batch = [this](std::string_view boundary, const NativeCommand& boundary_command,
                                 uint32_t submitted_frame, size_t queued_after_boundary) {
+#if REX_PLATFORM_ANDROID
+    {
+      // TEMP: per-frame draw census by render target size (perf investigation).
+      static uint64_t last_report = 0;
+      const uint64_t now = rex::chrono::Clock::QueryHostTickCount();
+      const uint64_t frequency = rex::chrono::Clock::QueryHostTickFrequency();
+      if (now - last_report > 3 * frequency) {
+        last_report = now;
+        std::map<std::string, uint32_t> groups;
+        uint32_t total = 0;
+        for (const NativeCommand& pending : current_frame_) {
+          if (pending.type != CommandType::kDrawPrimitive &&
+              pending.type != CommandType::kDrawPrimitiveUp &&
+              pending.type != CommandType::kDrawIndexedPrimitive) {
+            continue;
+          }
+          ++total;
+          const auto& c = pending.snapshot_render_targets[0];
+          const auto& d = pending.snapshot_depth_stencil;
+          ++groups[fmt::format("c{}x{}/d{}x{}/p{}", c.width, c.height, d.width, d.height,
+                               uint32_t(pending.render_phase))];
+        }
+        std::string summary;
+        for (const auto& [key, count] : groups) {
+          summary += fmt::format(" {}={}", key, count);
+        }
+        REXLOG_WARN("gta4-draw-census: commands={} draws={}{}", current_frame_.size(), total,
+                    summary);
+      }
+    }
+#endif
     if (!rex::diagnostics::IsEnabled(rex::diagnostics::Category::kNativeTrace)) {
       return;
     }

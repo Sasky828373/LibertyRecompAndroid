@@ -129,7 +129,7 @@ REXCVAR_DEFINE_UINT32(gta4_shadow_map_base_size, 512, "GTA IV/Graphics/Shadows",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_DOUBLE(gta4_shadow_distance_scale, 2.0, "GTA IV/Graphics/Shadows",
                       "Multiplier applied to GTA IV's directional shadow range")
-    .range(1.0, 4.0)
+    .range(0.1, 4.0)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(gta4_reflection_resolution, "1080p", "GTA IV/Graphics/Reflections",
                       "Reflection resolution preset: original, 1080p, or full")
@@ -161,9 +161,9 @@ REXCVAR_DEFINE_STRING(gta4_reflection_aa, "original", "GTA IV/Graphics/Reflectio
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(gta4_reflection_capture_distance, "original",
                       "GTA IV/Graphics/Reflections/Advanced",
-                      "Exterior environment capture distance: original (40), extended (60), or "
+                      "Exterior environment capture distance: near (20), original (40), extended (60), or "
                       "far (80)")
-    .allowed({"original", "extended", "far"});
+    .allowed({"near", "original", "extended", "far"});
 REXCVAR_DEFINE_STRING(gta4_native_anti_aliasing, "smaa", "GTA IV/Graphics/Anti-Aliasing",
                       "Anti-aliasing: off, fxaa, smaa, deferred MSAA, or even-factor SSAA")
     // `spatial` remains loadable as a deprecated compatibility alias. It is
@@ -206,7 +206,7 @@ REXCVAR_DEFINE_BOOL(gta4_force_highest_lod, false, "GTA IV/Graphics/LOD",
                     "Prefer the highest resident model LOD regardless of distance");
 REXCVAR_DEFINE_DOUBLE(gta4_draw_distance_scale, 3.0, "GTA IV/Graphics/LOD",
                       "Multiplier applied through GTA IV's built-in world-distance input")
-    .range(1.0, 4.0);
+    .range(0.25, 4.0);
 REXCVAR_DEFINE_UINT32(gta4_drawable_reference_limit, 20000, "GTA IV/Graphics/LOD",
                       "Drawable-reference capacity used by extended draw distances")
     .range(13000, 40000)
