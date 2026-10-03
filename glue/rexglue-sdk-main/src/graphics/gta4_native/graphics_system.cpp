@@ -50,6 +50,7 @@
 #include <xxhash.h>
 
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/cvar.h>
 #include <rex/graphics/gta4_native/options.h>
 #include <rex/chrono/clock.h>
@@ -15857,9 +15858,12 @@ Gta4NativeGraphicsSystem::NativeTextureImage* Gta4NativeGraphicsSystem::GetOrCre
     view_info.components.b = VK_COMPONENT_SWIZZLE_ONE;
     view_info.components.a = VK_COMPONENT_SWIZZLE_R;
   } else if (vulkan_device->properties().portabilitySubset ||
-             !vulkan_device->properties().imageViewFormatSwizzle) {
+             !vulkan_device->properties().imageViewFormatSwizzle || REX_PLATFORM_ANDROID) {
     // Ordinary native portability views deliberately retain the established
     // identity policy even when font-only swizzle support is enabled.
+    // Android follows the same policy: the native renderer and its shader
+    // overrides are tuned against these identity views, and applying the guest
+    // swizzle instead swaps red and blue in GTA IV's ARGB light textures.
     host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA;
     view_info.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
