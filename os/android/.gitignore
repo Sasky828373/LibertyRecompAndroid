@@ -19,3 +19,8 @@ captures/
 app/src/main/jniLibs/
 app/src/main/assets/Resources/
 logs/
+
+# The root .gitignore drops every scripts/ directory and every jar; these are
+# part of the Android build.
+!scripts/
+!gradle/wrapper/gradle-wrapper.jar
