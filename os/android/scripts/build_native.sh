@@ -33,7 +33,7 @@ if [ ! -f "$BUILD_DIR/build.ninja" ]; then
 fi
 
 echo "== building with $JOBS jobs"
-cmake --build "$BUILD_DIR" --target LibertyRecomp -- -j"$JOBS"
+cmake --build "$BUILD_DIR" --target LibertyRecomp -- -j"$JOBS" || { echo "!! native build failed"; exit 1; }
 
 echo "== staging libraries"
 mkdir -p "$JNILIBS"

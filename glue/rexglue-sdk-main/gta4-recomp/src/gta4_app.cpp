@@ -42,6 +42,12 @@
 #include <network/community_multiplayer.h>
 #include <network/gta4_voice_audio.h>
 
+#if REX_PLATFORM_ANDROID
+#include <android/log.h>
+#include <cctype>
+#include <fstream>
+#endif
+
 REXCVAR_DEFINE_STRING(gta4_multiplayer_backend, "community", "GTA IV/Multiplayer",
                       "Compatibility service: offline, lan, or community")
     .allowed({"offline", "lan", "community"})
@@ -770,7 +776,49 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
   };
 }
 
+#if REX_PLATFORM_ANDROID
+namespace {
+
+// Tuning without a relaunch: files/live_cvars.txt is re-read whenever it
+// changes, one --name=value per line. Settings the title latches at startup
+// still need a restart; per-frame ones (draw distance, density) apply live.
+void StartLiveCvarWatcher(std::filesystem::path path) {
+  std::thread([path = std::move(path)] {
+    std::filesystem::file_time_type applied{};
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      std::error_code error;
+      const auto stamp = std::filesystem::last_write_time(path, error);
+      if (error || stamp == applied) {
+        continue;
+      }
+      applied = stamp;
+      std::ifstream file(path);
+      std::string line;
+      while (std::getline(file, line)) {
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        const size_t start = line.find_first_not_of('-');
+        const size_t equals = line.find('=');
+        if (start == std::string::npos || equals == std::string::npos || equals <= start) continue;
+        const std::string name = line.substr(start, equals - start);
+        const std::string value = line.substr(equals + 1);
+        const bool ok = rex::cvar::SetFlagByName(name, value);
+        __android_log_print(ok ? ANDROID_LOG_WARN : ANDROID_LOG_ERROR, "LibertyRecomp",
+                            "live-cvar %s=%s %s", name.c_str(), value.c_str(),
+                            ok ? "applied" : "rejected");
+      }
+    }
+  }).detach();
+}
+
+}  // namespace
+#endif
+
 void GTA4App::OnPostSetup() {
+#if REX_PLATFORM_ANDROID
+  StartLiveCvarWatcher(rex::filesystem::GetUserFolder() / "live_cvars.txt");
+#endif
   gta4::presentation::InitializeOptions();
   rex::graphics::gta4_native::InitializeAntiAliasingController();
   gta4::input::ConfigureContextTouchSettings(native_config_path_.parent_path() / "touch-controls.ini");
