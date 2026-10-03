@@ -1,0 +1,23 @@
+# RP5 / Adreno 650 performance profile. Push with:
+#   bash os/android/scripts/push_args.sh os/android/android_args/perf.txt
+# Logs stay on at warn so crashes are still visible in logcat.
+--diagnostics=true
+--diagnostics_categories=logging
+--log_level=warn
+
+# Render below 1080p and upscale with FSR 1:
+#   ultra_quality ~1477x831, quality 1280x720, balanced ~1129x635, performance 960x540
+--gta4_native_upscaler=fsr1
+--gta4_fsr1_quality=performance
+
+# Cheaper anti-aliasing (off | fxaa | smaa)
+--gta4_native_anti_aliasing=fxaa
+
+# Console-like world detail instead of the PC "ultra" defaults
+--gta4_draw_distance_scale=1.0
+--gta4_shadow_map_base_size=256
+--gta4_shadow_distance_scale=1.0
+--gta4_reflection_resolution=original
+
+# A steady 30 is better on a handheld than an uneven 40-60 (0 | 30 | 40 | 60 | 120)
+--gta4_frame_limit=30

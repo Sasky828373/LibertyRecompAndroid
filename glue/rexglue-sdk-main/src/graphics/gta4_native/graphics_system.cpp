@@ -127,6 +127,8 @@ REXCVAR_DEFINE_STRING(gta4_depth_handoff_transport, "buffer", "GTA IV/Graphics/N
                       "experimental attachment load/store preservation")
     .allowed({"buffer", "attachment"});
 
+REXCVAR_DEFINE_BOOL(gta4_vertex_color_as_rgba, false, "GTA IV/Diagnostics",
+                    "Bind D3DCOLOR vertex elements as R8G8B8A8 instead of B8G8R8A8");
 REXCVAR_DEFINE_BOOL(gta4_trace_startup_content, false, "GTA IV/Diagnostics",
                     "Probe every rendered startup frame through the legal and loading screens");
 REXCVAR_DEFINE_BOOL(
@@ -19069,6 +19071,20 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
     }
     attribute.binding = stream;
     attribute.format = GetCompatibleVertexFormat(matching_element->type, shader_input.numeric_type);
+    if (attribute.format == VK_FORMAT_B8G8R8A8_UNORM) {
+      static std::once_flag bgra_vertex_probe;
+      std::call_once(bgra_vertex_probe, [&] {
+        VkFormatProperties properties{};
+        vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(
+            vulkan_device->physical_device(), VK_FORMAT_B8G8R8A8_UNORM, &properties);
+        REXLOG_WARN("gta4-native-diag: B8G8R8A8_UNORM vertex buffer support={} as-rgba={}",
+                    (properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0,
+                    REXCVAR_GET(gta4_vertex_color_as_rgba));
+      });
+      if (REXCVAR_GET(gta4_vertex_color_as_rgba)) {
+        attribute.format = VK_FORMAT_R8G8B8A8_UNORM;
+      }
+    }
     attribute.offset = matching_element->offset;
     if (attribute.format == VK_FORMAT_UNDEFINED) {
       static std::atomic<uint64_t> vertex_format_rejection_count{0};
