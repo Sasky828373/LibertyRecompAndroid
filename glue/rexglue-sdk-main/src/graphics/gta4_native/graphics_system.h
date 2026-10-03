@@ -1686,6 +1686,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::shared_ptr<const NativeShaderState> last_shader_snapshot_;
   std::shared_ptr<const NativePipelineState> SnapshotPipeline(const NativeCommand&, bool);
   NativeOwnedCommands<NativeCommand> current_frame_;
+  NativeCommandRetirer<NativeCommand> command_retirer_{native_command_pool_};
   NativeFrameResources recording_resources_;
   std::unordered_set<uint64_t> frame_texture_protection_;
   const NativeCommand* active_worker_command_ = nullptr;

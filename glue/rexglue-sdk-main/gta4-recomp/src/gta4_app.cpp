@@ -45,6 +45,7 @@
 #if REX_PLATFORM_ANDROID
 #include <android/log.h>
 #include <cctype>
+#include <dlfcn.h>
 #include <fstream>
 #endif
 
@@ -803,6 +804,19 @@ void StartLiveCvarWatcher(std::filesystem::path path) {
         if (start == std::string::npos || equals == std::string::npos || equals <= start) continue;
         const std::string name = line.substr(start, equals - start);
         const std::string value = line.substr(equals + 1);
+        if (name == "gta4_profile_start") {
+          // Arms one native-renderer profile capture from inside gameplay
+          // (see gta4_profile_native_autostart).
+          using StartFn = int (*)();
+          void* plugin = dlopen("librexgpu-gta4-native.so", RTLD_NOW | RTLD_NOLOAD);
+          auto start_fn =
+              plugin ? reinterpret_cast<StartFn>(dlsym(plugin, "rex_gta4_native_profile_start"))
+                     : nullptr;
+          const bool started = start_fn && start_fn();
+          __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "live profile capture %s",
+                              started ? "armed" : "unavailable");
+          continue;
+        }
         const bool ok = rex::cvar::SetFlagByName(name, value);
         __android_log_print(ok ? ANDROID_LOG_WARN : ANDROID_LOG_ERROR, "LibertyRecomp",
                             "live-cvar %s=%s %s", name.c_str(), value.c_str(),

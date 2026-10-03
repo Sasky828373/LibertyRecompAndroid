@@ -1,5 +1,6 @@
 #pragma once
 #include <cassert>
+#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <iterator>
@@ -7,6 +8,7 @@
 #include <memory_resource>
 #include <mutex>
 #include <new>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -193,6 +195,13 @@ class NativeOwnedCommands {
   void reserve(size_t n) requires (!Queue) { values_.reserve(n); }
   void clear() { values_.clear(); }
   void clear(NativeCommandPool<T>& pool) { pool.RetireBatch(values_); }
+  // Hands every owner to the caller, keeping this container's capacity.
+  Container TakeAll() requires (!Queue) {
+    Container taken;
+    taken.swap(values_);
+    values_.reserve(taken.size());
+    return taken;
+  }
   void push_back(Owner value) { assert(value); values_.push_back(std::move(value)); }
   Owner Take(size_t i) { assert(values_[i]); return std::move(values_[i]); }
   Owner TakeFront() requires Queue {
@@ -209,4 +218,57 @@ class NativeOwnedCommands {
   auto begin() const { return Iterator<typename Container::const_iterator,const T>(values_.begin()); }
   auto end() const { return Iterator<typename Container::const_iterator,const T>(values_.end()); }
 };
+// Destroys retired command batches on a background thread. Command teardown
+// (dozens of shared_ptr releases and vector frees per draw) was a measurable
+// slice of the single render worker on phone CPUs. Commands own no GPU
+// objects, and the pool's free list is mutex-protected, so only the timing of
+// the release moves; reclamation that needs use_count() == 1 simply waits a
+// little longer. Declare after the pool: it drains before the pool dies.
+template <typename T>
+class NativeCommandRetirer {
+ public:
+  using Batch = std::vector<typename NativeCommandPool<T>::Owner>;
+  explicit NativeCommandRetirer(NativeCommandPool<T>& pool) : pool_(pool) {
+    thread_ = std::thread([this] { Run(); });
+  }
+  ~NativeCommandRetirer() {
+    {
+      std::lock_guard lock(mutex_);
+      stopping_ = true;
+    }
+    condition_.notify_one();
+    thread_.join();
+  }
+  NativeCommandRetirer(const NativeCommandRetirer&) = delete;
+  NativeCommandRetirer& operator=(const NativeCommandRetirer&) = delete;
+  void Retire(Batch&& batch) {
+    if (batch.empty()) return;
+    {
+      std::lock_guard lock(mutex_);
+      pending_.push_back(std::move(batch));
+    }
+    condition_.notify_one();
+  }
+
+ private:
+  void Run() {
+    std::unique_lock lock(mutex_);
+    for (;;) {
+      condition_.wait(lock, [this] { return stopping_ || !pending_.empty(); });
+      if (pending_.empty()) return;  // stopping and drained
+      Batch batch = std::move(pending_.front());
+      pending_.pop_front();
+      lock.unlock();
+      pool_.RetireBatch(batch);
+      lock.lock();
+    }
+  }
+  NativeCommandPool<T>& pool_;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::deque<Batch> pending_;
+  bool stopping_ = false;
+  std::thread thread_;
+};
+
 }  // namespace rex::graphics::gta4_native

@@ -7,9 +7,11 @@
 #--diagnostics_categories=logging
 --log_level=warn
 
-# Render the game at 1280x720, the console's own resolution (720p | 1080p | 1280x720 ...)
---resolution=720p
---gta4_native_upscaler=native
+# Render at 1280x720 (the console's own resolution) and upscale to the 1080p
+# panel with FSR 1 (EASU + RCAS sharpening) instead of a bilinear stretch:
+# the display stays 1080p and FSR "quality" renders at 1/1.5 of it.
+--gta4_native_upscaler=fsr1
+--gta4_fsr1_quality=quality
 
 # Cheaper anti-aliasing (off | fxaa | smaa)
 --gta4_native_anti_aliasing=fxaa

@@ -129,6 +129,8 @@ REXCVAR_DEFINE_STRING(gta4_depth_handoff_transport, "buffer", "GTA IV/Graphics/N
                       "experimental attachment load/store preservation")
     .allowed({"buffer", "attachment"});
 
+REXCVAR_DEFINE_BOOL(gta4_native_async_command_retire, true, "GTA IV/Graphics/Native Renderer",
+                    "Destroy recorded frame commands on a background thread");
 REXCVAR_DEFINE_BOOL(gta4_vertex_color_as_rgba, false, "GTA IV/Diagnostics",
                     "Bind D3DCOLOR vertex elements as R8G8B8A8 instead of B8G8R8A8");
 REXCVAR_DEFINE_BOOL(gta4_trace_startup_content, false, "GTA IV/Diagnostics",
@@ -17349,7 +17351,11 @@ void Gta4NativeGraphicsSystem::AppendQueuedTextureProtection(std::unordered_set<
 }
 
 void Gta4NativeGraphicsSystem::ClearNativeFrameCommands() {
-  current_frame_.clear(native_command_pool_);
+  if (REXCVAR_GET(gta4_native_async_command_retire)) {
+    command_retirer_.Retire(current_frame_.TakeAll());
+  } else {
+    current_frame_.clear(native_command_pool_);
+  }
   frame_texture_protection_.clear();
 }
 
