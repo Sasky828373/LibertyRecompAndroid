@@ -29,7 +29,11 @@ export NDK_BIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$_host/bin"
 export NDK_SYSROOT_LIB="$ANDROID_NDK/toolchains/llvm/prebuilt/$_host/sysroot/usr/lib/aarch64-linux-android"
 
 export BUILD_TYPE="${BUILD_TYPE:-RelWithDebInfo}"
-export BUILD_DIR="${BUILD_DIR:-$REPO/out/build/android-arm64}"
+case "$BUILD_TYPE" in
+  Release) _build_suffix=-release ;;
+  *)       _build_suffix= ;;
+esac
+export BUILD_DIR="${BUILD_DIR:-$REPO/out/build/android-arm64$_build_suffix}"
 # rexglue writes every binary of the build here (REX_PLATFORM linux-arm64).
 export REX_OUT_DIR="$REPO/glue/rexglue-sdk-main/out/linux-arm64"
 export JNILIBS="$APP_DIR/app/src/main/jniLibs/arm64-v8a"

@@ -110,6 +110,24 @@ void SDLWindowedAppContext::PlatformQuitFromUIThread() {
 }
 
 int SDLWindowedAppContext::RunMainMessageLoop() {
+#if REX_PLATFORM_ANDROID
+  // SDL_WaitEvent never sleeps on Android here: its lifecycle wait is woken
+  // again on every pump, so it re-polls joysticks back to back and burns a
+  // whole core (and the event-queue lock the render threads push into).
+  // Drain the queue, then sleep briefly; at most ~1 ms of added latency.
+  constexpr Uint64 kIdleSleepNs = 1000000;
+  while (!HasQuitFromUIThread()) {
+    SDL_Event event;
+    bool handled = false;
+    while (!HasQuitFromUIThread() && SDL_PollEvent(&event)) {
+      ProcessEvent(event);
+      handled = true;
+    }
+    if (!handled) {
+      SDL_DelayNS(kIdleSleepNs);
+    }
+  }
+#else
   while (!HasQuitFromUIThread()) {
     SDL_Event event;
     if (!SDL_WaitEvent(&event)) {
@@ -118,6 +136,7 @@ int SDLWindowedAppContext::RunMainMessageLoop() {
     }
     ProcessEvent(event);
   }
+#endif
   return EXIT_SUCCESS;
 }
 

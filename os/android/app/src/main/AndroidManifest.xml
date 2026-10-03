@@ -48,6 +48,12 @@
             <meta-data
                 android:name="SDL_ENV.SDL_ENABLE_SCREEN_KEYBOARD"
                 android:value="0" />
+            <!-- SDL re-runs HIDAPI device detection on every event-loop wakeup,
+                 and the runtime wakes that loop many times per frame. Built-in
+                 and Bluetooth pads arrive as Android input devices anyway. -->
+            <meta-data
+                android:name="SDL_ENV.SDL_JOYSTICK_HIDAPI"
+                android:value="0" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
