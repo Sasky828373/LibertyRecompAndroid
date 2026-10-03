@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <vector>
 
+
 #include <SDL3/SDL.h>
 
 #include <rex/logging.h>
@@ -231,6 +232,17 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
           if (window) {
             window->HandleTouchEvent(event);
           }
+        }
+      }
+      break;
+    }
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+    case SDL_EVENT_DID_ENTER_BACKGROUND:
+    case SDL_EVENT_DID_ENTER_FOREGROUND: {
+      for (const auto& [window_id, window] : windows_) {
+        (void)window_id;
+        if (window) {
+          window->HandleAppLifecycleEvent(event);
         }
       }
       break;

@@ -13,6 +13,10 @@
 
 #include <rex/ui/window_sdl.h>
 
+#if REX_PLATFORM_ANDROID
+#include <android/log.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -566,6 +570,7 @@ void WindowSDL::HandlePaintEvent(uint32_t ticket) {
 }
 
 void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+  HandleAppLifecycleEvent(event);
   switch (event.type) {
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -898,6 +903,40 @@ void WindowSDL::HandleGamepadEvent(SDL_Event& event) {
       return;
   }
   DispatchGamepadKey(virtual_key, event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+}
+
+void WindowSDL::HandleAppLifecycleEvent(SDL_Event& event) {
+#if REX_PLATFORM_ANDROID
+  // This SDL build reports backgrounding as window minimize/restore (no app
+  // events), and only after resume: SDL blocks this thread while paused.
+  switch (event.type) {
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+    case SDL_EVENT_DID_ENTER_BACKGROUND:
+    case SDL_EVENT_WINDOW_MINIMIZED:
+    case SDL_EVENT_WINDOW_HIDDEN:
+      // The ANativeWindow is (or is about to be) released; drop the swapchain
+      // and VkSurfaceKHR built on it.
+      if (!surface_detached_) {
+        surface_detached_ = true;
+        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "surface: backgrounded (event %u), detaching", event.type);
+        OnSurfaceChanged(false);
+      }
+      break;
+    case SDL_EVENT_DID_ENTER_FOREGROUND:
+    case SDL_EVENT_WINDOW_RESTORED:
+    case SDL_EVENT_WINDOW_SHOWN:
+      if (surface_detached_ && GetNativeWindowHandle()) {
+        surface_detached_ = false;
+        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "surface: foregrounded, attaching %p", GetNativeWindowHandle());
+        OnSurfaceChanged(true);
+      }
+      break;
+    default:
+      break;
+  }
+#else
+  (void)event;
+#endif
 }
 
 void WindowSDL::HandleTouchEvent(SDL_Event& event) {

@@ -13,8 +13,19 @@ namespace ui {
 
 class AndroidNativeWindowSurface final : public Surface {
  public:
-  explicit AndroidNativeWindowSurface(ANativeWindow* window)
-      : window_(window) {}
+  // Holds its own reference: SDL releases the ANativeWindow as soon as the
+  // Java surface is destroyed (screen off, home), while the presenter may
+  // still be using this surface. A dangling pointer here faulted inside
+  // RefBase::incStrong, which the guest-memory SIGSEGV handler then retried
+  // forever (black screen after unlocking).
+  explicit AndroidNativeWindowSurface(ANativeWindow* window) : window_(window) {
+    if (window_) ANativeWindow_acquire(window_);
+  }
+  ~AndroidNativeWindowSurface() override {
+    if (window_) ANativeWindow_release(window_);
+  }
+  AndroidNativeWindowSurface(const AndroidNativeWindowSurface&) = delete;
+  AndroidNativeWindowSurface& operator=(const AndroidNativeWindowSurface&) = delete;
   TypeIndex GetType() const override { return kTypeIndex_AndroidNativeWindow; }
   ANativeWindow* window() const { return window_; }
 

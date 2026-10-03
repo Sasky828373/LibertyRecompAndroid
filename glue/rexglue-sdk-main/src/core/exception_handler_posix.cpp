@@ -205,6 +205,24 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+  // Not a guest-memory fault. Returning would re-execute the faulting
+  // instruction forever (a silent 100% CPU hang); hand it to whoever was
+  // installed before us (debuggerd on Android) so it crashes with a report.
+  struct sigaction& original =
+      signal_number == SIGILL ? original_sigill_handler_ : original_sigsegv_handler_;
+  if ((original.sa_flags & SA_SIGINFO) && original.sa_sigaction) {
+    original.sa_sigaction(signal_number, signal_info, signal_context);
+    return;
+  }
+  if (original.sa_handler == SIG_IGN) {
+    return;
+  }
+  if (original.sa_handler != SIG_DFL && original.sa_handler) {
+    original.sa_handler(signal_number);
+    return;
+  }
+  signal(signal_number, SIG_DFL);
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {

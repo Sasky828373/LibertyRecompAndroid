@@ -46,6 +46,9 @@ class WindowSDL final : public Window {
   // Gamepad buttons and the left stick as kXInputPad* key events, so UI
   // listeners (ImGui navigation) work before the input driver exists.
   void HandleGamepadEvent(SDL_Event& event);
+  // Android destroys the window surface when the app is backgrounded (screen
+  // off, home) and creates a new one on return; the presenter must follow.
+  void HandleAppLifecycleEvent(SDL_Event& event);
 #if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
   void HandleAcceleratedPointerMotion(float delta_x, float delta_y);
 #endif
@@ -80,6 +83,8 @@ class WindowSDL final : public Window {
 
   // Left-stick directions currently reported as pressed (bit per direction).
   uint32_t gamepad_stick_state_ = 0;
+  // Android: the presenter surface was dropped while backgrounded.
+  bool surface_detached_ = false;
 
   SDLWindowedAppContext& sdl_app_context() const {
     return static_cast<SDLWindowedAppContext&>(app_context());
