@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_gamepad.h>
 
 #include <rex/ui/windowed_app_context.h>
 
@@ -53,6 +54,9 @@ class SDLWindowedAppContext final : public WindowedAppContext {
   void ProcessEvent(SDL_Event& event);
 
   std::unordered_map<SDL_WindowID, WindowSDL*> windows_;
+  // Gamepads opened for UI navigation (the input driver opens its own).
+  std::unordered_map<SDL_JoystickID, SDL_Gamepad*> ui_gamepads_;
+  bool gamepad_initialized_ = false;
   uint32_t wakeup_event_type_ = 0;
   uint32_t paint_event_type_ = 0;
 };

@@ -24,6 +24,7 @@
 #include <rex/ui/windowed_app_context.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 namespace rex {
 namespace ui {
@@ -111,6 +112,8 @@ void ImGuiDrawer::Initialize() {
   // imgui assumes paths are char* so we can't throw a good path at it on
   // Windows.
   io.IniFilename = nullptr;
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+  io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
   // Setup the font glyphs.
   ImFontConfig font_config;
@@ -307,6 +310,27 @@ std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
       {ui::VirtualKey::kMultiply, ImGuiKey_KeypadMultiply},
       {ui::VirtualKey::kDivide, ImGuiKey_KeypadDivide},
       {ui::VirtualKey::kDecimal, ImGuiKey_KeypadDecimal},
+      // Gamepad (WindowSDL forwards SDL gamepads as XInput virtual keys)
+      {ui::VirtualKey::kXInputPadA, ImGuiKey_GamepadFaceDown},
+      {ui::VirtualKey::kXInputPadB, ImGuiKey_GamepadFaceRight},
+      {ui::VirtualKey::kXInputPadX, ImGuiKey_GamepadFaceLeft},
+      {ui::VirtualKey::kXInputPadY, ImGuiKey_GamepadFaceUp},
+      {ui::VirtualKey::kXInputPadLShoulder, ImGuiKey_GamepadL1},
+      {ui::VirtualKey::kXInputPadRShoulder, ImGuiKey_GamepadR1},
+      {ui::VirtualKey::kXInputPadLTrigger, ImGuiKey_GamepadL2},
+      {ui::VirtualKey::kXInputPadRTrigger, ImGuiKey_GamepadR2},
+      {ui::VirtualKey::kXInputPadDpadUp, ImGuiKey_GamepadDpadUp},
+      {ui::VirtualKey::kXInputPadDpadDown, ImGuiKey_GamepadDpadDown},
+      {ui::VirtualKey::kXInputPadDpadLeft, ImGuiKey_GamepadDpadLeft},
+      {ui::VirtualKey::kXInputPadDpadRight, ImGuiKey_GamepadDpadRight},
+      {ui::VirtualKey::kXInputPadStart, ImGuiKey_GamepadStart},
+      {ui::VirtualKey::kXInputPadBack, ImGuiKey_GamepadBack},
+      {ui::VirtualKey::kXInputPadLThumbPress, ImGuiKey_GamepadL3},
+      {ui::VirtualKey::kXInputPadRThumbPress, ImGuiKey_GamepadR3},
+      {ui::VirtualKey::kXInputPadLThumbUp, ImGuiKey_GamepadLStickUp},
+      {ui::VirtualKey::kXInputPadLThumbDown, ImGuiKey_GamepadLStickDown},
+      {ui::VirtualKey::kXInputPadLThumbLeft, ImGuiKey_GamepadLStickLeft},
+      {ui::VirtualKey::kXInputPadLThumbRight, ImGuiKey_GamepadLStickRight},
   };
   if (auto search = map.find(vkey); search != map.end()) {
     return search->second;
@@ -426,6 +450,12 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   // Detaching is deferred if the last dialog is removed during drawing, perform
   // it now if needed.
   DetachIfLastDialogRemoved();
+
+  // ImGui hands queued input over one edge per frame; keep painting until the
+  // queue is drained so a release is not left waiting for unrelated input.
+  if (internal_state_ && !internal_state_->InputEventsQueue.empty() && presenter_) {
+    presenter_->RequestUIPaintFromUIThread();
+  }
 
   if (std::any_of(dialogs_.begin(), dialogs_.end(),
                   [](const ImGuiDialog* dialog) { return dialog->WantsContinuousRepaint(); })) {
@@ -606,7 +636,9 @@ void ImGuiDrawer::OnTouchEvent(TouchEvent& e) {
     // Pointer ownership is decided only on Down. This prevents ImGui capture
     // changing mid-gesture from swallowing the terminal event of a pointer
     // that was already passed through to the title.
-    if (!io.WantCaptureMouse) {
+    // WantCaptureMouse describes the previous frame's hover, and a touch
+    // pointer has no hover between contacts, so test the contact point.
+    if (!io.WantCaptureMouse && !IsOverWindow(e.x(), e.y())) {
       return;
     }
     // Keep one device/finger pair until release; a second touchscreen must
@@ -632,18 +664,22 @@ void ImGuiDrawer::OnTouchEvent(TouchEvent& e) {
   }
   e.set_handled(true);
   RequestInputPaint();
-  UpdateMousePosition(e.x(), e.y());
+  // Queued rather than written as state: a tap often begins and ends between
+  // two UI frames, and ImGui only sees a click if both edges reach it.
+  float physical_to_logical = float(window_->GetMediumDpi()) / float(window_->GetDpi());
+  io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+  io.AddMousePosEvent(e.x() * physical_to_logical, e.y() * physical_to_logical);
   if (action == TouchEvent::Action::kUp || action == TouchEvent::Action::kCancel) {
-    io.MouseDown[0] = false;
+    io.AddMouseButtonEvent(0, false);
     touch_pointer_id_ = TouchEvent::kPointerIDNone;
     touch_device_id_ = 0;
     // Make sure that after a touch, the ImGui mouse isn't hovering over
     // anything.
-    reset_mouse_position_after_next_frame_ = true;
-  } else {
-    io.MouseDown[0] = true;
-    reset_mouse_position_after_next_frame_ = false;
+    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+  } else if (action == TouchEvent::Action::kDown) {
+    io.AddMouseButtonEvent(0, true);
   }
+  reset_mouse_position_after_next_frame_ = false;
 }
 
 void ImGuiDrawer::ClearInput() {
@@ -665,6 +701,10 @@ void ImGuiDrawer::OnKey(KeyEvent& e, bool is_down) {
   const VirtualKey virtual_key = e.virtual_key();
   if (auto imGuiKey = VirtualKeyToImGuiKey(virtual_key); imGuiKey) {
     io.AddKeyEvent(*imGuiKey, is_down);
+    if (*imGuiKey >= ImGuiKey_GamepadStart && *imGuiKey <= ImGuiKey_GamepadRStickDown &&
+        !dialogs_.empty()) {
+      e.set_handled(true);
+    }
   }
   switch (virtual_key) {
     case VirtualKey::kShift:
@@ -683,6 +723,22 @@ void ImGuiDrawer::OnKey(KeyEvent& e, bool is_down) {
     default:
       break;
   }
+}
+
+bool ImGuiDrawer::IsOverWindow(float x, float y) {
+  ImGuiContext* context = ImGui::GetCurrentContext();
+  if (!context) {
+    return false;
+  }
+  float physical_to_logical = float(window_->GetMediumDpi()) / float(window_->GetDpi());
+  ImVec2 point(x * physical_to_logical, y * physical_to_logical);
+  for (ImGuiWindow* window : context->Windows) {
+    if (window->WasActive && !window->Hidden && !(window->Flags & ImGuiWindowFlags_NoInputs) &&
+        window->Rect().Contains(point)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void ImGuiDrawer::UpdateMousePosition(float x, float y) {

@@ -90,6 +90,8 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   bool visible_ui_last_frame_ = false;
   void OnKey(KeyEvent& e, bool is_down);
   void UpdateMousePosition(float x, float y);
+  // Whether a physical-pixel point lies on a visible, input-accepting window.
+  bool IsOverWindow(float x, float y);
   void SwitchToPhysicalMouseAndUpdateMousePosition(const MouseEvent& e);
 
   bool IsDrawingDialogs() const { return dialog_loop_next_index_ != SIZE_MAX; }

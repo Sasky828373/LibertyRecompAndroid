@@ -215,8 +215,11 @@ bool WindowSDL::OpenImpl() {
       return false;
     }
   }
-  // SDL3 requires explicit opt-in for text input events.
+#if !REX_PLATFORM_ANDROID
+  // SDL3 requires explicit opt-in for text input events. On Android this
+  // raises the on-screen keyboard over the game on the first touch.
   SDL_StartTextInput(sdl_window_);
+#endif
   ApplyCursorVisibilityNow();
   if (!SDL_ShowWindow(sdl_window_)) {
     REXLOG_ERROR("SDL_ShowWindow failed: {}", SDL_GetError());
@@ -827,6 +830,74 @@ void WindowSDL::HandleMouseEvent(SDL_Event& event) {
     default:
       break;
   }
+}
+
+void WindowSDL::DispatchGamepadKey(VirtualKey virtual_key, bool is_down) {
+  KeyEvent e(this, virtual_key, /*repeat_count=*/1, /*prev_state=*/!is_down,
+             /*modifier_shift_pressed=*/false, /*modifier_ctrl_pressed=*/false,
+             /*modifier_alt_pressed=*/false, /*modifier_super_pressed=*/false);
+  WindowDestructionReceiver destruction_receiver(this);
+  if (is_down) {
+    OnKeyDown(e, destruction_receiver);
+  } else {
+    OnKeyUp(e, destruction_receiver);
+  }
+}
+
+void WindowSDL::HandleGamepadEvent(SDL_Event& event) {
+  if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+    if (event.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTX &&
+        event.gaxis.axis != SDL_GAMEPAD_AXIS_LEFTY) {
+      return;
+    }
+    // Press past half deflection, release below a quarter.
+    constexpr int16_t kPress = 16384;
+    constexpr int16_t kRelease = 8192;
+    const bool x_axis = event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX;
+    const struct {
+      uint32_t bit;
+      bool positive;
+      VirtualKey key;
+    } directions[] = {
+        {1u << 0, false, x_axis ? VirtualKey::kXInputPadLThumbLeft : VirtualKey::kXInputPadLThumbUp},
+        {1u << 1, true,
+         x_axis ? VirtualKey::kXInputPadLThumbRight : VirtualKey::kXInputPadLThumbDown},
+    };
+    for (const auto& direction : directions) {
+      const uint32_t bit = direction.bit << (x_axis ? 0 : 2);
+      const int32_t value = direction.positive ? event.gaxis.value : -int32_t(event.gaxis.value);
+      const bool pressed = (gamepad_stick_state_ & bit) != 0;
+      if (!pressed && value > kPress) {
+        gamepad_stick_state_ |= bit;
+        DispatchGamepadKey(direction.key, true);
+      } else if (pressed && value < kRelease) {
+        gamepad_stick_state_ &= ~bit;
+        DispatchGamepadKey(direction.key, false);
+      }
+    }
+    return;
+  }
+
+  VirtualKey virtual_key;
+  switch (event.gbutton.button) {
+    case SDL_GAMEPAD_BUTTON_SOUTH: virtual_key = VirtualKey::kXInputPadA; break;
+    case SDL_GAMEPAD_BUTTON_EAST: virtual_key = VirtualKey::kXInputPadB; break;
+    case SDL_GAMEPAD_BUTTON_WEST: virtual_key = VirtualKey::kXInputPadX; break;
+    case SDL_GAMEPAD_BUTTON_NORTH: virtual_key = VirtualKey::kXInputPadY; break;
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: virtual_key = VirtualKey::kXInputPadLShoulder; break;
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: virtual_key = VirtualKey::kXInputPadRShoulder; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: virtual_key = VirtualKey::kXInputPadDpadUp; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: virtual_key = VirtualKey::kXInputPadDpadDown; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: virtual_key = VirtualKey::kXInputPadDpadLeft; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: virtual_key = VirtualKey::kXInputPadDpadRight; break;
+    case SDL_GAMEPAD_BUTTON_START: virtual_key = VirtualKey::kXInputPadStart; break;
+    case SDL_GAMEPAD_BUTTON_BACK: virtual_key = VirtualKey::kXInputPadBack; break;
+    case SDL_GAMEPAD_BUTTON_LEFT_STICK: virtual_key = VirtualKey::kXInputPadLThumbPress; break;
+    case SDL_GAMEPAD_BUTTON_RIGHT_STICK: virtual_key = VirtualKey::kXInputPadRThumbPress; break;
+    default:
+      return;
+  }
+  DispatchGamepadKey(virtual_key, event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
 }
 
 void WindowSDL::HandleTouchEvent(SDL_Event& event) {

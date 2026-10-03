@@ -26,6 +26,14 @@ SDLWindowedAppContext::~SDLWindowedAppContext() {
   // Execute leftover pending functions before the loop machinery goes away,
   // mirroring the shutdown contract documented in WindowedAppContext.
   ExecutePendingFunctionsFromUIThread();
+  for (auto& [id, gamepad] : ui_gamepads_) {
+    (void)id;
+    SDL_CloseGamepad(gamepad);
+  }
+  ui_gamepads_.clear();
+  if (gamepad_initialized_) {
+    SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+  }
   if (SDL_WasInit(SDL_INIT_VIDEO)) {
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
   }
@@ -70,6 +78,12 @@ bool SDLWindowedAppContext::Initialize() {
   if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
     REXLOG_ERROR("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: {}", SDL_GetError());
     return false;
+  }
+  // Gamepads drive UI navigation (installer, overlays) even before the input
+  // driver starts; SDL reference-counts the subsystem.
+  gamepad_initialized_ = SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+  if (!gamepad_initialized_) {
+    REXLOG_WARN("SDL_InitSubSystem(SDL_INIT_GAMEPAD) failed: {}", SDL_GetError());
   }
   uint32_t first = SDL_RegisterEvents(2);
   if (first == 0) {
@@ -198,6 +212,33 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
           if (window) {
             window->HandleTouchEvent(event);
           }
+        }
+      }
+      break;
+    }
+    case SDL_EVENT_GAMEPAD_ADDED: {
+      if (!ui_gamepads_.contains(event.gdevice.which)) {
+        if (SDL_Gamepad* gamepad = SDL_OpenGamepad(event.gdevice.which)) {
+          ui_gamepads_.emplace(event.gdevice.which, gamepad);
+        }
+      }
+      break;
+    }
+    case SDL_EVENT_GAMEPAD_REMOVED: {
+      if (auto it = ui_gamepads_.find(event.gdevice.which); it != ui_gamepads_.end()) {
+        SDL_CloseGamepad(it->second);
+        ui_gamepads_.erase(it);
+      }
+      break;
+    }
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+      // Gamepad events carry no window.
+      for (const auto& [window_id, window] : windows_) {
+        (void)window_id;
+        if (window) {
+          window->HandleGamepadEvent(event);
         }
       }
       break;

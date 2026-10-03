@@ -43,6 +43,9 @@ class WindowSDL final : public Window {
   void HandleTextInputEvent(SDL_Event& event);
   void HandleMouseEvent(SDL_Event& event);
   void HandleTouchEvent(SDL_Event& event);
+  // Gamepad buttons and the left stick as kXInputPad* key events, so UI
+  // listeners (ImGui navigation) work before the input driver exists.
+  void HandleGamepadEvent(SDL_Event& event);
 #if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
   void HandleAcceleratedPointerMotion(float delta_x, float delta_y);
 #endif
@@ -73,6 +76,11 @@ class WindowSDL final : public Window {
   void RequestPaintAfterNanosecondsImpl(uint64_t delay_ns) override;
 
  private:
+  void DispatchGamepadKey(VirtualKey virtual_key, bool is_down);
+
+  // Left-stick directions currently reported as pressed (bit per direction).
+  uint32_t gamepad_stick_state_ = 0;
+
   SDLWindowedAppContext& sdl_app_context() const {
     return static_cast<SDLWindowedAppContext&>(app_context());
   }

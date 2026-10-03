@@ -36,8 +36,9 @@ echo "== building with $JOBS jobs"
 cmake --build "$BUILD_DIR" --target LibertyRecomp -- -j"$JOBS"
 
 echo "== staging libraries"
-rm -rf "$JNILIBS"
 mkdir -p "$JNILIBS"
+# Only the engine's libraries; the driver proxy's come from build_driver_proxy.sh.
+rm -f "$JNILIBS"/libmain.so "$JNILIBS"/librexruntime.so "$JNILIBS"/librexgpu-*.so       "$JNILIBS"/libSDL3.so "$JNILIBS"/libc++_shared.so
 for so in "$BUILD_DIR"/glue/gta4-recomp/libmain.so "$REX_OUT_DIR"/librexruntime.so \
           "$REX_OUT_DIR"/librexgpu-*.so "$REX_OUT_DIR"/libSDL3.so; do
   [ -f "$so" ] || continue
