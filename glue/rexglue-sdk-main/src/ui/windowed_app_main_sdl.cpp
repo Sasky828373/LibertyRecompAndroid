@@ -30,6 +30,10 @@ REXCVAR_DEFINE_STRING(diagnostics_categories, "", "Diagnostics",
                       "Comma-separated diagnostic categories (empty = all; logging controls "
                       "general application logs independently of diagnostic artifacts)");
 
+#if REX_PLATFORM_ANDROID
+#include <android/log.h>
+#endif
+
 #if REX_PLATFORM_WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -57,6 +61,11 @@ int RunWindowedApp(int argc, char** argv) {
                                      REXCVAR_GET(diagnostics_categories),
                                      &diagnostics_error)) {
       std::fprintf(stderr, "diagnostics: %s\n", diagnostics_error.c_str());
+#if REX_PLATFORM_ANDROID
+      // stderr is discarded on Android; without this the app just closes.
+      __android_log_print(ANDROID_LOG_ERROR, "LibertyRecomp", "diagnostics: %s",
+                          diagnostics_error.c_str());
+#endif
       return EXIT_FAILURE;
     }
   }
