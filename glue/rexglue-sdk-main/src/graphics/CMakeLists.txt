@@ -203,8 +203,15 @@ if(REXGLUE_USE_VULKAN)
     set(GTA4_NATIVE_SHADER_COMMON
         "${GTA4_NATIVE_SHADER_OVERRIDE_ROOT}/xenos_shader_common.h")
     if(CMAKE_HOST_WIN32)
-        set(GTA4_NATIVE_DXC
-            "${GTA4_NATIVE_DXC_ROOT}/bin/${GTA4_NATIVE_DXC_ARCH}/dxc.exe")
+        # The bundled DXC 1.8 crashes on the Bink pixel shaders here as well
+        # (see the macOS branch). GTA4_NATIVE_DXC_LIBRARY_PATH may name the bin
+        # directory of a newer DXC release.
+        if(GTA4_NATIVE_DXC_LIBRARY_PATH AND EXISTS "${GTA4_NATIVE_DXC_LIBRARY_PATH}/dxc.exe")
+            set(GTA4_NATIVE_DXC "${GTA4_NATIVE_DXC_LIBRARY_PATH}/dxc.exe")
+        else()
+            set(GTA4_NATIVE_DXC
+                "${GTA4_NATIVE_DXC_ROOT}/bin/${GTA4_NATIVE_DXC_ARCH}/dxc.exe")
+        endif()
     elseif(CMAKE_HOST_APPLE)
         set(GTA4_NATIVE_DXC
             "${GTA4_NATIVE_DXC_ROOT}/bin/${GTA4_NATIVE_DXC_ARCH}/dxc-macos")

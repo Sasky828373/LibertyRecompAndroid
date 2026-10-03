@@ -12,6 +12,7 @@
 #include <algorithm>
 
 #include <rex/filesystem.h>
+#include <rex/platform/env.h>
 
 namespace rex {
 namespace filesystem {
@@ -24,6 +25,15 @@ bool CreateParentFolder(const std::filesystem::path& path) {
     }
   }
   return true;
+}
+
+std::filesystem::path GetResourcesFolder() {
+  if (auto override_dir = rex::platform::env::get("REX_RESOURCES_DIR")) {
+    if (!override_dir->empty()) {
+      return std::filesystem::path(*override_dir);
+    }
+  }
+  return GetExecutableFolder().parent_path() / "Resources";
 }
 
 }  // namespace filesystem

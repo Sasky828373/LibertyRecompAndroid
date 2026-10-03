@@ -22,6 +22,11 @@ class InstallDialog final : public rex::ui::ImGuiDialog {
   InstallDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path install_root, bool dlc_only,
                 CompleteCallback complete, CancelCallback cancel);
 
+  // Fills the base-game and title-update rows from host paths, for hosts
+  // without a usable file picker. The installation starts on its own once the
+  // base game has passed inspection.
+  void Preselect(std::filesystem::path game, std::filesystem::path update);
+
  protected:
   void OnClose() override;
   void OnDraw(ImGuiIO& io) override;
@@ -71,6 +76,7 @@ class InstallDialog final : public rex::ui::ImGuiDialog {
   std::thread install_thread_;
   std::atomic<bool> install_done_{false};
   State state_ = State::kSelecting;
+  bool auto_start_ = false;
   int completion_frames_ = -1;
 };
 

@@ -32,6 +32,8 @@
 #include <dlfcn.h>
 #include <sys/ioctl.h>
 
+#include <rex/main_android.h>
+
 #include <linux/ashmem.h>
 
 // TODO(tomc): Android or maybe na. idk

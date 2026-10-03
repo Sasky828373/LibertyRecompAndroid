@@ -24,10 +24,8 @@
 #include <rex/platform.h>
 #include <rex/ui/windowed_app_context.h>
 
-#if REX_PLATFORM_ANDROID
-// Multiple apps in a single library instead of separate executables.
-#define XE_UI_WINDOWED_APPS_IN_LIBRARY 1
-#endif
+// Android hosts the single SDL application through SDLActivity, exactly like
+// the desktop executables; Xenia's multi-app library mode is not used.
 
 namespace rex {
 namespace ui {

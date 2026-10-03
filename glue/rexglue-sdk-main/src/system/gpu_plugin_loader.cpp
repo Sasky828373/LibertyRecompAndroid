@@ -31,7 +31,9 @@ namespace {
 std::string PluginFileName(std::string_view name) {
   constexpr std::string_view kConfig = REXGLUE_BUILD_CONFIG;
   std::string_view postfix = "";
-  if (kConfig == "Debug") {
+  if (REX_PLATFORM_ANDROID) {
+    // Android builds use no per-config postfix (see the SDK CMakeLists).
+  } else if (kConfig == "Debug") {
     postfix = "d";
   } else if (kConfig == "RelWithDebInfo") {
     postfix = "rd";

@@ -35,6 +35,13 @@ if(LIBERTY_RECOMP_GRAINE_MAC)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckMacOSToolchain.cmake")
 endif()
 
+# Android consumes the same pure Graine RexGlue application as macOS; the
+# legacy LibertyRecomp/ tree is not built for it.
+set(LIBERTY_RECOMP_GRAINE_ANDROID OFF)
+if(ANDROID)
+    set(LIBERTY_RECOMP_GRAINE_ANDROID ON)
+endif()
+
 if(NOT LIBERTY_RECOMP_GRAINE_MAC)
     add_compile_definitions(FMT_USE_CONSTEVAL=0)
 endif()
@@ -184,6 +191,12 @@ if(LIBERTY_RECOMP_GRAINE_MAC)
     endif()
 
     message(STATUS "macOS: building the pure Graine RexGlue consumer")
+    add_subdirectory("glue")
+    return()
+endif()
+
+if(LIBERTY_RECOMP_GRAINE_ANDROID)
+    message(STATUS "Android: building the pure Graine RexGlue consumer")
     add_subdirectory("glue")
     return()
 endif()

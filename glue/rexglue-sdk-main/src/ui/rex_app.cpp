@@ -188,7 +188,8 @@ bool ReXApp::SetupEnvironment() {
                                         log_level_str, category_levels);
   if (log_file_cvar.empty()) {
     log_config.app_name = std::string(GetName());
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__ANDROID__)
+    // Android's library directory is read-only.
     // A macOS bundle's Contents/MacOS directory is code-signing territory.
     // Runtime logs placed there make a subsequent incremental build fail to
     // seal the bundle.  Keep mutable diagnostics with the rest of the title's

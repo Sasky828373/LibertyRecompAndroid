@@ -109,8 +109,14 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_DEBUG_POSTFIX d)
-set(CMAKE_RELWITHDEBINFO_POSTFIX rd)
+if(ANDROID)
+    # SDLActivity loads libraries by fixed name (libSDL3.so, libmain.so).
+    set(CMAKE_DEBUG_POSTFIX "")
+    set(CMAKE_RELWITHDEBINFO_POSTFIX "")
+else()
+    set(CMAKE_DEBUG_POSTFIX d)
+    set(CMAKE_RELWITHDEBINFO_POSTFIX rd)
+endif()
 
 if(NOT WIN32)
     # Use appropriate code model based on architecture

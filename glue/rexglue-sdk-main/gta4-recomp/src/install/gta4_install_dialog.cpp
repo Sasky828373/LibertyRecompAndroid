@@ -56,6 +56,17 @@ InstallDialog::InstallDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path
       cancel_(std::move(cancel)),
       picker_state_(std::make_shared<PickerState>()) {}
 
+void InstallDialog::Preselect(std::filesystem::path game, std::filesystem::path update) {
+  if (!dlc_only_ && !game.empty()) {
+    AssignPickedPath(PickerTarget::kGame, std::move(game));
+  }
+  if (!dlc_only_ && !update.empty()) {
+    AssignPickedPath(PickerTarget::kUpdate, std::move(update));
+  }
+  auto_start_ = !dlc_only_ && !PathFor(PickerTarget::kGame).empty() &&
+                !PathFor(PickerTarget::kUpdate).empty();
+}
+
 void InstallDialog::OnClose() {
   picker_state_->inspection_worker.Stop();
   progress_.cancel_requested = true;
@@ -366,6 +377,10 @@ void InstallDialog::OnDraw(ImGuiIO& io) {
       has_dlc = !picker_state_->tlad.empty() || !picker_state_->tbogt.empty();
     }
     const bool may_install = has_supported_game && has_update && (!dlc_only_ || has_dlc);
+    if (auto_start_ && state_ == State::kSelecting && may_install) {
+      auto_start_ = false;
+      StartInstall();
+    }
     ImGui::Spacing();
     ImGui::BeginDisabled(!may_install);
     if (ImGui::Button(state_ == State::kFailed ? "Retry Installation" : "Install",

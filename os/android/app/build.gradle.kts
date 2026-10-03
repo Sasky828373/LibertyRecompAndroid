@@ -1,85 +1,40 @@
 // LibertyRecomp Android — :app module.
 //
-// Builds libLibertyRecomp.so through the repo-root CMakeLists.txt via
-// `externalNativeBuild`, and wraps it into an APK with a single activity
-// (com.libertyrecomp.LibertySDLActivity) that extends SDL3's SDLActivity.
+// Gradle never runs CMake. The native side (libmain.so, librexruntime.so,
+// the GPU plugins, libSDL3.so, libc++_shared.so) is millions of lines of
+// recompiled PowerPC and is built by os/android/scripts/build_native.sh,
+// which stages the libraries into src/main/jniLibs and the title resources
+// into src/main/assets/Resources. This module only packages them.
 //
-// Three CMake arguments pin the build to the Android target:
-//   LIBERTY_RECOMP_TARGET_PLATFORM=android
-//   LIBERTY_RECOMP_ANDROID_RUNTIME_ASSETS=ON   (skip build-time payload check)
-//   CMAKE_TOOLCHAIN_FILE=<repo>/toolchains/android.cmake
-//
-// The toolchain file chain-loads `android.toolchain.cmake` from the NDK bundle
-// and forces LIBERTY_RECOMP_VULKAN=ON.
+// The SDL Java classes come from the same SDL3 tree the native library is
+// built from: SDLActivity refuses to start when the versions differ.
 
 plugins {
     id("com.android.application")
 }
 
+val sdlJavaDir = rootProject.file(
+    "../../glue/rexglue-sdk-main/thirdparty/sdl3/android-project/app/src/main/java")
+
 android {
     namespace   = "com.libertyrecomp"
     compileSdk  = 35
-    ndkVersion  = "27.2.12479018"
+    ndkVersion  = "29.0.14206865"
 
     defaultConfig {
         applicationId = "com.libertyrecomp"
-        minSdk        = 26
+        // 28: ASharedMemory (26) for guest memory and AAudio (27) for audio.
+        minSdk        = 28
         targetSdk     = 35
         versionCode   = 1
         versionName   = "0.1.0-dev"
 
         ndk {
-            // 64-bit ARM is the default shipping ABI. x86_64 is opt-in via
-            // `-PlibertyRecompEmulator=true` for Android emulator development.
             abiFilters += listOf("arm64-v8a")
-            if (project.findProperty("libertyRecompEmulator") == "true") {
-                abiFilters += "x86_64"
-            }
-        }
-
-        externalNativeBuild {
-            cmake {
-                // Map to the same cache vars the CMakePresets set for the
-                // `android-*` presets so Studio and preset-driven builds agree.
-                arguments += listOf(
-                    "-DLIBERTY_RECOMP_TARGET_PLATFORM=android",
-                    "-DLIBERTY_RECOMP_ANDROID_RUNTIME_ASSETS=ON",
-                    "-DANDROID_STL=c++_static",
-                    "-DANDROID_PLATFORM=android-26",
-                    "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-                )
-                targets += "LibertyRecomp"
-                cppFlags += "-std=c++23"
-            }
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            // Reach the repo root to reuse the shared CMakeLists.txt.
-            // os/android/app/build.gradle.kts → ../../../CMakeLists.txt
-            path    = file("../../../CMakeLists.txt")
-            version = "3.31.4"
-        }
-    }
-
-    signingConfigs {
-        // Custom release signing — override via gradle.properties or CLI:
-        //   ./gradlew assembleRelease \
-        //     -PlibertyRecompKeystore=/path/to/keystore.jks \
-        //     -PlibertyRecompKeystorePassword=changeit \
-        //     -PlibertyRecompKeyAlias=liberty \
-        //     -PlibertyRecompKeyPassword=changeit
-        create("release") {
-            val ks = project.findProperty("libertyRecompKeystore")?.toString()
-            if (ks != null) {
-                storeFile     = file(ks)
-                storePassword = project.findProperty("libertyRecompKeystorePassword")?.toString() ?: ""
-                keyAlias      = project.findProperty("libertyRecompKeyAlias")?.toString() ?: ""
-                keyPassword   = project.findProperty("libertyRecompKeyPassword")?.toString() ?: ""
-            }
-        }
-    }
+    sourceSets["main"].java.srcDirs("src/main/java", sdlJavaDir)
 
     buildTypes {
         debug {
@@ -88,18 +43,8 @@ android {
             isMinifyEnabled = false
         }
         release {
-            isMinifyEnabled   = false
-            isShrinkResources = false
-            // Use the custom release signing config if a keystore was supplied,
-            // otherwise fall back to the shared debug key.
-            signingConfig = if (project.hasProperty("libertyRecompKeystore"))
-                signingConfigs.getByName("release")
-            else
-                signingConfigs.getByName("debug")
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro",
-            )
+            isMinifyEnabled = false
+            signingConfig   = signingConfigs.getByName("debug")
         }
     }
 
@@ -110,27 +55,17 @@ android {
 
     packaging {
         jniLibs {
-            // Preserve uncompressed .so placement so dlopen()/System.loadLibrary
-            // can mmap the library directly instead of extracting at runtime.
-            useLegacyPackaging = false
-        }
-        resources {
-            excludes += listOf(
-                "META-INF/LICENSE*",
-                "META-INF/NOTICE*",
-            )
+            // Unpack the libraries into nativeLibraryDir: the runtime finds its
+            // GPU plugins by real path next to itself, and a Turnip driver
+            // loaded through libadrenotools needs real files as well.
+            useLegacyPackaging = true
+            // build_native.sh decides what is stripped.
+            keepDebugSymbols += "**/*.so"
         }
     }
 
     lint {
         checkReleaseBuilds = false
+        abortOnError = false
     }
-}
-
-dependencies {
-    // No runtime AndroidX dependencies for the minimal shell.
-    // Google Play Games v2 is opt-in for Phase-5 achievement wiring; keeping
-    // it behind a build flag until we have a real Play Console entry.
-    //
-    // implementation("com.google.android.gms:play-services-games-v2:19.0.0")
 }

@@ -72,6 +72,12 @@ REXCVAR_DEFINE_BOOL(install, false, "GTA IV/Installation", "Run the full game in
 REXCVAR_DEFINE_BOOL(install_dlc, false, "GTA IV/Installation",
                     "Run the episode installation wizard")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(install_game_source, "", "GTA IV/Installation",
+                      "Host path of the base-game source preselected in the installation wizard")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(install_update_source, "", "GTA IV/Installation",
+                      "Host path of the v8 title update preselected in the installation wizard")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(install_check, false, "GTA IV/Installation",
                     "Verify the installed game and episode layouts before launch")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -627,7 +633,7 @@ std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
     REXLOG_WARN("GTA IV installation is not launch-ready: {}", readiness_error);
   }
   const bool dlc_only = ready && force_dlc && !force_install;
-  new gta4::install::InstallDialog(
+  auto* install_dialog = new gta4::install::InstallDialog(
       imgui_drawer(), liberty_root_, dlc_only,
       [paths = std::move(paths), resume = std::move(resume)]() mutable {
         std::error_code error;
@@ -640,6 +646,7 @@ std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
         resume(std::move(paths));
       },
       [this]() { app_context().QuitFromUIThread(); });
+  install_dialog->Preselect(REXCVAR_GET(install_game_source), REXCVAR_GET(install_update_source));
   return std::nullopt;
 }
 

@@ -251,8 +251,15 @@ target_compile_options(imgui PRIVATE -w)
 # SDL3 - Cross-platform media layer
 #=============================================================================
 set(SDL_INSTALL ON CACHE BOOL "" FORCE)
-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-set(SDL_STATIC ON CACHE BOOL "" FORCE)
+if(ANDROID)
+    # The runtime, the GPU plugins and libmain.so are separate shared objects
+    # on Android; one libSDL3.so keeps a single SDL state and JNI binding.
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+else()
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+endif()
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
 
@@ -295,7 +302,7 @@ set(SDL_DUMMYAUDIO OFF CACHE BOOL "" FORCE)
 set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
 
 # Linux audio backends
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
     set(SDL_ALSA_SHARED       ON  CACHE BOOL "" FORCE)
     set(SDL_PULSEAUDIO        ON  CACHE BOOL "" FORCE)

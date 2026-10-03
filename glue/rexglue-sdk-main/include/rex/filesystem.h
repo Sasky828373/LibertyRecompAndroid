@@ -39,6 +39,11 @@ std::filesystem::path GetExecutableFolder();
 // Get user folder.
 std::filesystem::path GetUserFolder();
 
+// Get the folder holding title resources (fonts, button prompts, keys).
+// REX_RESOURCES_DIR overrides it; otherwise it is <executable>/../Resources,
+// the macOS bundle layout.
+std::filesystem::path GetResourcesFolder();
+
 // Creates the parent folder of the specified path if needed.
 // This can be used to ensure the destination path for a new file exists before
 // attempting to create it.

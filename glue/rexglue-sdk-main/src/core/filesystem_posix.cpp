@@ -27,6 +27,7 @@
 #include <rex/string.h>
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <ftw.h>
 #include <libgen.h>
 #include <pwd.h>
@@ -52,6 +53,15 @@ std::filesystem::path to_path(const std::u16string_view source) {
 namespace filesystem {
 
 std::filesystem::path GetExecutablePath() {
+#if defined(__ANDROID__)
+  // /proc/self/exe is app_process. The runtime and its GPU plugins are shared
+  // libraries unpacked side by side into nativeLibraryDir, so report the
+  // library holding this code instead.
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<const void*>(&GetExecutablePath), &info) && info.dli_fname) {
+    return info.dli_fname;
+  }
+#endif
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);
   std::string s(buff);
@@ -61,6 +71,22 @@ std::filesystem::path GetExecutablePath() {
 std::filesystem::path GetExecutableFolder() {
   return GetExecutablePath().parent_path();
 }
+
+#if REX_PLATFORM_ANDROID
+// The host supplies real paths; content:// URIs are not resolved on Android.
+void AndroidInitialize() {}
+
+void AndroidShutdown() {}
+
+bool IsAndroidContentUri(const std::string_view source) {
+  return source.starts_with("content://");
+}
+
+int OpenAndroidContentFileDescriptor(const std::string_view uri, const char*) {
+  REXLOG_ERROR("content:// URIs are not supported: {}", uri);
+  return -1;
+}
+#endif  // REX_PLATFORM_ANDROID
 
 std::filesystem::path GetUserFolder() {
   // get preferred data home

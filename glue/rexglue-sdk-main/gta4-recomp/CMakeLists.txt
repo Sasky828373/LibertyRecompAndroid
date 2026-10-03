@@ -12,6 +12,57 @@ endif()
 
 include(generated/sources.cmake)
 
+# Title sources shared by every Graine host (macOS bundle, Android library).
+set(GTA4_APP_SOURCES
+    src/main.cpp
+    src/gta4_app.cpp
+    src/gta4_frontend_hooks.cpp
+    src/gta4_font_selection_trace.cpp
+    src/gta4_presentation_options.cpp
+    src/gta4_presentation_hooks.cpp
+    src/gta4_aspect_hooks.cpp
+    src/gta4_quicksave_hooks.cpp
+    src/gta4_input_hooks.cpp
+    src/gta4_sony_feedback.cpp
+    src/gta4_sony_event_hooks.cpp
+    src/gta4_loading_parallax_fix.cpp
+    src/gta4_motion_bridge.cpp
+    src/gta4_motion_hooks.cpp
+    src/gta4_motion_vehicle_hooks.cpp
+    src/gta4_audio_lifetime_trace.cpp
+    src/gta4_audio_ramped_mix.cpp
+    src/gta4_lzx_hooks.cpp
+    src/gta4_multiplayer_64_hooks.cpp
+    src/gta4_online_hooks.cpp
+    src/gta4_native_hooks.cpp
+    src/gta4_population_hooks.cpp
+    src/gta4_streaming_diagnostics.cpp
+    src/gta4_streaming_hooks.cpp
+    src/gta4_touch_coordinator.cpp
+    src/gta4_transition_hooks.cpp
+    src/install/gta4_install_dialog.cpp
+    src/install/gta4_installer.cpp
+    src/install/gta4_rpf_extractor.cpp
+    src/install/gta4_source_inspector.cpp
+    src/legal_screen_trace.cpp
+    src/rpf_button_prompts.cpp
+    src/input/text_chat_dialog.cpp
+    src/input/context_touch_controls.cpp
+    src/input/context_touch_context.cpp
+    src/input/context_touch_camera_hooks.cpp
+    src/input/context_touch_settings.cpp
+    src/input/context_touch_draw.cpp
+    src/input/context_touch_layout.cpp
+    src/input/context_touch_activity.cpp
+    src/input/context_touch_activity_context.cpp
+    src/input/context_touch_activity_layout.cpp
+    src/input/context_touch_overlay.cpp
+    src/gta4_touch_guest_hooks.cpp
+    src/network/community_multiplayer.cpp
+    src/network/gta4_voice_audio.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/crypto/rijndael-alg-fst.c"
+)
+
 if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
     find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
     find_package(CURL REQUIRED)
@@ -92,56 +143,10 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
 
     add_executable(LibertyRecomp MACOSX_BUNDLE
         "${LIBERTY_DESKTOP_ICON}"
-        src/main.cpp
-        src/gta4_app.cpp
-        src/gta4_frontend_hooks.cpp
-        src/gta4_font_selection_trace.cpp
-        src/gta4_presentation_options.cpp
-        src/gta4_presentation_hooks.cpp
-        src/gta4_aspect_hooks.cpp
-        src/gta4_quicksave_hooks.cpp
-        src/gta4_input_hooks.cpp
-        src/gta4_sony_feedback.cpp
-        src/gta4_sony_event_hooks.cpp
-        src/gta4_loading_parallax_fix.cpp
-        src/gta4_motion_bridge.cpp
-        src/gta4_motion_hooks.cpp
-        src/gta4_motion_vehicle_hooks.cpp
-        src/gta4_audio_lifetime_trace.cpp
-        src/gta4_audio_ramped_mix.cpp
-        src/gta4_lzx_hooks.cpp
-        src/gta4_multiplayer_64_hooks.cpp
-        src/gta4_online_hooks.cpp
-        src/gta4_native_hooks.cpp
-        src/gta4_population_hooks.cpp
-        src/gta4_streaming_diagnostics.cpp
-        src/gta4_streaming_hooks.cpp
-        src/gta4_touch_coordinator.cpp
-        src/gta4_transition_hooks.cpp
-        src/install/gta4_install_dialog.cpp
-        src/install/gta4_installer.cpp
-        src/install/gta4_rpf_extractor.cpp
-        src/install/gta4_source_inspector.cpp
-        src/legal_screen_trace.cpp
-        src/rpf_button_prompts.cpp
+        ${GTA4_APP_SOURCES}
         src/achievement_bridge_gc.mm
-        src/input/text_chat_dialog.cpp
-        src/input/context_touch_controls.cpp
-        src/input/context_touch_context.cpp
-        src/input/context_touch_camera_hooks.cpp
-        src/input/context_touch_settings.cpp
-        src/input/context_touch_draw.cpp
-        src/input/context_touch_layout.cpp
-        src/input/context_touch_activity.cpp
-        src/input/context_touch_activity_context.cpp
-        src/input/context_touch_activity_layout.cpp
-        src/input/context_touch_overlay.cpp
-        src/gta4_touch_guest_hooks.cpp
         src/input/user_music_player.mm
-        src/network/community_multiplayer.cpp
         src/network/gta4_microphone_permission.mm
-        src/network/gta4_voice_audio.cpp
-        "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/crypto/rijndael-alg-fst.c"
         "${LIBERTY_GC_MACOS_ENTITLEMENTS}"
         ${LIBERTY_BUTTON_PROMPT_RESOURCES}
         ${LIBERTY_VECTOR_FONT_RESOURCES}
@@ -305,6 +310,65 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
             "$<TARGET_BUNDLE_DIR:LibertyRecomp>" --arch "${CMAKE_OSX_ARCHITECTURES}"
         COMMENT "Verifying macOS runtime closure, architecture, minimum OS, and signature..."
         VERBATIM)
+elseif(ANDROID)
+    # SDL3's SDLActivity loads libmain.so and calls its SDL_main. The runtime,
+    # SDL3 and the GPU plugins are unpacked next to it in nativeLibraryDir;
+    # title resources are copied out of the APK by the Java host, which points
+    # REX_RESOURCES_DIR at them.
+    set(GTA4_ANDROID_SOURCES ${GTA4_APP_SOURCES})
+    list(REMOVE_ITEM GTA4_ANDROID_SOURCES src/network/community_multiplayer.cpp)
+
+    add_library(LibertyRecomp SHARED
+        ${GTA4_ANDROID_SOURCES}
+        src/android/android_platform_stubs.cpp
+        ${GENERATED_SOURCES}
+    )
+
+    set_property(SOURCE generated/gta4_register.cpp APPEND PROPERTY COMPILE_OPTIONS
+        "$<$<CONFIG:Release,RelWithDebInfo>:-O0>")
+
+    target_include_directories(LibertyRecomp PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated
+        ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/crypto
+        ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/imgui
+        ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/inja/third_party/include
+    )
+    set_property(SOURCE src/gta4_native_hooks.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+
+    set_source_files_properties(src/gta4_sony_feedback.cpp src/gta4_sony_event_hooks.cpp
+        PROPERTIES COMPILE_DEFINITIONS GTA4_SONY_PRIMARY_PLAYER_ALIAS)
+
+    # The asset paths are build-machine fallbacks; on the device every lookup
+    # resolves through GetResourcesFolder() first.
+    target_compile_definitions(LibertyRecomp PRIVATE
+        GTA4_TOUCH_PRIMARY_PLAYER_ALIAS=1
+        GTA4_RECOMP_ASSET_XEX="${CMAKE_CURRENT_SOURCE_DIR}/assets/default_v8.xex"
+        GTA4_BUTTON_PROMPT_ASSET_ROOT="${LIBERTY_RECOMP_WORKSPACE_ROOT}/LibertyRecompLib/private/button_prompts"
+        GTA4_RPF_AES_KEY_SOURCE="${LIBERTY_RECOMP_WORKSPACE_ROOT}/LibertyRecompLib/aes_key.bin"
+    )
+
+    target_link_libraries(LibertyRecomp PRIVATE
+        rex::runtime
+        xxHash::xxhash
+        SDL3::SDL3
+        utf8cpp
+        z
+        android
+        log
+    )
+
+    rexglue_configure_target(LibertyRecomp GPU_PLUGINS xenos gta4-native)
+
+    set_target_properties(LibertyRecomp PROPERTIES OUTPUT_NAME "main")
+    # SDL resolves SDL_main with dlsym after dlopen; Android 15 devices need
+    # 16 KB-aligned segments.
+    target_link_options(LibertyRecomp PRIVATE
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,--export-dynamic-symbol=SDL_main"
+        "-Wl,--export-dynamic-symbol=JNI_OnLoad"
+    )
 else()
     add_library(gta4_recomp INTERFACE)
     target_include_directories(gta4_recomp INTERFACE
