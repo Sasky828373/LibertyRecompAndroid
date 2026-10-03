@@ -3,8 +3,8 @@
 # Logs stay on at warn so crashes are still visible in logcat. Remove or
 # comment out BOTH diagnostics lines together: categories without
 # --diagnostics=true make the runtime refuse to start.
---diagnostics=true
---diagnostics_categories=logging
+#--diagnostics=true
+#--diagnostics_categories=logging
 --log_level=warn
 
 # Render below 1080p and upscale with FSR 1:
@@ -23,3 +23,14 @@
 
 # A steady 30 is better on a handheld than an uneven 40-60 (0 | 30 | 40 | 60 | 120)
 --gta4_frame_limit=30
+
+# Fewer cars and pedestrians means fewer draws; the renderer thread is the
+# bottleneck on Snapdragon 865 (defaults are 1.25, above the console's 1.0).
+--gta4_traffic_density_scale=0.6
+--gta4_parked_car_density_scale=0.6
+--gta4_ped_density_scale=0.6
+--gta4_scenario_ped_density_scale=0.6
+
+# Renderer profiling scopes (on by default upstream)
+--gta4_profile_native_detailed_cpu=false
+--gta4_profile_native_detailed_gpu=false

@@ -14,7 +14,7 @@ JOBS="${1:-$(( $(nproc) > 3 ? $(nproc) - 2 : 1 ))}"
 python "$APP_DIR/scripts/materialize_symlinks.py"
 "$APP_DIR/scripts/setup_host_tools.sh"
 
-if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
+if [ ! -f "$BUILD_DIR/build.ninja" ]; then
   echo "== configuring $BUILD_TYPE in $BUILD_DIR"
   cmake -S "$REPO" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$REPO/toolchains/android.cmake" \
