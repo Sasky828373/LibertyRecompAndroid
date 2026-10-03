@@ -1,6 +1,8 @@
 # RP5 / Adreno 650 performance profile. Push with:
 #   bash os/android/scripts/push_args.sh os/android/android_args/perf.txt
-# Logs stay on at warn so crashes are still visible in logcat.
+# Logs stay on at warn so crashes are still visible in logcat. Remove or
+# comment out BOTH diagnostics lines together: categories without
+# --diagnostics=true make the runtime refuse to start.
 --diagnostics=true
 --diagnostics_categories=logging
 --log_level=warn
