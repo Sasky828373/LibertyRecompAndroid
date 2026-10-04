@@ -30,6 +30,54 @@
 #include <rex/thread/mutex.h>
 
 #include <new>
+#include <atomic>
+#include <chrono>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
+namespace {
+// TEMP: streaming read telemetry (perf investigation).
+struct ReadTelemetry {
+  std::atomic<uint64_t> reads{0}, async_reads{0}, bytes{0}, service_ns{0};
+  std::atomic<int64_t> in_flight{0};
+  std::atomic<int64_t> max_in_flight{0};
+  std::atomic<int64_t> last_report_ns{0};
+};
+ReadTelemetry g_read_telemetry;
+int64_t TelemetryNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+void TelemetryBegin() {
+  const int64_t now_in_flight = g_read_telemetry.in_flight.fetch_add(1) + 1;
+  int64_t seen = g_read_telemetry.max_in_flight.load();
+  while (now_in_flight > seen && !g_read_telemetry.max_in_flight.compare_exchange_weak(seen, now_in_flight)) {}
+}
+void TelemetryEnd(int64_t begin_ns, uint32_t bytes, bool async) {
+  auto& t = g_read_telemetry;
+  t.in_flight.fetch_sub(1);
+  t.reads.fetch_add(1);
+  if (async) t.async_reads.fetch_add(1);
+  t.bytes.fetch_add(bytes);
+  const int64_t now = TelemetryNowNs();
+  t.service_ns.fetch_add(uint64_t(now - begin_ns));
+  int64_t last = t.last_report_ns.load();
+  if (now - last > 2000000000ll && t.last_report_ns.compare_exchange_strong(last, now)) {
+    const uint64_t reads = t.reads.exchange(0), async_reads = t.async_reads.exchange(0);
+    const uint64_t total = t.bytes.exchange(0), service = t.service_ns.exchange(0);
+    const int64_t peak = t.max_in_flight.exchange(0);
+#if defined(__ANDROID__)
+    const double seconds = last ? double(now - last) / 1e9 : 2.0;
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                        "io: %.0f reads/s (%llu async) %.1f MB/s avg %.0f KB service %.2f ms peak-in-flight %lld",
+                        reads / seconds, (unsigned long long)async_reads, total / 1e6 / seconds,
+                        reads ? total / 1024.0 / reads : 0.0, reads ? service / 1e6 / reads : 0.0,
+                        (long long)peak);
+#endif
+  }
+}
+}  // namespace
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
@@ -302,10 +350,13 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
   const bool has_completion_port = file->HasIOCompletionPorts();
   const bool inline_completion = file_io::IsInlineCompletionEligible(
       file->is_synchronous(), !!ev, apc_routine != 0, has_completion_port);
+  const int64_t telemetry_begin = TelemetryNowNs();
+  TelemetryBegin();
   if (inline_completion) {
     completion.PrepareWaitObject();
     uint32_t bytes_read = 0;
     result = file->ReadTransfer(buffer.guest_address(), buffer_length, byte_offset, &bytes_read);
+    TelemetryEnd(telemetry_begin, bytes_read, false);
     completion.Complete(result, bytes_read);
     REXKRNL_IMPORT_RESULT(
         "NtReadFile", "{:#x} inline=1 synchronous={} completion_port={} wait={} transferred={}",
@@ -318,11 +369,12 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
     admission = REX_KERNEL_STATE()->QueueHostIoTask(
         reinterpret_cast<uintptr_t>(file.get()),
         [completion, buffer_address = buffer.guest_address(),
-         length = static_cast<uint32_t>(buffer_length), byte_offset]() {
+         length = static_cast<uint32_t>(buffer_length), byte_offset, telemetry_begin]() {
           REXKRNL_DEBUG("[AsyncIO] worker start iosb={:08X} kind=read", completion.io_status_block);
           uint32_t bytes_read = 0;
           const X_STATUS status =
               completion.file->ReadTransfer(buffer_address, length, byte_offset, &bytes_read);
+          TelemetryEnd(telemetry_begin, bytes_read, true);
           completion.Complete(status, bytes_read);
         },
         [completion]() {

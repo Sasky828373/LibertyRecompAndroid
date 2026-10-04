@@ -72,6 +72,14 @@ inline bool CaptureConstantPayloadDelta(std::span<const uint8_t> source,
   if (!bytes_per_element) {
     return false;
   }
+  // One allocation per vector: payload growth by insert reallocated several
+  // times per draw on the producer thread.
+  {
+    uint64_t total = 0;
+    for (const DirtyElementRange& dirty : dirty_ranges.ranges) total += uint64_t(dirty.count) * bytes_per_element;
+    if (total <= source.size()) result.payload.reserve(size_t(total));
+    result.ranges.reserve(dirty_ranges.ranges.size());
+  }
   for (const DirtyElementRange& dirty : dirty_ranges.ranges) {
     if (!dirty.count || dirty.first > std::numeric_limits<uint32_t>::max() / bytes_per_element ||
         dirty.count > std::numeric_limits<uint32_t>::max() / bytes_per_element) {
@@ -149,6 +157,47 @@ struct ConstantApplyResult {
 // One instance is owned by the render worker for each device and shader
 // stage. Published versions retain only copied deltas. A contiguous host view
 // is reconstructed lazily on first consumer use and then memoized.
+// Recycles the full-bank snapshot buffers taken for every draw that changes
+// constants (two 3.5-4 KB heap blocks per draw otherwise). Releases may come
+// from any thread (command retirement is asynchronous), hence the mutex.
+class ConstantSnapshotPool {
+ public:
+  static std::shared_ptr<const std::vector<uint8_t>> Copy(const std::vector<uint8_t>& source) {
+    std::vector<uint8_t>* buffer = nullptr;
+    {
+      std::lock_guard lock(mutex());
+      auto& list = free_list(source.size());
+      if (!list.empty()) {
+        buffer = list.back();
+        list.pop_back();
+      }
+    }
+    if (buffer) {
+      std::memcpy(buffer->data(), source.data(), source.size());
+    } else {
+      buffer = new std::vector<uint8_t>(source);
+    }
+    return std::shared_ptr<const std::vector<uint8_t>>(buffer, [](const std::vector<uint8_t>* bytes) {
+      auto* owned = const_cast<std::vector<uint8_t>*>(bytes);
+      std::lock_guard lock(mutex());
+      auto& list = free_list(owned->size());
+      if (list.size() < 8192) list.push_back(owned);
+      else delete owned;
+    });
+  }
+
+ private:
+  static std::mutex& mutex() { static std::mutex instance; return instance; }
+  // One list per bank size (vertex, pixel and the rare others).
+  static std::vector<std::vector<uint8_t>*>& free_list(size_t size) {
+    static std::vector<std::pair<size_t, std::vector<std::vector<uint8_t>*>>> lists;
+    for (auto& [list_size, list] : lists)
+      if (list_size == size) return list;
+    lists.emplace_back(size, std::vector<std::vector<uint8_t>*>{});
+    return lists.back().second;
+  }
+};
+
 class AuthoritativeConstantState {
  public:
   static constexpr uint32_t kMaximumDeferredAncestors = 64;
@@ -167,7 +216,7 @@ class AuthoritativeConstantState {
   // stay deferred and allocate no full-size snapshot.
   const std::shared_ptr<const ConstantStateVersion>& SnapshotCurrentVersion() const {
     if (current_ && !current_->materialized) {
-      current_->materialized = std::make_shared<const std::vector<uint8_t>>(canonical_);
+      current_->materialized = ConstantSnapshotPool::Copy(canonical_);
       current_->parent.reset();
     }
     return current_;

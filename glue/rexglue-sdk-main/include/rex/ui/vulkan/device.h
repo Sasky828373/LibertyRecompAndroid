@@ -10,6 +10,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <string>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -19,6 +20,10 @@
 namespace rex {
 namespace ui {
 namespace vulkan {
+
+// TEMP (Android perf investigation): per-frame averages of counted Vulkan commands
+// since the previous call.
+std::string ConsumeCommandCounters(uint32_t frames);
 
 class VulkanDevice {
  public:
@@ -37,6 +42,9 @@ class VulkanDevice {
   ~VulkanDevice();
 
   const VulkanInstance* vulkan_instance() const { return vulkan_instance_; }
+  // TEMP (Android perf investigation): VK_KHR_performance_query pools usable.
+  bool performance_query_enabled() const { return performance_query_enabled_; }
+  bool pipeline_statistics_enabled() const { return pipeline_statistics_enabled_; }
 
   VkPhysicalDevice physical_device() const { return physical_device_; }
 
@@ -346,6 +354,8 @@ class VulkanDevice {
   explicit VulkanDevice(const VulkanInstance* vulkan_instance, VkPhysicalDevice physical_device);
 
   const VulkanInstance* vulkan_instance_ = nullptr;
+  bool performance_query_enabled_ = false;
+  bool pipeline_statistics_enabled_ = false;
   VkPhysicalDevice physical_device_ = nullptr;
 
   Properties properties_;

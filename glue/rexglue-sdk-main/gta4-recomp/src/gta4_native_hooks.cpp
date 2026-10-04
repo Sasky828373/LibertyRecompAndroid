@@ -72,6 +72,8 @@ REXCVAR_DECLARE(std::string, gta4_fsr1_quality);
 REXCVAR_DECLARE(std::string, gta4_aspect_ratio);
 REXCVAR_DECLARE(bool, gta4_force_highest_lod);
 REXCVAR_DECLARE(double, gta4_draw_distance_scale);
+REXCVAR_DECLARE(double, gta4_draw_distance_dynamic_factor);
+REXCVAR_DECLARE(bool, gta4_dynamic_draw_distance);
 REXCVAR_DECLARE(bool, gta4_modern_shaders);
 REXCVAR_DECLARE(uint32_t, gta4_drawable_reference_limit);
 REXCVAR_DEFINE_BOOL(gta4_native_pixel_snap_fonts, true, "GTA IV/Graphics/Text",
@@ -4953,7 +4955,9 @@ extern "C" void sub_824F3418(PPCContext& ctx, uint8_t* base) {
 #include "gta4_draw_distance_guest.inc"
 
 extern "C" void sub_821DFFE8(PPCContext& ctx, uint8_t* base) {
-  const double configured_scale = REXCVAR_GET(gta4_draw_distance_scale);
+  const double configured_scale =
+      REXCVAR_GET(gta4_draw_distance_scale) *
+      (REXCVAR_GET(gta4_dynamic_draw_distance) ? REXCVAR_GET(gta4_draw_distance_dynamic_factor) : 1.0);
   if (!IsNativeMode()) {
     __imp__sub_821DFFE8(ctx, base);
     return;

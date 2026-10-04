@@ -151,8 +151,8 @@ bool Gta4NativeGraphicsSystem::PublishIndexedWorkingSet() {
         } while (i < limit && changed(i));
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = page.descriptor_sets[dimension];
-        write.dstBinding = 0;
+        write.dstSet = page.descriptor_sets[0];
+        write.dstBinding = NativeMergedTextureBinding(dimension);
         write.dstArrayElement = first;
         write.descriptorCount = i - first;
         write.descriptorType = sampler ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;

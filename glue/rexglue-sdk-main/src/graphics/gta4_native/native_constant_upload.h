@@ -31,7 +31,7 @@ class NativeConstantUploadTracker {
                               bool compare_existing = true) {
     if (source.empty() || offset % kRegisterBytes || source.size() % kRegisterBytes ||
         offset > storage.size() || source.size() > storage.size() - offset ||
-        initialized_bytes_ > storage.size() || offset > initialized_bytes_ ||
+        initialized_bytes_ > storage.size() ||
         source.size() > std::numeric_limits<size_t>::max() - written_bytes_) {
       return std::nullopt;
     }
@@ -40,7 +40,9 @@ class NativeConstantUploadTracker {
     // Only the initialized, cached prefix may be read. Uninitialized tails and
     // uncached heaps take a single sequential copy/conversion path instead of
     // repeating comparison and initialization branches for every register.
-    const size_t existing = compare_existing
+    // Allocations may start past the initialized prefix (alignment gaps);
+    // those bytes are written whole, without a comparison.
+    const size_t existing = compare_existing && offset < initialized_bytes_
         ? std::min(source.size(), initialized_bytes_ - offset) : 0;
     const auto convert = [&](uint8_t* dst, const uint8_t* src, size_t bytes) {
       if (!guest_word_order) { std::memcpy(dst, src, bytes); return; }

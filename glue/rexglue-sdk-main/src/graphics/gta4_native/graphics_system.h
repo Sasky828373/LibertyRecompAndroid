@@ -3,6 +3,8 @@
 #include "native_triangle_fan.h"
 #include "native_deferred_release.h"
 #include "native_flat_set.h"
+#include "native_gpu_counters.h"
+#include "native_pipeline_stats.h"
 #include "native_command_bytes.h"
 #include "native_owned_commands.h"
 
@@ -163,6 +165,12 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     std::array<uint64_t, 4> module_code_hashes{};
     std::string filename;
     std::vector<NativeVertexInput> vertex_inputs;
+    // Bytes of this stage's guest constant bank any of its modules can read
+    // (SpirvConstantRange::kUnbounded: the whole bank).
+    uint32_t constant_bytes = 0xFFFFFFFFu;
+    // Vertex conversion depends only on the input interface, so converted and
+    // persistent vertex data are shared by every shader with the same inputs.
+    uint64_t input_signature_hash = 0;
 
     const ShaderOverrideCacheEntry* override_entry = nullptr;
     uint32_t override_specialization_constants_mask = 0;
@@ -450,7 +458,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     std::shared_ptr<const EnvironmentalDataV2> environmental_data;
     std::array<SurfaceDescriptor, kRenderTargetCount> snapshot_render_targets{};
     SurfaceDescriptor snapshot_depth_stencil{};
-    std::array<VkDescriptorSet, 5> draw_descriptor_sets{};
+    std::array<VkDescriptorSet, 1> draw_descriptor_sets{};
     std::array<uint32_t, kTextureStageCount> texture_descriptor_indices{};
     std::array<uint32_t, kTextureStageCount> sampler_descriptor_indices{};
     uint32_t descriptor_page = UINT32_MAX;
@@ -909,7 +917,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
 
   struct NativeDescriptorPage {
     VkDescriptorPool pool = VK_NULL_HANDLE;
-    std::array<VkDescriptorSet, 5> descriptor_sets{};
+    std::array<VkDescriptorSet, 1> descriptor_sets{};
     std::vector<NativeDescriptorImageSlot> image_slots;
     std::vector<NativeDescriptorSamplerSlot> sampler_slots;
     uint64_t frame_epoch = 0;
@@ -1734,6 +1742,15 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::shared_ptr<const NativePipelineState> SnapshotPipeline(const NativeCommand&, bool);
   NativeOwnedCommands<NativeCommand> current_frame_;
   DirtyStateDelta producer_dirty_delta_;     // command_capture_mutex_
+  struct CapacityPointerHash {
+    size_t operator()(uintptr_t value) const noexcept { return size_t(NativeMixHash(value)); }
+  };
+  NativeFlatSet<uintptr_t, CapacityPointerHash> capacity_vertex_versions_;
+  NativeFlatSet<uintptr_t, CapacityPointerHash> capacity_pixel_versions_;
+  std::vector<NativeCommand*> capacity_constant_commands_;
+  uint64_t upload_on_demand_growths_ = 0;
+  uint64_t upload_growths_at_last_plan_ = 0;
+  uint32_t upload_frames_since_plan_ = 0;
   struct BufferCaptureCacheSlot {
     uint32_t handle = 0;
     uint32_t flags = 0;
@@ -1770,6 +1787,17 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void ApplyReleaseResourceEffects(const NativeReleaseEffect& effect);
   void FinishPresent(NativeCommand& command, const PresentCommand& present);
   void SignalGuestFrameComplete(uint32_t device, uint32_t frame);
+  void UpdateDynamicDrawDistance();
+  NativeGpuCounters gpu_counters_;
+  NativePipelineStats pipeline_stats_;
+  bool pipeline_stats_attempted_ = false;
+  uint32_t pipeline_stats_reports_ = 0;
+  bool gpu_counters_attempted_ = false;
+  double dynamic_draw_distance_factor_ = 1.0;
+  double dynamic_draw_distance_published_ = 1.0;
+  double dynamic_draw_distance_interval_ms_ = 33.3;
+  uint64_t dynamic_draw_distance_last_tick_ = 0;
+  uint32_t dynamic_draw_distance_stable_frames_ = 0;
   NativeOwnedCommands<NativeCommand> assembly_frame_;
   // Worker-side protection visible to the recorder's eviction passes. Guarded
   // by worker_protection_mutex_ together with the worker batch and cursor.
@@ -2151,10 +2179,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   NativeImageResource null_texture_3d_;
   NativeImageResource null_texture_cube_;
   VkSampler null_sampler_ = VK_NULL_HANDLE;
-  std::array<VkDescriptorSetLayout, 6> descriptor_set_layouts_{};
-  std::array<VkDescriptorSetLayout, 5> cached_descriptor_set_layouts_{};
+  std::array<VkDescriptorSetLayout, 2> descriptor_set_layouts_{};
+  std::array<VkDescriptorSetLayout, 1> cached_descriptor_set_layouts_{};
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
-  std::array<std::array<VkDescriptorSet, 6>, 2> descriptor_sets_{};
+  std::array<std::array<VkDescriptorSet, 2>, 2> descriptor_sets_{};
   NativeDescriptorBackend native_descriptor_backend_ = NativeDescriptorBackend::kCached;
   std::unique_ptr<NativeStableDescriptorSlotTable> native_stable_image_descriptor_table_;
   std::unique_ptr<NativeStableDescriptorSlotTable> native_stable_sampler_descriptor_table_;
@@ -2170,7 +2198,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::map<uint64_t, std::vector<NativeDescriptorRetirement>> native_descriptor_retirement_journal_;
   bool native_descriptor_layouts_update_after_bind_ = false;
   uint32_t native_descriptor_maximum_page_count_ = 0;
-  NativeDrawStateCache<6> native_draw_state_cache_;
+  NativeDrawStateCache<2> native_draw_state_cache_;
   NativeDescriptorSlotHandle native_null_image_descriptor_{};
   NativeDescriptorSlotHandle native_null_sampler_descriptor_{};
   uint32_t active_descriptor_copy_ = 0;
@@ -2213,6 +2241,20 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void TrimTextureAllocationPool(bool all);
   uint64_t command_pool_reset_count_ = 0;
   VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+  // Guest constant banks as dynamic uniform buffers (descriptor set 6).
+  VkDescriptorSetLayout ubo_constants_set_layout_ = VK_NULL_HANDLE;
+  VkDescriptorPool ubo_constants_pool_ = VK_NULL_HANDLE;
+  std::array<VkDescriptorSet, 2> ubo_constants_sets_{};
+  std::array<VkBuffer, 2> ubo_constants_set_buffers_{};
+  VkPipelineLayout ubo_bound_layout_ = VK_NULL_HANDLE;
+  VkDescriptorSet ubo_bound_set_ = VK_NULL_HANDLE;
+  VkCommandBuffer ubo_bound_command_buffer_ = VK_NULL_HANDLE;
+  std::array<uint32_t, 2> ubo_bound_offsets_{};
+  uint32_t ubo_rewritten_shaders_ = 0;
+  uint64_t ubo_rewritten_loads_ = 0;
+  bool BindUboConstantBanks(VkCommandBuffer command_buffer, VkPipelineLayout layout,
+                            const NativeUploadAllocation& vertex,
+                            const NativeUploadAllocation& pixel);
   VkPipelineCache native_pipeline_cache_ = VK_NULL_HANDLE;
   std::filesystem::path native_pipeline_cache_root_;
   std::filesystem::path native_pipeline_cache_path_;

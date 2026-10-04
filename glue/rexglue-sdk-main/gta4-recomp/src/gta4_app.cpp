@@ -211,6 +211,15 @@ REXCVAR_DEFINE_DOUBLE(gta4_fsr1_sharpness_reduction, 0.2, "GTA IV/Graphics/Upsca
 // distance bypasses transitions as soon as a new drawable becomes resident.
 REXCVAR_DEFINE_BOOL(gta4_force_highest_lod, false, "GTA IV/Graphics/LOD",
                     "Prefer the highest resident model LOD regardless of distance");
+REXCVAR_DEFINE_BOOL(gta4_dynamic_draw_distance, false, "GTA IV/Graphics/LOD",
+                    "Lower the draw distance while frames miss the frame-rate target, restore it with headroom");
+REXCVAR_DEFINE_DOUBLE(gta4_dynamic_draw_distance_min, 0.7, "GTA IV/Graphics/LOD",
+                      "Lowest fraction of the configured draw distance the dynamic controller may use")
+    .range(0.25, 1.0);
+// Written by the renderer's controller; multiplies gta4_draw_distance_scale.
+REXCVAR_DEFINE_DOUBLE(gta4_draw_distance_dynamic_factor, 1.0, "GTA IV/Graphics/LOD",
+                      "Current dynamic draw-distance factor (managed automatically)")
+    .range(0.25, 1.0);
 REXCVAR_DEFINE_DOUBLE(gta4_draw_distance_scale, 3.0, "GTA IV/Graphics/LOD",
                       "Multiplier applied through GTA IV's built-in world-distance input")
     .range(0.25, 4.0);

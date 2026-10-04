@@ -19,11 +19,18 @@
 # Below-console world detail: the render thread replays every draw, so draw
 # count is what sets the frame rate on Snapdragon 865 (stock ~5800 draws,
 # this profile ~1400-1700). Shadows were ~45% of all draws.
---gta4_draw_distance_scale=0.4
+--gta4_draw_distance_scale=1.0
+# Console draw distance, lowered automatically (down to 70%) only while
+# frames miss the 30 fps budget.
+--gta4_dynamic_draw_distance=true
+--gta4_dynamic_draw_distance_min=0.7
 --gta4_shadow_map_base_size=256
 --gta4_shadow_distance_scale=1.0
 --gta4_reflection_resolution=original
 --gta4_reflection_capture_distance=near
+# 4x MSAA on the low-resolution water/mirror captures is invisible but costs
+# resolves and bandwidth on the tiler.
+--gta4_reflection_aa=off
 # Do NOT lower: the patched quality-table field is not the cascade count, and
 # any value below stock removes ped/vehicle shadows and makes tree shadows flicker.
 #--gta4_shadow_cascade_count=2

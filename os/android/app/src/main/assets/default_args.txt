@@ -2,7 +2,9 @@
 --gta4_native_upscaler=fsr1
 --gta4_fsr1_quality=quality
 --gta4_native_anti_aliasing=fxaa
---gta4_draw_distance_scale=0.4
+--gta4_draw_distance_scale=1.0
+--gta4_dynamic_draw_distance=true
+--gta4_dynamic_draw_distance_min=0.7
 --gta4_shadow_map_base_size=256
 --gta4_shadow_distance_scale=1.0
 --gta4_reflection_resolution=original
