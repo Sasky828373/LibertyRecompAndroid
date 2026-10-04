@@ -324,6 +324,10 @@ inline void ClearDirtyStateDelta(DirtyStateDelta& delta) {
   delta.dynamic_state_mask.words.clear();
 }
 
+inline void BuildDirtyStateDeltaUnchecked(const NativeDirtyWords& dirty_words,
+                                          const DirtyStateLayout& layout,
+                                          DirtyStateDelta& delta, DirtyDeltaScratch& scratch);
+
 inline DirtyLayoutValidationResult BuildDirtyStateDelta(const NativeDirtyWords& dirty_words,
                                                         const DirtyStateLayout& layout,
                                                         DirtyStateDelta& delta,
@@ -333,6 +337,15 @@ inline DirtyLayoutValidationResult BuildDirtyStateDelta(const NativeDirtyWords& 
     ClearDirtyStateDelta(delta);
     return validation;
   }
+  BuildDirtyStateDeltaUnchecked(dirty_words, layout, delta, scratch);
+  return validation;
+}
+
+// For a layout the caller has already validated once (a fixed constexpr
+// layout): rebuilds the delta in place, reusing every vector's capacity.
+inline void BuildDirtyStateDeltaUnchecked(const NativeDirtyWords& dirty_words,
+                                          const DirtyStateLayout& layout,
+                                          DirtyStateDelta& delta, DirtyDeltaScratch& scratch) {
 
   dirty_state_delta_internal::BuildRangeSet(dirty_words, layout.vertex_constants,
                                             delta.vertex_constant_ranges, scratch);
@@ -350,7 +363,6 @@ inline DirtyLayoutValidationResult BuildDirtyStateDelta(const NativeDirtyWords& 
                                                delta.fixed_state_mask);
   dirty_state_delta_internal::BuildElementMask(dirty_words, layout.dynamic_state,
                                                delta.dynamic_state_mask);
-  return validation;
 }
 
 inline DirtyDeltaBuildResult BuildDirtyStateDelta(const NativeDirtyWords& dirty_words,

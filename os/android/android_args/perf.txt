@@ -21,10 +21,12 @@
 # this profile ~1400-1700). Shadows were ~45% of all draws.
 --gta4_draw_distance_scale=0.4
 --gta4_shadow_map_base_size=256
---gta4_shadow_distance_scale=0.2
+--gta4_shadow_distance_scale=1.0
 --gta4_reflection_resolution=original
 --gta4_reflection_capture_distance=near
---gta4_shadow_cascade_count=2
+# Do NOT lower: the patched quality-table field is not the cascade count, and
+# any value below stock removes ped/vehicle shadows and makes tree shadows flicker.
+#--gta4_shadow_cascade_count=2
 
 # A steady 30 is better on a handheld than an uneven 40-60 (0 | 30 | 40 | 60 | 120)
 --gta4_frame_limit=30

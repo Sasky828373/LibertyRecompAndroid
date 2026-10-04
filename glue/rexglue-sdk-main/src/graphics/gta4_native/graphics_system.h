@@ -3,6 +3,7 @@
 #include "native_triangle_fan.h"
 #include "native_deferred_release.h"
 #include "native_flat_set.h"
+#include "native_command_bytes.h"
 #include "native_owned_commands.h"
 
 #include <array>
@@ -403,6 +404,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
 
   struct NativeTextureImage;
   struct NativeCommand {
+    // User-provided so pool construction does not zero the whole ~3 KB
+    // command before running the member initializers below.
+    NativeCommand() {}
     std::shared_ptr<const TemporalCommand> temporal_instance;
     NativeTextureImage* temporal_scene_binding = nullptr;
     uint32_t temporal_scene_stage = UINT32_MAX;
@@ -419,7 +423,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t light_trace_id = 0;
     uint32_t light_trace_technique = 0xFFFFFFFFu;
     uint32_t light_trace_mode = 0;
-    std::vector<uint8_t> bytes;
+    NativeCommandBytes bytes;
     std::vector<uint8_t> payload;
     NativeDeviceSnapshot device_snapshot;
     NativeShaderConstantDelta shader_constant_delta;
@@ -1729,6 +1733,22 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::shared_ptr<const NativeShaderState> last_shader_snapshot_;
   std::shared_ptr<const NativePipelineState> SnapshotPipeline(const NativeCommand&, bool);
   NativeOwnedCommands<NativeCommand> current_frame_;
+  DirtyStateDelta producer_dirty_delta_;     // command_capture_mutex_
+  struct BufferCaptureCacheSlot {
+    uint32_t handle = 0;
+    uint32_t flags = 0;
+    uint32_t address = 0;
+    uint32_t size = 0;
+    uint64_t epoch = 0;
+    std::weak_ptr<const NativeBufferResource> resource;
+  };
+  std::array<BufferCaptureCacheSlot, 4096> buffer_capture_cache_{};  // command_capture_mutex_
+  std::atomic<uint64_t> buffer_resources_epoch_{1};
+  void ForgetBufferCapture(uint32_t handle) {
+    BufferCaptureCacheSlot& slot = buffer_capture_cache_[(handle >> 4) & (buffer_capture_cache_.size() - 1)];
+    if (slot.handle == handle) slot.handle = 0;
+  }
+  DirtyDeltaScratch producer_dirty_scratch_;  // command_capture_mutex_
   // Pipelined recording: the worker assembles frame N+1 while the recorder
   // thread records and submits frame N from current_frame_. Commands that
   // touch recorder-owned state wait for the recorder to go idle, swap the
@@ -1749,6 +1769,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void RunReleaseEffects(std::vector<NativeReleaseEffect>& effects);
   void ApplyReleaseResourceEffects(const NativeReleaseEffect& effect);
   void FinishPresent(NativeCommand& command, const PresentCommand& present);
+  void SignalGuestFrameComplete(uint32_t device, uint32_t frame);
   NativeOwnedCommands<NativeCommand> assembly_frame_;
   // Worker-side protection visible to the recorder's eviction passes. Guarded
   // by worker_protection_mutex_ together with the worker batch and cursor.

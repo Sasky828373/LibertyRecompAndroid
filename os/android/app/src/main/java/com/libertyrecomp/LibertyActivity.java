@@ -21,6 +21,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -47,6 +48,7 @@ public class LibertyActivity extends SDLActivity {
     private static final String TAG = "LibertyRecomp";
     private static final String RESOURCES = "Resources";
     private static final String RESOURCES_STAMP = ".stamp";
+    private static final String DEFAULT_ARGS = "default_args.txt";
 
     private String[] mArguments = new String[0];
     private String mDriverMode = DriverBridge.TURNIP;
@@ -91,13 +93,98 @@ public class LibertyActivity extends SDLActivity {
         setenv("XDG_DATA_HOME", dataRoot.getAbsolutePath());
         setenv("HOME", dataRoot.getAbsolutePath());
         setenv("REX_RESOURCES_DIR", resources.getAbsolutePath());
-        mArguments = readArguments(new File(dataRoot, "args.txt"));
+        // Turnip's GMEM (tiled) mode loses ~15% on this renderer's many small
+        // passes and resolves; direct system-memory rendering is faster on the
+        // Adreno 650. env.txt may override it.
+        setenv("TU_DEBUG", "sysmem");
+        applyEnvironmentFile(new File(dataRoot, "env.txt"));
+        File argsFile = new File(dataRoot, "args.txt");
+        if (!argsFile.isFile()) {
+            // First launch: start from the tuned handheld profile bundled in
+            // the APK; the copy stays editable next to LibertyRecomp/.
+            try {
+                copyAssetTree(getAssets(), DEFAULT_ARGS, argsFile);
+            } catch (IOException e) {
+                Log.e(TAG, "writing default args failed", e);
+            }
+        }
+        List<String> arguments = new ArrayList<>(Arrays.asList(readArguments(argsFile)));
+        addInstallSources(new File(dataRoot, "install"), arguments);
+        mArguments = arguments.toArray(new String[0]);
         String driver = readFirstLine(new File(dataRoot, "driver.txt"));
         if (driver != null && driver.trim().equals(DriverBridge.SYSTEM)) {
             mDriverMode = DriverBridge.SYSTEM;
         }
         Log.i(TAG, "data=" + dataRoot + " resources=" + resources
                 + " args=" + mArguments.length + " driver=" + mDriverMode);
+    }
+
+    /**
+     * Optional NAME=value lines (e.g. Turnip's TU_DEBUG) exported before the
+     * Vulkan driver loads; '#' starts a comment.
+     */
+    private static void applyEnvironmentFile(File file) {
+        if (!file.isFile()) {
+            return;
+        }
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                int equals = line.indexOf('=');
+                if (line.isEmpty() || line.startsWith("#") || equals <= 0) {
+                    continue;
+                }
+                String name = line.substring(0, equals).trim();
+                String value = line.substring(equals + 1).trim();
+                setenv(name, value);
+                Log.i(TAG, "env " + name + "=" + value);
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "reading " + file + " failed", e);
+        }
+    }
+
+    /**
+     * The SDL file picker returns content:// URIs the installer cannot read, so
+     * sources are taken from files/install/ (writable over USB without any
+     * storage permission): the first *.iso is the disc, any other file the
+     * title update. Explicit --install_* lines in args.txt win.
+     */
+    private static void addInstallSources(File dir, List<String> arguments) {
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            return;
+        }
+        for (String argument : arguments) {
+            if (argument.startsWith("--install_")) {
+                return;
+            }
+        }
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return;
+        }
+        File disc = null;
+        File update = null;
+        for (File file : files) {
+            if (!file.isFile() || file.getName().startsWith(".")) {
+                continue;
+            }
+            if (file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".iso")) {
+                if (disc == null) disc = file;
+            } else if (update == null || file.length() > update.length()) {
+                update = file;
+            }
+        }
+        if (disc != null) {
+            arguments.add("--install_game_source=" + disc.getAbsolutePath());
+            Log.i(TAG, "install disc " + disc);
+        }
+        if (update != null) {
+            arguments.add("--install_update_source=" + update.getAbsolutePath());
+            Log.i(TAG, "install title update " + update);
+        }
     }
 
     private static void setenv(String name, String value) {
