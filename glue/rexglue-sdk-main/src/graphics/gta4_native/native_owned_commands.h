@@ -92,6 +92,7 @@ class NativeCommandPool {
   class FixedResource final : public std::pmr::memory_resource {
    public:
     ~FixedResource() override {
+      live_ -= local_count_;  // Taken by the allocator cache, never handed out.
       // Destruction occurs after the render worker has joined and owners drain.
       assert(live_ == 0);
       for (Slab* slab = slabs_; slab;) {
@@ -115,26 +116,38 @@ class NativeCommandPool {
    private:
     void* do_allocate(size_t bytes, size_t alignment) override {
       if (bytes != sizeof(T) || alignment != alignof(T)) throw std::bad_alloc();
-      std::lock_guard lock(mutex_);
-      if (!free_) {
-        // Nothing changes until allocation succeeds. Empty storage is not a T.
-        Slab* slab = new Slab;
-        slab->next = slabs_;
-        slabs_ = slab;
-        ++slab_count_;
-        for (Slot& slot : slab->slots) {
-          slot.next = free_;
-          free_ = &slot;
+      // Allocation is single-threaded (the producer holds its capture mutex),
+      // while slots return from the retirement thread. The allocator takes the
+      // whole shared free list under one lock and then hands slots out from a
+      // private list, instead of locking for every command.
+      if (!local_) {
+        std::lock_guard lock(mutex_);
+        if (!free_) {
+          // Nothing changes until allocation succeeds. Empty storage is not a T.
+          Slab* slab = new Slab;
+          slab->next = slabs_;
+          slabs_ = slab;
+          ++slab_count_;
+          for (Slot& slot : slab->slots) {
+            slot.next = free_;
+            free_ = &slot;
+          }
         }
+        size_t taken = 0;
+        for (Slot* slot = free_; slot; slot = slot->next) ++taken;
+        local_ = free_;
+        local_count_ = taken;
+        free_ = nullptr;
+        live_ += taken;  // Counted as live while cached; never returned uncached.
       }
-      Slot* slot = free_;
-      free_ = slot->next;
-      ++live_;
+      Slot* slot = local_;
+      local_ = slot->next;
+      --local_count_;
       // Slots come back from the retirement thread's core. Construction
       // zero-fills the whole command, so start owning the next free slot's
       // lines now; the following allocation is microseconds away.
-      if (free_) {
-        const auto* next = reinterpret_cast<const char*>(free_);
+      if (local_) {
+        const auto* next = reinterpret_cast<const char*>(local_);
         for (size_t offset = 0; offset < sizeof(Slot); offset += 64)
           __builtin_prefetch(next + offset, 1);
       }
@@ -156,6 +169,8 @@ class NativeCommandPool {
       return this == &other;
     }
     mutable std::mutex mutex_;
+    Slot* local_ = nullptr;  // Allocator-private free slots.
+    size_t local_count_ = 0;
     Slab* slabs_ = nullptr;
     Slot* free_ = nullptr;
     size_t slab_count_ = 0;

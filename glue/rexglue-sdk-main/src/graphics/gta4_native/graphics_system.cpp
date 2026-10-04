@@ -170,8 +170,8 @@ REXCVAR_DEFINE_UINT32(gta4_native_water_reflection_interval, 1, "GTA IV/Graphics
                       "Re-render the water reflection every N frames (1 = every frame); in between "
                       "the previous reflection is reused");
 REXCVAR_DEFINE_BOOL(gta4_native_stage_draw_commands, true, "GTA IV/Graphics/Native Renderer",
-                    "Publish captured draws to the render worker in batches (one render queue "
-                    "lock per batch instead of per draw)");
+                    "Publish captured title commands to the render worker in batches (one "
+                    "render queue lock per batch instead of per command)");
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
@@ -3615,17 +3615,19 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
 
   CommandHeader title_header{};
   std::memcpy(&title_header, title_command, sizeof(title_header));
-  // Draws never make the title wait on the worker, so they can sit in a
-  // producer-side batch; every other command flushes the batch first, keeping
-  // the queue order identical.
+  // Batch asynchronous commands on the producer side; anything published
+  // immediately publishes the batch first, keeping the queue order identical.
   constexpr size_t kStagedDrawBatch = 32;
   // The worker sleeps only on an empty queue; wake it per batch and at frame
   // boundaries rather than per command (a futex round trip each).
   constexpr size_t kWorkerWakeBatch = 32;
-  const bool draw_command = native_command.type == CommandType::kDrawPrimitive ||
-                            native_command.type == CommandType::kDrawPrimitiveUp ||
-                            native_command.type == CommandType::kDrawIndexedPrimitive;
-  if (draw_command && !phone_envelope && !tv_envelope && !fire_envelope && !profile_transport &&
+  // Commands submitted here are asynchronous: the title never waits for them
+  // (ExecuteTitleCommand is the synchronous path and publishes the batch).
+  // Presents and device lifetime changes still publish immediately.
+  const bool stageable = native_command.type != CommandType::kPresent &&
+                         native_command.type != CommandType::kDeviceCreated &&
+                         native_command.type != CommandType::kDeviceDestroyed;
+  if (stageable && !phone_envelope && !tv_envelope && !fire_envelope && !profile_transport &&
       REXCVAR_GET(gta4_native_stage_draw_commands)) {
     staged_draw_commands_.push_back(std::move(native_command_owner));
     if (staged_draw_commands_.size() < kStagedDrawBatch) {
