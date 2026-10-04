@@ -162,7 +162,7 @@ REXCVAR_DEFINE_BOOL(gta4_native_ubo_layout, true, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_BOOL(gta4_native_skip_attachment_barriers, false, "GTA IV/Graphics/Native Renderer",
                     "Skip attachment-to-same-attachment layout barriers between rendering scopes "
                     "(Turnip keeps draw order across scopes)");
-REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, false, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
 REXCVAR_DEFINE_UINT32(gta4_native_debug_skip_gpu_range, 0, "GTA IV/Diagnostics",
