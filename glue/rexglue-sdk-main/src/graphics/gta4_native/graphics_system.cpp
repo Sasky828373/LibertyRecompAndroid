@@ -3,6 +3,10 @@
 #include "core/font_atlas.h"
 #include "native_profile_labels.h"
 #include "graphics_system.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <pthread.h>
+#endif
 #include "native_fixed_state_hash.h"
 #include "native_cpu_profile_scope.h"
 #include "native_profile_shader_category.h"
@@ -129,6 +133,16 @@ REXCVAR_DEFINE_STRING(gta4_depth_handoff_transport, "buffer", "GTA IV/Graphics/N
                       "experimental attachment load/store preservation")
     .allowed({"buffer", "attachment"});
 
+REXCVAR_DEFINE_BOOL(gta4_native_async_constant_release, true, "GTA IV/Graphics/Native Renderer",
+                    "Release a completed frame's constant versions on a background thread");
+REXCVAR_DEFINE_BOOL(gta4_native_fast_capacity, true, "GTA IV/Graphics/Native Renderer",
+                    "Plan frame upload capacity with reusable flat sets");
+REXCVAR_DEFINE_BOOL(gta4_native_batched_worker_wake, true, "GTA IV/Graphics/Native Renderer",
+                    "Wake the render worker per command batch and frame instead of per command");
+REXCVAR_DEFINE_BOOL(gta4_native_pipeline_serialize, false, "GTA IV/Diagnostics",
+                    "Wait for each pipelined frame to finish recording before assembling the next");
+REXCVAR_DEFINE_BOOL(gta4_native_pipelined_recording, true, "GTA IV/Graphics/Native Renderer",
+                    "Record and submit each frame on a second thread while the worker assembles the next");
 REXCVAR_DEFINE_BOOL(gta4_native_async_command_retire, true, "GTA IV/Graphics/Native Renderer",
                     "Destroy recorded frame commands on a background thread");
 REXCVAR_DEFINE_BOOL(gta4_vertex_color_as_rgba, false, "GTA IV/Diagnostics",
@@ -333,6 +347,21 @@ extern "C" __attribute__((visibility("default"))) int rex_gta4_native_memory_pro
 }
 
 namespace {
+
+// render_mutex_ critical sections last microseconds, but bionic parks a
+// contended locker in the kernel at once and the futex wakeup costs far more
+// than the wait. Spin briefly before blocking.
+std::unique_lock<std::mutex> LockRenderQueue(std::mutex& mutex) {
+  std::unique_lock lock(mutex, std::defer_lock);
+  for (int attempt = 0; attempt < 512; ++attempt) {
+    if (lock.try_lock()) return lock;
+#if defined(__aarch64__)
+    asm volatile("yield");
+#endif
+  }
+  lock.lock();
+  return lock;
+}
 
 namespace transition = rex::diagnostics::gta4_transition;
 namespace gpu_flight = rex::diagnostics::gpu_flight;
@@ -3492,7 +3521,7 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
   bool wake_worker = false;
   {
     const uint64_t queue_lock_begin = profile_transport ? profile::CpuTick() : 0;
-    std::unique_lock lock(render_mutex_);
+    std::unique_lock lock = LockRenderQueue(render_mutex_);
     const uint64_t queue_lock_end = profile_transport ? profile::CpuTick() : 0;
     producer_waiting_ = render_queue_.size() >= kMaximumQueuedCommands || queued_title_presents_ >= 2;
     render_condition_.wait(lock, [this]() {
@@ -3517,7 +3546,13 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
           native_command.diagnostic_submit_sequence, native_command.diagnostic_producer_epoch,
           CommandTypeName(native_command.type), render_queue_.size()));
     }
-    wake_worker = render_queue_.empty();
+    // The worker sleeps only on an empty queue. Waking it for every command
+    // turned each submit into a futex round trip and a render_mutex_ fight;
+    // wake it per batch and at frame boundaries instead.
+    constexpr size_t kWorkerWakeBatch = 32;
+    wake_worker = render_queue_.size() + 1 == kWorkerWakeBatch ||
+                  title_header.type == CommandType::kPresent ||
+                  (render_queue_.empty() && !REXCVAR_GET(gta4_native_batched_worker_wake));
     if(profile_transport) {
       const uint64_t enqueued = profile::CpuTick();
       native_command.profile_transport = {enqueued, enqueued-capture_begin,
@@ -3681,7 +3716,7 @@ bool Gta4NativeGraphicsSystem::ExecuteTitleCommand(uint32_t title_id, uint32_t a
   if (tv_envelope) native_command.tv_trace = std::make_shared<TvTraceContext>(tv_context);
   const auto synchronous = native_command.synchronous;
   {
-    std::unique_lock lock(render_mutex_);
+    std::unique_lock lock = LockRenderQueue(render_mutex_);
     producer_waiting_ = render_queue_.size() >= kMaximumQueuedCommands || queued_title_presents_ >= 2;
     render_condition_.wait(lock, [this]() {
       return !render_worker_running_ ||
@@ -5599,6 +5634,31 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
   };
   size_t queued_after_batch = 0;
   worker_command_batch_.reserve(32);
+  pipelined_recording_ = REXCVAR_GET(gta4_native_pipelined_recording);
+  if (pipelined_recording_) {
+    {
+      std::lock_guard lock(frame_recorder_mutex_);
+      frame_recorder_stop_ = false;
+      frame_recorder_busy_ = false;
+      frame_recorder_job_.reset();
+    }
+    frame_recorder_ = std::thread([this]() { FrameRecorderMain(); });
+    REXLOG_INFO("gta4-native: pipelined frame recording enabled");
+  }
+  // Retains a finished command for the frame being assembled. Pipelined
+  // assembly is published to the recorder only at Present.
+  auto retain_assembled = [this](NativeCommandPool<NativeCommand>::Owner& owner, bool protect) {
+    if (pipelined_recording_) {
+      if (protect) {
+        std::lock_guard lock(worker_protection_mutex_);
+        AddProtectedTextureGenerations(*owner, assembly_texture_protection_);
+      }
+      assembly_frame_.push_back(std::move(owner));
+    } else {
+      if (protect) AddProtectedTextureGenerations(*owner, frame_texture_protection_);
+      current_frame_.push_back(std::move(owner));
+    }
+  };
   while (true) {
     size_t queued_after_pop = 0;
     bool wake_producer = false;
@@ -5606,9 +5666,12 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
         g_native_profile_capture_requested.load(std::memory_order_acquire);
     const uint64_t idle_begin = profile_transport ? profile::CpuTick() : 0;
     if (worker_command_cursor_ == worker_command_batch_.size()) {
-      worker_command_batch_.clear();
-      worker_command_cursor_ = 0;
-      std::unique_lock lock(render_mutex_);
+      {
+        std::lock_guard protection_lock(worker_protection_mutex_);
+        worker_command_batch_.clear();
+        worker_command_cursor_ = 0;
+      }
+      std::unique_lock lock = LockRenderQueue(render_mutex_);
       render_condition_.wait(
           lock, [this]() { return !render_worker_running_ || !render_queue_.empty(); });
       if (render_queue_.empty()) {
@@ -5616,6 +5679,7 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
         continue;
       }
       const size_t count = std::min<size_t>(32, render_queue_.size());
+      std::lock_guard protection_lock(worker_protection_mutex_);
       for (size_t i = 0; i < count; ++i) {
         worker_command_batch_.push_back(render_queue_.TakeFront());
         QueueTextureProtection(worker_command_batch_.back(), false);
@@ -5623,11 +5687,26 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
       queued_after_batch = render_queue_.size();
       wake_producer = producer_waiting_ && queued_title_presents_ < 2;
     }
-    auto command_owner = worker_command_batch_.Take(worker_command_cursor_++);
+    NativeCommandPool<NativeCommand>::Owner command_owner;
+    {
+      std::lock_guard protection_lock(worker_protection_mutex_);
+      command_owner = worker_command_batch_.Take(worker_command_cursor_++);
+      active_worker_command_ = command_owner.get();
+    }
     NativeCommand& command = *command_owner;
+    // Commands are written on the guest core and are ~3 KB each; pulling the
+    // next one in while this one records hides the cross-core misses.
+    if (worker_command_cursor_ < worker_command_batch_.size()) {
+      const auto* next = reinterpret_cast<const char*>(
+          &worker_command_batch_[worker_command_cursor_]);
+      for (size_t offset = 0; offset < sizeof(NativeCommand); offset += 64)
+        __builtin_prefetch(next + offset);
+    }
     queued_after_pop = queued_after_batch + worker_command_batch_.size() - worker_command_cursor_;
-    active_worker_command_ = &command;
-    const auto clear_active_command = MakeScopeExit([&] { active_worker_command_ = nullptr; });
+    const auto clear_active_command = MakeScopeExit([&] {
+      std::lock_guard protection_lock(worker_protection_mutex_);
+      active_worker_command_ = nullptr;
+    });
     if (wake_producer) render_condition_.notify_all();
     const uint64_t dequeued = (profile_transport || command.profile_transport.enqueued) ? profile::CpuTick() : 0;
     if(profile_transport || command.profile_transport.enqueued) {
@@ -5643,8 +5722,39 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
         command.type == CommandType::kDrawPrimitiveUp ||
         command.type == CommandType::kDrawIndexedPrimitive ||
         command.type == CommandType::kClear || command.type == CommandType::kResolve ||
-        command.type == CommandType::kDepthSurfaceHandoff || command.type == CommandType::kPresent)
-      BeginModernShaderFrame();
+        command.type == CommandType::kDepthSurfaceHandoff || command.type == CommandType::kPresent) {
+      // The modern-shader frame policy is recorder state; the recorder begins
+      // it for each published frame.
+      if (pipelined_recording_) assembly_modern_frame_pending_ = true;
+      else BeginModernShaderFrame();
+    }
+
+    // Commands that read or write recorder-owned state run on the worker only
+    // while the recorder is idle, against the assembled frame swapped into
+    // current_frame_, exactly as in serial recording.
+    const bool recorder_sync =
+        pipelined_recording_ &&
+        (command.type == CommandType::kDeviceCreated ||
+         command.type == CommandType::kDeviceDestroyed ||
+         command.type == CommandType::kRegisterShader ||
+         command.type == CommandType::kRegisterReflectionTarget ||
+         command.type == CommandType::kTextureLock);
+    if (recorder_sync) {
+      const uint64_t wait_begin = profile::CpuTick();
+      WaitForFrameRecorderIdle();
+      pipeline_sync_wait_ticks_ += profile::CpuTick() - wait_begin;
+      ++pipeline_sync_type_counts_[std::min<size_t>(size_t(command.type), 63)];
+      ++pipelined_sync_waits_;
+      SwapAssemblyFrame();
+      RunReleaseEffects(assembly_release_effects_);
+      if (assembly_modern_frame_pending_) {
+        BeginModernShaderFrame();
+        assembly_modern_frame_pending_ = false;
+      }
+    }
+    const auto restore_assembly = MakeScopeExit([&] {
+      if (recorder_sync) SwapAssemblyFrame();
+    });
 
     if (command.tv_trace) {
       if (!tv_lifecycle_trace_ || tv_lifecycle_trace_->run != command.tv_trace->run)
@@ -5792,11 +5902,23 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
         break;
       }
       case CommandType::kTemporalUpdate:
-        current_frame_.push_back(std::move(command_owner));
+        retain_assembled(command_owner, false);
         break;
       case CommandType::kReleaseResource: {
         ReleaseResourceCommand release{};
         std::memcpy(&release, command.bytes.data(), sizeof(release));
+        if (pipelined_recording_) {
+          // Release touches recorder-owned surfaces and reflection aliases.
+          // Its effects run on the recorder before this frame is recorded;
+          // nothing the worker assembles in between reads that state.
+          NativeReleaseEffect effect;
+          effect.release = release;
+          effect.released_texture_generation = command.released_texture_generation;
+          effect.frame_was_empty = assembly_frame_.empty();
+          if (!effect.frame_was_empty) retain_assembled(command_owner, true);
+          assembly_release_effects_.push_back(effect);
+          break;
+        }
         for (const auto& image : native_surface_images_) {
           if (!image || image->descriptor.handle != release.resource) {
             continue;
@@ -5939,14 +6061,14 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                 marker.caller, render_phase_stack.size(), matched);
           }
         }
-        AddProtectedTextureGenerations(command, frame_texture_protection_);
-        current_frame_.push_back(std::move(command_owner));
+        retain_assembled(command_owner, true);
         break;
       }
       case CommandType::kPresent: {
         PresentCommand present;
         std::memcpy(&present, command.bytes.data(), sizeof(present));
-        if (present.diagnostic_trace && current_frame_.empty()) {
+        if (present.diagnostic_trace &&
+            (pipelined_recording_ ? assembly_frame_ : current_frame_).empty()) {
           present.diagnostic_force_content_probe = 1;
           REXLOG_INFO(
               "gta4-tv-probe-trigger: session={} present={} frame={} origin={} "
@@ -5969,29 +6091,61 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
           REXLOG_WARN(
               "gta4-startup-present-after-texture-lock: frame={} commands={} "
               "frontbuffer={:08X} generation={}",
-              present.submitted_frame, current_frame_.size(), present.frontbuffer_texture,
+              present.submitted_frame,
+              (pipelined_recording_ ? assembly_frame_ : current_frame_).size(),
+              present.frontbuffer_texture,
               command.present_source ? command.present_source->generation : 0);
         }
-        log_frame_batch("present", command, present.submitted_frame, queued_after_pop);
-        const bool published =
-            PublishFrame(present, command.present_source, command.environmental_data);
-        {
-          std::lock_guard lock(render_mutex_);
-          if (queued_title_presents_) --queued_title_presents_;
-        }
-        render_condition_.notify_all();
-        semantic_light_setup_lineage_.OnBoundary(NativeLightingBatchBoundary::kGuestPresent);
-        modern_shader_frame_.EndGuestFrame();
-        if (!published) {
-          REXLOG_ERROR("gta4-native: failed to publish frame {}", present.submitted_frame);
-        }
-        uint32_t* completed_frame =
-            memory_->TranslateVirtual<uint32_t*>(present.device + kCompletedFrameOffset);
-        if (completed_frame) {
-          *completed_frame = __builtin_bswap32(present.submitted_frame);
-        }
-        ClearNativeFrameCommands();
         startup_present_follows_texture_lock_flush = false;
+        if (pipelined_recording_) {
+          // Hand the assembled frame to the recorder and start on the next.
+          const uint64_t handoff_wait_begin = profile::CpuTick();
+          WaitForFrameRecorderIdle();
+          pipeline_present_wait_ticks_ += profile::CpuTick() - handoff_wait_begin;
+          SwapAssemblyFrame();
+          recording_release_effects_.swap(assembly_release_effects_);
+          recording_environmental_data_by_device_ = environmental_data_by_device_;
+          assembly_modern_frame_pending_ = false;
+          log_frame_batch("present", command, present.submitted_frame, queued_after_pop);
+#if REX_PLATFORM_ANDROID
+          // TEMP: pipeline stall telemetry (perf investigation).
+          if (++pipeline_report_frames_ == 120) {
+            const double ms_per_tick = 1000.0 / double(rex::chrono::Clock::QueryHostTickFrequency());
+            std::string types;
+            for (size_t i = 0; i < pipeline_sync_type_counts_.size(); ++i)
+              if (pipeline_sync_type_counts_[i])
+                types += fmt::format(" {}={}", CommandTypeName(CommandType(i)),
+                                     pipeline_sync_type_counts_[i]);
+            __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                                "pipeline: 120 frames sync-waits=%llu sync-wait=%.1fms/f "
+                                "handoff-wait=%.1fms/f types:%s",
+                                (unsigned long long)pipelined_sync_waits_,
+                                pipeline_sync_wait_ticks_ * ms_per_tick / 120.0,
+                                pipeline_present_wait_ticks_ * ms_per_tick / 120.0, types.c_str());
+            pipeline_report_frames_ = 0;
+            pipelined_sync_waits_ = 0;
+            pipeline_sync_wait_ticks_ = 0;
+            pipeline_present_wait_ticks_ = 0;
+            pipeline_sync_type_counts_.fill(0);
+          }
+#endif
+          {
+            // The recorder owns the Present command from here on.
+            std::lock_guard protection_lock(worker_protection_mutex_);
+            active_worker_command_ = nullptr;
+          }
+          {
+            std::lock_guard lock(frame_recorder_mutex_);
+            frame_recorder_job_ = NativeRecorderJob{std::move(command_owner), present};
+            frame_recorder_busy_ = true;
+          }
+          frame_recorder_condition_.notify_all();
+          // TEMP diagnostic: serialize the pipeline without changing its code path.
+          if (REXCVAR_GET(gta4_native_pipeline_serialize)) WaitForFrameRecorderIdle();
+          break;
+        }
+        log_frame_batch("present", command, present.submitted_frame, queued_after_pop);
+        FinishPresent(command, present);
         break;
       }
       case CommandType::kDrawPrimitive:
@@ -6065,14 +6219,15 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
             command.environmental_data_hash = environmental_data_hash_by_device_[device];
           }
         }
-        if (command.type == CommandType::kDrawPrimitive ||
-            command.type == CommandType::kDrawPrimitiveUp ||
-            command.type == CommandType::kDrawIndexedPrimitive) {
+        // Prewarming resolves recorder-owned surfaces and pipeline caches.
+        if (!pipelined_recording_ &&
+            (command.type == CommandType::kDrawPrimitive ||
+             command.type == CommandType::kDrawPrimitiveUp ||
+             command.type == CommandType::kDrawIndexedPrimitive)) {
           TryPrewarmDrawPipeline(command);
         }
         if (command.phone_trace) TracePhoneNativeCommand("worker-finalized", command);
-        AddProtectedTextureGenerations(command, frame_texture_protection_);
-        current_frame_.push_back(std::move(command_owner));
+        retain_assembled(command_owner, true);
         startup_present_follows_texture_lock_flush = false;
         break;
       }
@@ -6082,8 +6237,18 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
     }
   }
 
-  worker_command_batch_.clear();
-  worker_command_cursor_ = 0;
+  if (pipelined_recording_) {
+    StopFrameRecorder();
+    SwapAssemblyFrame();  // current_frame_ is empty once the recorder is idle.
+    assembly_release_effects_.clear();
+    recording_release_effects_.clear();
+    pipelined_recording_ = false;
+  }
+  {
+    std::lock_guard protection_lock(worker_protection_mutex_);
+    worker_command_batch_.clear();
+    worker_command_cursor_ = 0;
+  }
   ClearNativeFrameCommands();
   modern_shader_frame_.Reset();
   semantic_light_setup_lineage_.OnBoundary(NativeLightingBatchBoundary::kDeviceReset);
@@ -6095,6 +6260,118 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
     producer_waiting_ = false;
   }
   DestroyVulkanWorkerObjects();
+}
+
+void Gta4NativeGraphicsSystem::FinishPresent(NativeCommand& command,
+                                             const PresentCommand& present) {
+  const bool published = PublishFrame(present, command.present_source, command.environmental_data);
+  {
+    std::lock_guard lock(render_mutex_);
+    if (queued_title_presents_) --queued_title_presents_;
+  }
+  render_condition_.notify_all();
+  semantic_light_setup_lineage_.OnBoundary(NativeLightingBatchBoundary::kGuestPresent);
+  modern_shader_frame_.EndGuestFrame();
+  if (!published) {
+    REXLOG_ERROR("gta4-native: failed to publish frame {}", present.submitted_frame);
+  }
+  uint32_t* completed_frame =
+      memory_->TranslateVirtual<uint32_t*>(present.device + kCompletedFrameOffset);
+  if (completed_frame) {
+    *completed_frame = __builtin_bswap32(present.submitted_frame);
+  }
+  ClearNativeFrameCommands();
+}
+
+void Gta4NativeGraphicsSystem::FrameRecorderMain() {
+#if REX_PLATFORM_ANDROID
+  pthread_setname_np(pthread_self(), "GtaRecorder");
+#endif
+  while (true) {
+    std::optional<NativeRecorderJob> job;
+    {
+      std::unique_lock lock(frame_recorder_mutex_);
+      frame_recorder_condition_.wait(
+          lock, [this]() { return frame_recorder_stop_ || frame_recorder_job_.has_value(); });
+      if (!frame_recorder_job_) break;
+      job = std::move(frame_recorder_job_);
+      frame_recorder_job_.reset();
+    }
+    RunReleaseEffects(recording_release_effects_);
+    BeginModernShaderFrame();
+    FinishPresent(*job->present_command, job->present);
+    job.reset();
+    {
+      std::lock_guard lock(frame_recorder_mutex_);
+      frame_recorder_busy_ = false;
+    }
+    frame_recorder_condition_.notify_all();
+  }
+}
+
+void Gta4NativeGraphicsSystem::WaitForFrameRecorderIdle() {
+  std::unique_lock lock(frame_recorder_mutex_);
+  frame_recorder_condition_.wait(lock, [this]() { return !frame_recorder_busy_; });
+}
+
+void Gta4NativeGraphicsSystem::StopFrameRecorder() {
+  WaitForFrameRecorderIdle();
+  {
+    std::lock_guard lock(frame_recorder_mutex_);
+    frame_recorder_stop_ = true;
+  }
+  frame_recorder_condition_.notify_all();
+  if (frame_recorder_.joinable()) frame_recorder_.join();
+}
+
+void Gta4NativeGraphicsSystem::SwapAssemblyFrame() {
+  // Only while the recorder is idle: current_frame_ and its protection belong
+  // to the recorder otherwise.
+  current_frame_.swap(assembly_frame_);
+  std::lock_guard lock(worker_protection_mutex_);
+  frame_texture_protection_.swap(assembly_texture_protection_);
+}
+
+void Gta4NativeGraphicsSystem::RunReleaseEffects(std::vector<NativeReleaseEffect>& effects) {
+  for (const NativeReleaseEffect& effect : effects) ApplyReleaseResourceEffects(effect);
+  effects.clear();
+}
+
+void Gta4NativeGraphicsSystem::ApplyReleaseResourceEffects(const NativeReleaseEffect& effect) {
+  // Mirrors the serial kReleaseResource worker path. The command itself, when
+  // the frame was not empty, was already retained in that frame for recording.
+  const ReleaseResourceCommand& release = effect.release;
+  for (const auto& image : native_surface_images_) {
+    if (!image || image->descriptor.handle != release.resource) {
+      continue;
+    }
+    const memory::ResourceKind kind =
+        image->is_reflection ? memory::ResourceKind::kReflectionSurface
+        : (image->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? memory::ResourceKind::kDepthSurface
+                                                      : memory::ResourceKind::kColorSurface;
+    RecordNativeMemoryLifecycle(
+        kind, memory::LifecycleAction::kReleaseRequested, memory::LifecycleReason::kGuestRelease,
+        release.resource, image->materialized_serial, 0, image->depth_handoff_stencil_scratch_size,
+        0, image->allocation_size + image->depth_handoff_stencil_scratch_allocation_size,
+        image->last_used_frame, uint32_t(image->format));
+  }
+  const size_t retired_aliases =
+      EraseNativeReflectionRegistration(reflection_resources_, release.resource);
+  if (effect.frame_was_empty) {
+    QueueSurfaceImageRelease(release.resource);
+  }
+  if (effect.released_texture_generation) {
+    pending_texture_release_generations_.insert(effect.released_texture_generation);
+  }
+  if (effect.frame_was_empty && !command_buffer_submission_) {
+    ReleasePendingSurfaceImages();
+  }
+  if (retired_aliases && rex::diagnostics::IsEnabled(rex::diagnostics::Category::kNativeProbes)) {
+    REXLOG_INFO(
+        "gta4-native-reflection-lifecycle: point=release resource={:08X} "
+        "retired-aliases={} remaining-aliases={}",
+        release.resource, retired_aliases, reflection_resources_.size());
+  }
 }
 
 std::shared_ptr<const Gta4NativeGraphicsSystem::NativePipelineState>
@@ -7721,7 +7998,7 @@ bool Gta4NativeGraphicsSystem::ResetFrameConstantArena(uint32_t slot, uint64_t c
   const bool index_reset = unsubmitted ? arena.index.ResetUnsubmitted()
                                        : arena.index.ResetAfterCompletion(completed_submission);
   if (!index_reset || !arena.shared_versions.ResetGeneration() ||
-      !arena.immutable_bindings.Reset()) {
+      !ResetImmutableBindings(arena)) {
     return false;
   }
   arena.next_shared_identity = 1;
@@ -10141,12 +10418,16 @@ memory::Snapshot Gta4NativeGraphicsSystem::CollectNativeMemorySnapshot(uint32_t 
           sizeof(NativeCommand) + command.bytes.size() + command.payload.size();
     }
   }
-  command_transport_bytes += worker_command_batch_.handle_bytes();
-  for (size_t i = worker_command_cursor_; i < worker_command_batch_.size(); ++i) {
-    const auto& pending = worker_command_batch_[i];
-    command_transport_bytes += command_bytes(pending);
-    command_transport_logical += sizeof(NativeCommand) + pending.bytes.size() + pending.payload.size();
-    ++command_count;
+  {
+    std::lock_guard worker_lock(worker_protection_mutex_);
+    command_transport_bytes += worker_command_batch_.handle_bytes();
+    for (size_t i = worker_command_cursor_; i < worker_command_batch_.size(); ++i) {
+      const auto& pending = worker_command_batch_[i];
+      command_transport_bytes += command_bytes(pending);
+      command_transport_logical +=
+          sizeof(NativeCommand) + pending.bytes.size() + pending.payload.size();
+      ++command_count;
+    }
   }
   set_usage(memory::Category::kHostCommandTransport, command_transport_bytes,
             command_transport_logical, command_count);
@@ -10183,7 +10464,10 @@ memory::Snapshot Gta4NativeGraphicsSystem::CollectNativeMemorySnapshot(uint32_t 
     shader_logical += sizeof(NativeShader) + shader->filename.size() +
                       shader->vertex_inputs.size() * sizeof(NativeVertexInput);
   }
-  for (const auto& [handle, declaration] : vertex_declarations_) {
+  // The pipelined worker registers declarations while the recorder samples.
+  static const decltype(vertex_declarations_) kNoDeclarations;
+  for (const auto& [handle, declaration] :
+       pipelined_recording_ ? kNoDeclarations : vertex_declarations_) {
     (void)handle;
     if (!declaration) {
       continue;
@@ -15052,6 +15336,9 @@ bool Gta4NativeGraphicsSystem::AllocateUpload(VkDeviceSize size, VkDeviceSize al
 
 bool Gta4NativeGraphicsSystem::EnsureFrameUploadCapacity(
     const std::shared_ptr<const NativeTextureResource>& present_source) {
+  if (REXCVAR_GET(gta4_native_fast_capacity)) {
+    return EnsureFrameUploadCapacityFast(present_source);
+  }
   const profile::CpuPhaseScope profile_phase(profile::CpuPhase::kCapacity);
   const profile::CpuScope profile_scope(profile::CpuOp::kUploadCapacity);
 
@@ -15188,6 +15475,240 @@ bool Gta4NativeGraphicsSystem::EnsureFrameUploadCapacity(
       const bool index32 = (command.index_buffer->flags & kIndex32Flag) != 0;
       if (!persistent_direct_upload &&
           pending_index_uploads.insert({command.index_buffer.get(), index32}).second) {
+        NativePersistentBufferKey persistent_key{};
+        persistent_key.generation = command.index_buffer->generation;
+        persistent_key.kind =
+            index32 ? NativePersistentBufferKind::kIndex32 : NativePersistentBufferKind::kIndex16;
+        if (!persistent_buffers_enabled ||
+            (!persistent_direct_upload && !persistent_buffers_.contains(persistent_key))) {
+          add_allocation(VkDeviceSize(command.index_buffer->payload.size()),
+                         kNativePersistentBufferAlignment);
+        }
+      }
+      DrawIndexedPrimitiveCommand draw{};
+      if (command.bytes.size() >= sizeof(draw)) {
+        std::memcpy(&draw, command.bytes.data(), sizeof(draw));
+        const VkPrimitiveTopology topology = ConvertPrimitiveTopology(draw.primitive_type);
+        if (topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+            topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
+            topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
+          add_allocation(VkDeviceSize(draw.index_count) * sizeof(uint32_t), alignof(uint32_t));
+        }
+      }
+    }
+  }
+
+  if (overflow) {
+    REXLOG_ERROR(
+        "gta4-native-upload: frame requirements exceed maxStorageBufferRange={} draws={} "
+        "textures={} vertex-uploads={} index-uploads={}",
+        maximum_capacity, draw_count, pending_texture_generations.size(),
+        pending_vertex_uploads.size(), pending_index_uploads.size());
+    return false;
+  }
+  const VkDeviceSize desired_capacity = rex::round_up(
+      std::max(required_capacity, kNativeUploadBufferSize), kNativeUploadGrowthGranularity);
+  VkDeviceSize current_capacity = upload_buffer_.capacity;
+  for (const NativeUploadBuffer& block : overflow_upload_buffers_) {
+    current_capacity += block.capacity;
+  }
+
+  const VkDeviceSize first_oversized_offset =
+      rex::align(kDefaultVertexDataSize, maximum_allocation_alignment);
+  if (first_oversized_offset > maximum_capacity ||
+      maximum_allocation_size > maximum_capacity - first_oversized_offset) {
+    REXLOG_ERROR(
+        "gta4-native-upload: largest frame allocation {} with alignment {} exceeds "
+        "maxStorageBufferRange={}",
+        maximum_allocation_size, maximum_allocation_alignment, maximum_capacity);
+    return false;
+  }
+  const VkDeviceSize minimum_largest_block = first_oversized_offset + maximum_allocation_size;
+  bool largest_allocation_fits = upload_buffer_.capacity >= minimum_largest_block;
+  for (const NativeUploadBuffer& block : overflow_upload_buffers_) {
+    largest_allocation_fits |= block.capacity >= minimum_largest_block;
+  }
+  if (!largest_allocation_fits) {
+    const VkDeviceSize oversized_capacity = rex::round_up(
+        std::max(minimum_largest_block, kNativeUploadBufferSize), kNativeUploadGrowthGranularity);
+    overflow_upload_buffers_.emplace_back();
+    if (!CreateNativeUploadBuffer(oversized_capacity, overflow_upload_buffers_.back())) {
+      overflow_upload_buffers_.pop_back();
+      return false;
+    }
+    current_capacity += oversized_capacity;
+  }
+  while (current_capacity < desired_capacity) {
+    overflow_upload_buffers_.emplace_back();
+    if (!CreateNativeUploadBuffer(kNativeUploadBufferSize, overflow_upload_buffers_.back())) {
+      overflow_upload_buffers_.pop_back();
+      return false;
+    }
+    current_capacity += kNativeUploadBufferSize;
+  }
+
+  if (current_capacity > kNativeUploadBufferSize && desired_capacity <= current_capacity / 2) {
+    ++upload_underutilized_frame_count_;
+  } else {
+    upload_underutilized_frame_count_ = 0;
+  }
+  if (ShouldShrinkNativeUploadBuffer(current_capacity, kNativeUploadBufferSize, required_capacity,
+                                     desired_capacity, upload_underutilized_frame_count_,
+                                     kNativeUploadShrinkObservationFrames)) {
+    while (!overflow_upload_buffers_.empty() &&
+           current_capacity - overflow_upload_buffers_.back().capacity >= desired_capacity) {
+      current_capacity -= overflow_upload_buffers_.back().capacity;
+      DestroyNativeUploadBuffer(overflow_upload_buffers_.back());
+      overflow_upload_buffers_.pop_back();
+    }
+    upload_underutilized_frame_count_ = 0;
+  } else if (current_capacity <= desired_capacity) {
+    upload_underutilized_frame_count_ = 0;
+  }
+  return true;
+}
+
+bool Gta4NativeGraphicsSystem::EnsureFrameUploadCapacityFast(
+    const std::shared_ptr<const NativeTextureResource>& present_source) {
+  const profile::CpuPhaseScope profile_phase(profile::CpuPhase::kCapacity);
+  const profile::CpuScope profile_scope(profile::CpuOp::kUploadCapacity);
+
+  auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+  const ui::vulkan::VulkanDevice* vulkan_device =
+      vulkan_provider ? vulkan_provider->vulkan_device() : nullptr;
+  if (!vulkan_device || !upload_buffer_.buffer) {
+    return false;
+  }
+
+  const VkDeviceSize maximum_capacity = vulkan_device->properties().maxStorageBufferRange;
+  VkDeviceSize required_capacity = kDefaultVertexDataSize;
+  VkDeviceSize maximum_allocation_size = 0;
+  VkDeviceSize maximum_allocation_alignment = 1;
+  bool overflow = false;
+  auto add_allocation = [&](VkDeviceSize size, VkDeviceSize alignment) {
+    if (!size || overflow) {
+      return;
+    }
+    maximum_allocation_size = std::max(maximum_allocation_size, size);
+    maximum_allocation_alignment = std::max(maximum_allocation_alignment, alignment);
+    const VkDeviceSize aligned_offset = rex::align(required_capacity, alignment);
+    if (aligned_offset > maximum_capacity || size > maximum_capacity - aligned_offset) {
+      overflow = true;
+      return;
+    }
+    required_capacity = aligned_offset + size;
+  };
+
+  // Same plan as EnsureFrameUploadCapacity, deduplicated through reusable flat
+  // sets instead of node-based std::set/unordered_set (one heap node per draw).
+  auto& pending_texture_generations = capacity_texture_set_;
+  pending_texture_generations.Clear();
+  capacity_vertex_set_.Clear();
+  capacity_index_set_.Clear();
+  auto add_texture = [&](const std::shared_ptr<const NativeTextureResource>& texture) {
+    if (!texture || texture->gpu_produced || texture->payload.empty() ||
+        !pending_texture_generations.Insert(texture->generation) ||
+        native_texture_images_.contains(texture->generation)) {
+      return;
+    }
+    add_allocation(VkDeviceSize(texture->payload.size()), 16);
+  };
+  add_texture(present_source);
+
+  auto& pending_vertex_uploads = capacity_vertex_set_;
+  auto& pending_index_uploads = capacity_index_set_;
+  const bool persistent_buffers_enabled = REXCVAR_GET(gta4_native_persistent_buffers);
+  const bool persistent_direct_upload =
+      persistent_buffers_enabled && vulkan_device->properties().driverID == VK_DRIVER_ID_MOLTENVK;
+  uint32_t draw_count = 0;
+  for (const NativeCommand& command : current_frame_) {
+    add_texture(command.resolve_destination);
+    add_texture(command.depth_handoff_source);
+    for (const auto& texture : command.textures) {
+      add_texture(texture);
+    }
+
+    const bool is_draw = command.type == CommandType::kDrawPrimitive ||
+                         command.type == CommandType::kDrawPrimitiveUp ||
+                         command.type == CommandType::kDrawIndexedPrimitive;
+    if (!is_draw) {
+      continue;
+    }
+    ++draw_count;
+    uint32_t fan_primitive = 0, fan_count = 0;
+    if (command.type == CommandType::kDrawPrimitive) {
+      DrawPrimitiveCommand draw{}; std::memcpy(&draw,command.bytes.data(),sizeof(draw));
+      fan_primitive=draw.primitive_type; fan_count=draw.vertex_count;
+    } else if (command.type == CommandType::kDrawPrimitiveUp) {
+      DrawPrimitiveUpCommand draw{}; std::memcpy(&draw,command.bytes.data(),sizeof(draw));
+      fan_primitive=draw.primitive_type; fan_count=draw.vertex_count;
+    } else {
+      DrawIndexedPrimitiveCommand draw{}; std::memcpy(&draw,command.bytes.data(),sizeof(draw));
+      fan_primitive=draw.primitive_type; fan_count=draw.index_count;
+    }
+    if (fan_primitive == uint32_t(xenos::PrimitiveType::kTriangleFan) && fan_count > 2) {
+      add_allocation(VkDeviceSize(fan_count - 2) * 3 * sizeof(uint32_t), alignof(uint32_t));
+    }
+
+    if (command.type == CommandType::kDrawPrimitiveUp) {
+      add_allocation(VkDeviceSize(command.payload.size()), 16);
+      DrawPrimitiveUpCommand draw{};
+      if (command.bytes.size() >= sizeof(draw)) {
+        std::memcpy(&draw, command.bytes.data(), sizeof(draw));
+        if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kRectangleList) &&
+            draw.vertex_count && draw.stride) {
+          const VkDeviceSize rectangle_count = draw.vertex_count / 3;
+          const VkDeviceSize expanded_size = rectangle_count * 4 * draw.stride;
+          add_allocation(expanded_size, 16);
+        }
+      }
+      continue;
+    }
+
+    if (!command.pipeline_state || !command.pipeline_state->vertex_declaration_resource ||
+        !command.pipeline_state->vertex_shader_resource) {
+      continue;
+    }
+    const auto& state = *command.pipeline_state;
+    const uint64_t declaration_hash = state.vertex_declaration_resource->content_hash;
+    const uint64_t shader_hash = state.vertex_shader_resource->hash;
+    std::array<bool, kVertexStreamCount> required_streams{};
+    if (!persistent_direct_upload && !GetRequiredVertexStreams(state, required_streams)) {
+      continue;
+    }
+    for (uint32_t stream = 0; stream < kVertexStreamCount; ++stream) {
+      // Direct persistent uploads never consume the frame staging arena. Avoid
+      // constructing and inserting planning keys whose sizes would be ignored.
+      if (persistent_direct_upload || !required_streams[stream]) {
+        continue;
+      }
+      const auto& resource = command.vertex_buffers[stream];
+      const auto& stream_state = state.vertex_streams[stream];
+      if (!resource || resource->payload.empty() || !stream_state.stride) {
+        continue;
+      }
+      const CapacityVertexKey key{resource.get(), declaration_hash,    shader_hash,
+                                  stream,         stream_state.offset, stream_state.stride};
+      if (pending_vertex_uploads.Insert(key)) {
+        NativePersistentBufferKey persistent_key{};
+        persistent_key.generation = resource->generation;
+        persistent_key.declaration_hash = declaration_hash;
+        persistent_key.shader_hash = shader_hash;
+        persistent_key.stream = stream;
+        persistent_key.stream_offset = stream_state.offset;
+        persistent_key.stride = stream_state.stride;
+        persistent_key.kind = NativePersistentBufferKind::kVertex;
+        if (!persistent_buffers_enabled ||
+            (!persistent_direct_upload && !persistent_buffers_.contains(persistent_key))) {
+          add_allocation(VkDeviceSize(resource->payload.size()), kNativePersistentBufferAlignment);
+        }
+      }
+    }
+
+    if (command.type == CommandType::kDrawIndexedPrimitive && command.index_buffer) {
+      const bool index32 = (command.index_buffer->flags & kIndex32Flag) != 0;
+      if (!persistent_direct_upload &&
+          pending_index_uploads.Insert(CapacityIndexKey{command.index_buffer.get(), index32})) {
         NativePersistentBufferKey persistent_key{};
         persistent_key.generation = command.index_buffer->generation;
         persistent_key.kind =
@@ -17330,24 +17851,59 @@ void Gta4NativeGraphicsSystem::AddProtectedTextureGenerations(
 }
 
 void Gta4NativeGraphicsSystem::QueueTextureProtection(const NativeCommand& command, bool retain) {
-  VisitProtectedTextureGenerations(command, [&](uint64_t generation) {
+  auto apply = [&](uint64_t generation) {
     const bool ok = retain ? queued_texture_protection_.Retain(generation)
                            : queued_texture_protection_.Release(generation);
     if (!ok) REXLOG_ERROR("gta4-native-protection: queue reference invariant failed generation={} retain={}; using scan fallback", generation, retain);
-  });
+  };
+  if (retain) {
+    command.protected_generation_count = 0;
+    command.protected_generations_overflow = false;
+    VisitProtectedTextureGenerations(command, [&](uint64_t generation) {
+      if (command.protected_generation_count < NativeCommand::kProtectedGenerationCapacity) {
+        command.protected_generations[command.protected_generation_count++] = generation;
+      } else {
+        command.protected_generations_overflow = true;
+      }
+      apply(generation);
+    });
+    return;
+  }
+  if (command.protected_generations_overflow) {
+    VisitProtectedTextureGenerations(command, apply);
+    return;
+  }
+  for (uint32_t i = 0; i < command.protected_generation_count; ++i) {
+    apply(command.protected_generations[i]);
+  }
 }
 
 void Gta4NativeGraphicsSystem::AppendWorkerTextureProtection(
     std::unordered_set<uint64_t>& generations) const {
+  // Callers that race the worker (the pipelined recorder) also hold
+  // render_mutex_, so a command moving from the queue into the batch is seen
+  // in exactly one of the two places.
+  std::lock_guard lock(worker_protection_mutex_);
   if (active_worker_command_) AddProtectedTextureGenerations(*active_worker_command_, generations);
   for (size_t i = worker_command_cursor_; i < worker_command_batch_.size(); ++i)
     AddProtectedTextureGenerations(worker_command_batch_[i], generations);
+  generations.insert(assembly_texture_protection_.begin(), assembly_texture_protection_.end());
 }
 
 void Gta4NativeGraphicsSystem::AppendQueuedTextureProtection(std::unordered_set<uint64_t>& generations) const {
   // Caller owns render_mutex_; fallback retains the previous exact scan policy.
   if (queued_texture_protection_.valid()) queued_texture_protection_.AppendTo(generations);
   else for (const auto& command : render_queue_) AddProtectedTextureGenerations(command, generations);
+}
+
+bool Gta4NativeGraphicsSystem::ResetImmutableBindings(NativeFrameConstantArena& arena) {
+  if (!REXCVAR_GET(gta4_native_async_constant_release)) {
+    return arena.immutable_bindings.Reset();
+  }
+  std::vector<std::shared_ptr<const ConstantStateVersion>> released;
+  if (!arena.immutable_bindings.Reset(&released)) return false;
+  constant_releaser_.Release(std::move(released));
+  return true;
 }
 
 void Gta4NativeGraphicsSystem::ClearNativeFrameCommands() {
@@ -17365,9 +17921,9 @@ std::unordered_set<uint64_t> Gta4NativeGraphicsSystem::CollectProtectedTextureGe
   const profile::CpuScope profile_scope(profile::CpuOp::kProtectedResources);
 
   std::unordered_set<uint64_t> generations = frame_texture_protection_;
-  AppendWorkerTextureProtection(generations);
   {
     std::lock_guard lock(render_mutex_);
+    AppendWorkerTextureProtection(generations);
     AppendQueuedTextureProtection(generations);
     if (REXCVAR_GET(gta4_validate_native_hot_caches)) {
       std::unordered_set<uint64_t> expected;
@@ -17490,7 +18046,6 @@ void Gta4NativeGraphicsSystem::EvictNativeTextureImages(uint32_t submitted_frame
   }
 
   protected_texture_generations_.insert(frame_texture_protection_.begin(), frame_texture_protection_.end());
-  AppendWorkerTextureProtection(protected_texture_generations_);
 
   std::vector<std::unique_ptr<NativeTextureImage>> evicted_images;
   evicted_images.reserve(candidates.size());
@@ -17501,6 +18056,7 @@ void Gta4NativeGraphicsSystem::EvictNativeTextureImages(uint32_t submitted_frame
     // queued commands, turning that pattern into an O(images * queued commands) stall that blocks
     // the title thread and reduces simulation to roughly one frame per second.
     std::unique_lock queue_lock(render_mutex_);
+    AppendWorkerTextureProtection(protected_texture_generations_);
     AppendQueuedTextureProtection(protected_texture_generations_);
     NativeWorkBudget work(allocation_recovery ? SIZE_MAX : 64,
                           allocation_recovery ? UINT64_MAX : 33554432);
@@ -27848,8 +28404,11 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
               command.vertex_constants_hash, vertex_booleans, state.render_targets[0].width,
               state.render_targets[0].height, selected_constants);
           const uint32_t command_device = CommandDevice(command.type, command.bytes.data());
-          const auto environmental = environmental_data_by_device_.find(command_device);
-          if (environmental != environmental_data_by_device_.end()) {
+          const auto& environmental_map = pipelined_recording_
+                                              ? recording_environmental_data_by_device_
+                                              : environmental_data_by_device_;
+          const auto environmental = environmental_map.find(command_device);
+          if (environmental != environmental_map.end()) {
             const EnvironmentalDataV2& data = environmental->second;
             auto format_float_array = [](const auto& values) {
               std::string result;

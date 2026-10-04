@@ -332,6 +332,18 @@ u32 KeSetBasePriorityThread_entry(mapped_void thread_ptr, u32 increment) {
   return prev_priority;
 }
 
+// Absolute-priority variant. The previous stub dropped every request, so the
+// title's time-critical threads (audio) never got scheduler preference.
+u32 KeSetPriorityThread_entry(mapped_void thread_ptr, u32 priority) {
+  int32_t prev_priority = 0;
+  auto thread = XObject::GetNativeObject<XThread>(REX_KERNEL_STATE(), thread_ptr);
+  if (thread) {
+    prev_priority = thread->QueryPriority();
+    thread->SetAbsolutePriority(int32_t(priority));
+  }
+  return prev_priority;
+}
+
 u32 KeSetDisableBoostThread_entry(ppc_ptr_t<X_KTHREAD> thread_ptr, u32 disabled) {
   auto old_boost_disabled = reinterpret_cast<std::atomic_uint8_t*>(&thread_ptr->boost_disabled)
                                 ->exchange(static_cast<uint8_t>(disabled));
@@ -1544,7 +1556,7 @@ REX_EXPORT_STUB(__imp__KeSaveFloatingPointState);
 REX_EXPORT_STUB(__imp__KeSaveVectorUnitState);
 REX_EXPORT_STUB(__imp__KeSetBackgroundProcessors);
 REX_EXPORT_STUB(__imp__KeSetPriorityClassThread);
-REX_EXPORT_STUB(__imp__KeSetPriorityThread);
+REX_EXPORT(__imp__KeSetPriorityThread, rex::kernel::xboxkrnl::KeSetPriorityThread_entry)
 REX_EXPORT_STUB(__imp__KeSetTimer);
 REX_EXPORT_STUB(__imp__KeSetTimerEx);
 REX_EXPORT_STUB(__imp__KeStallExecutionProcessor);

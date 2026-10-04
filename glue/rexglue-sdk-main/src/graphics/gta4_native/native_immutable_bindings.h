@@ -56,9 +56,17 @@ class NativeImmutableBindings {
     return result;
   }
   bool CanReset() const { return versions_.CanResetGeneration() && contents_.CanResetGeneration(); }
-  bool Reset() {
+  // released, when given, receives the owners instead of dropping them here.
+  bool Reset(std::vector<std::shared_ptr<const ConstantStateVersion>>* released = nullptr) {
     if (!CanReset()) return false;
-    versions_.ResetGeneration(); contents_.ResetGeneration(); owners_.clear(); return true;
+    versions_.ResetGeneration(); contents_.ResetGeneration();
+    if (released) {
+      released->swap(owners_);
+      owners_.reserve(released->size());
+    } else {
+      owners_.clear();
+    }
+    return true;
   }
   size_t owner_count() const { return owners_.size(); }
   size_t entry_count() const { return versions_.size(); }

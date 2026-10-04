@@ -24,6 +24,9 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <memory>
 
 #include <pthread.h>
+#if REX_PLATFORM_ANDROID
+#include <android/log.h>
+#endif
 #include <semaphore.h>
 #include <sys/eventfd.h>
 #include <sys/syscall.h>
@@ -709,6 +712,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
 #endif
 
   uint32_t system_id() const { return static_cast<uint32_t>(thread_); }
+#if REX_PLATFORM_ANDROID
+  uint32_t native_tid() const { return static_cast<uint32_t>(pthread_gettid_np(thread_)); }
+#endif
 
   uint64_t affinity_mask() {
     WaitStarted();
@@ -765,6 +771,12 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   void set_priority(int new_priority) {
     WaitStarted();
+#if REX_PLATFORM_ANDROID
+    // Apps may not use SCHED_FIFO; only creation-flag requests land here.
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "thread-priority-flag tid=%d value=%d",
+                        int(pthread_gettid_np(thread_)), new_priority);
+    return;
+#endif
     sched_param param{};
     param.sched_priority = new_priority;
     int result = pthread_setschedparam(thread_, SCHED_FIFO, &param);
@@ -1286,6 +1298,9 @@ class PosixThread : public PosixConditionHandle<Thread> {
   }
 
   uint32_t system_id() const override { return handle_.system_id(); }
+#if REX_PLATFORM_ANDROID
+  uint32_t system_id_native() const override { return handle_.native_tid(); }
+#endif
 
   uint64_t affinity_mask() override { return handle_.affinity_mask(); }
   void set_affinity_mask(uint64_t mask) override { handle_.set_affinity_mask(mask); }

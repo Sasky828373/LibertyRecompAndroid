@@ -1,6 +1,8 @@
 #pragma once
 
 #include "native_triangle_fan.h"
+#include "native_deferred_release.h"
+#include "native_flat_set.h"
 #include "native_owned_commands.h"
 
 #include <array>
@@ -471,6 +473,13 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint64_t diagnostic_submit_sequence = 0;
     uint32_t diagnostic_producer_epoch = 0;
     std::shared_ptr<SynchronousCommand> synchronous;
+    // Texture generations retained for this command when it was queued, so
+    // the worker's release walks a dense array instead of chasing every
+    // texture slot's resource again (under the queue lock).
+    static constexpr uint32_t kProtectedGenerationCapacity = 16;
+    mutable std::array<uint64_t, kProtectedGenerationCapacity> protected_generations;
+    mutable uint8_t protected_generation_count = 0;
+    mutable bool protected_generations_overflow = false;
   };
 
   struct NativeUploadBuffer {
@@ -1327,6 +1336,40 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   bool CreateNativeUploadBuffer(VkDeviceSize capacity, NativeUploadBuffer& upload_buffer,
                                 bool prefer_cached = false);
   void DestroyNativeUploadBuffer(NativeUploadBuffer& upload_buffer);
+  bool EnsureFrameUploadCapacityFast(
+      const std::shared_ptr<const NativeTextureResource>& present_source);
+  struct CapacityVertexKey {
+    const NativeBufferResource* resource = nullptr;
+    uint64_t declaration_hash = 0;
+    uint64_t shader_hash = 0;
+    uint32_t stream = 0;
+    uint32_t offset = 0;
+    uint32_t stride = 0;
+    bool operator==(const CapacityVertexKey&) const = default;
+  };
+  struct CapacityVertexKeyHash {
+    size_t operator()(const CapacityVertexKey& k) const {
+      return size_t(NativeMixHash(reinterpret_cast<uintptr_t>(k.resource) ^ k.declaration_hash * 3 ^
+                                  k.shader_hash * 5 ^ (uint64_t(k.stream) << 56) ^
+                                  (uint64_t(k.offset) << 24) ^ k.stride));
+    }
+  };
+  struct CapacityIndexKey {
+    const NativeBufferResource* resource = nullptr;
+    bool index32 = false;
+    bool operator==(const CapacityIndexKey&) const = default;
+  };
+  struct CapacityIndexKeyHash {
+    size_t operator()(const CapacityIndexKey& k) const {
+      return size_t(NativeMixHash(reinterpret_cast<uintptr_t>(k.resource) * 2 + k.index32));
+    }
+  };
+  struct CapacityGenerationHash {
+    size_t operator()(uint64_t generation) const { return size_t(NativeMixHash(generation)); }
+  };
+  NativeFlatSet<uint64_t, CapacityGenerationHash> capacity_texture_set_;
+  NativeFlatSet<CapacityVertexKey, CapacityVertexKeyHash> capacity_vertex_set_;
+  NativeFlatSet<CapacityIndexKey, CapacityIndexKeyHash> capacity_index_set_;
   bool EnsureFrameUploadCapacity(
       const std::shared_ptr<const NativeTextureResource>& present_source);
   bool InitializeContentProbeBuffer(NativeContentProbeBuffer* buffer = nullptr);
@@ -1686,7 +1729,50 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::shared_ptr<const NativeShaderState> last_shader_snapshot_;
   std::shared_ptr<const NativePipelineState> SnapshotPipeline(const NativeCommand&, bool);
   NativeOwnedCommands<NativeCommand> current_frame_;
+  // Pipelined recording: the worker assembles frame N+1 while the recorder
+  // thread records and submits frame N from current_frame_. Commands that
+  // touch recorder-owned state wait for the recorder to go idle, swap the
+  // assembled frame into current_frame_, and run their original worker path.
+  struct NativeReleaseEffect {
+    ReleaseResourceCommand release{};
+    uint64_t released_texture_generation = 0;
+    bool frame_was_empty = false;
+  };
+  struct NativeRecorderJob {
+    NativeCommandPool<NativeCommand>::Owner present_command;
+    PresentCommand present{};
+  };
+  void FrameRecorderMain();
+  void WaitForFrameRecorderIdle();
+  void StopFrameRecorder();
+  void SwapAssemblyFrame();
+  void RunReleaseEffects(std::vector<NativeReleaseEffect>& effects);
+  void ApplyReleaseResourceEffects(const NativeReleaseEffect& effect);
+  void FinishPresent(NativeCommand& command, const PresentCommand& present);
+  NativeOwnedCommands<NativeCommand> assembly_frame_;
+  // Worker-side protection visible to the recorder's eviction passes. Guarded
+  // by worker_protection_mutex_ together with the worker batch and cursor.
+  std::unordered_set<uint64_t> assembly_texture_protection_;
+  std::vector<NativeReleaseEffect> assembly_release_effects_;
+  std::vector<NativeReleaseEffect> recording_release_effects_;
+  mutable std::mutex worker_protection_mutex_;
+  std::thread frame_recorder_;
+  std::mutex frame_recorder_mutex_;
+  std::condition_variable frame_recorder_condition_;
+  std::optional<NativeRecorderJob> frame_recorder_job_;
+  bool frame_recorder_busy_ = false;
+  bool frame_recorder_stop_ = false;
+  bool pipelined_recording_ = false;
+  bool assembly_modern_frame_pending_ = false;
+  uint64_t pipelined_sync_waits_ = 0;
+  uint64_t pipeline_sync_wait_ticks_ = 0;
+  uint64_t pipeline_present_wait_ticks_ = 0;
+  uint32_t pipeline_report_frames_ = 0;
+  std::array<uint32_t, 64> pipeline_sync_type_counts_{};
+  std::unordered_map<uint32_t, EnvironmentalDataV2> recording_environmental_data_by_device_;
   NativeCommandRetirer<NativeCommand> command_retirer_{native_command_pool_};
+  NativeDeferredReleaser<ConstantStateVersion> constant_releaser_;
+  bool ResetImmutableBindings(NativeFrameConstantArena& arena);
   NativeFrameResources recording_resources_;
   std::unordered_set<uint64_t> frame_texture_protection_;
   const NativeCommand* active_worker_command_ = nullptr;

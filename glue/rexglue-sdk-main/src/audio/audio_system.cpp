@@ -9,6 +9,12 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#if defined(__ANDROID__)
+#include <sys/resource.h>
+#include <android/log.h>
+#include <cerrno>
+#include <unistd.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <optional>
@@ -111,6 +117,16 @@ void AudioSystem::WorkerThreadMain() {
   pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
 
+#if defined(__ANDROID__)
+  // Same reason as the macOS QoS above: render threads saturate the big
+  // cores, and an equal-priority audio producer underruns (crackling).
+  // -16 is Android's ANDROID_PRIORITY_AUDIO, which apps may request.
+  {
+    const int result = setpriority(PRIO_PROCESS, gettid(), -16);
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "audio-priority %s tid=%d result=%d errno=%d",
+                        "audio_system.cpp", int(gettid()), result, result ? errno : 0);
+  }
+#endif
   // Initialize driver and ringbuffer.
   Initialize();
 

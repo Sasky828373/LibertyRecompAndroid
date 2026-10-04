@@ -37,6 +37,10 @@
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
 #include <rex/vec128.h>
+#if REX_PLATFORM_ANDROID
+#include <android/log.h>
+#include <sys/resource.h>
+#endif
 
 REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
                     "Ignores game-specified thread priorities");
@@ -854,9 +858,40 @@ void XThread::SetPriority(int32_t increment) {
   } else {
     target_priority = rex::thread::ThreadPriority::kNormal;
   }
+#if REX_PLATFORM_ANDROID
+  // SCHED_FIFO is refused to apps, so guest priorities never reached the
+  // scheduler and time-critical guest threads (audio) competed equally with
+  // the render threads on saturated big cores. Map the raw increment to nice.
+  if (!REXCVAR_GET(ignore_thread_priorities) && thread_) {
+    const int nice_value = increment >= 15 ? -10 : increment > 0 ? -4 : increment < 0 ? 4 : 0;
+    const pid_t tid = pid_t(thread_->system_id_native());
+    const int result = setpriority(PRIO_PROCESS, tid, nice_value);
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "thread-priority %s tid=%d increment=%d nice=%d %s",
+                        thread_name_.c_str(), int(tid), increment, nice_value, result == 0 ? "ok" : "failed");
+  }
+#else
   if (!REXCVAR_GET(ignore_thread_priorities)) {
     thread_->set_priority(target_priority);
   }
+#endif
+}
+
+void XThread::SetAbsolutePriority(int32_t priority) {
+  auto kthread = guest_object<X_KTHREAD>();
+  kthread->priority = static_cast<uint8_t>(std::clamp(priority, 0, 31));
+#if REX_PLATFORM_ANDROID
+  // Kernel priorities: 8 is a normal thread, 15 time-critical, 31 the top of
+  // the real-time range.
+  if (!REXCVAR_GET(ignore_thread_priorities) && thread_) {
+    const int nice_value = priority >= 15 ? -10 : priority > 8 ? -4 : priority < 8 ? 4 : 0;
+    const pid_t tid = pid_t(thread_->system_id_native());
+    const int result = setpriority(PRIO_PROCESS, tid, nice_value);
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                        "thread-priority-abs %s tid=%d priority=%d nice=%d %s",
+                        thread_name_.c_str(), int(tid), priority, nice_value,
+                        result == 0 ? "ok" : "failed");
+  }
+#endif
 }
 
 void XThread::SetAffinity(uint32_t affinity) {

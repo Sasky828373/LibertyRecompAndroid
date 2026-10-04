@@ -353,6 +353,7 @@ class XThread : public XObject {
   void EnqueueApc(uint32_t normal_routine, uint32_t normal_context, uint32_t arg1, uint32_t arg2);
 
   int32_t priority() const { return priority_; }
+  void SetAbsolutePriority(int32_t priority);
   int32_t QueryPriority();
   void SetPriority(int32_t increment);
 

@@ -413,6 +413,8 @@ class Thread : public WaitHandle {
 
   // Returns the ID of the thread.
   virtual uint32_t system_id() const = 0;
+  // Kernel thread id where the platform exposes one (0 otherwise).
+  virtual uint32_t system_id_native() const { return 0; }
 
   // Returns the current name of the thread, if previously specified.
   const std::string& name() const { return name_; }

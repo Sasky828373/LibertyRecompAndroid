@@ -130,6 +130,14 @@ class NativeCommandPool {
       Slot* slot = free_;
       free_ = slot->next;
       ++live_;
+      // Slots come back from the retirement thread's core. Construction
+      // zero-fills the whole command, so start owning the next free slot's
+      // lines now; the following allocation is microseconds away.
+      if (free_) {
+        const auto* next = reinterpret_cast<const char*>(free_);
+        for (size_t offset = 0; offset < sizeof(Slot); offset += 64)
+          __builtin_prefetch(next + offset, 1);
+      }
       return static_cast<void*>(slot->storage);
     }
     void do_deallocate(void* value, size_t bytes, size_t alignment) override {
@@ -202,6 +210,7 @@ class NativeOwnedCommands {
     values_.reserve(taken.size());
     return taken;
   }
+  void swap(NativeOwnedCommands& other) noexcept { values_.swap(other.values_); }
   void push_back(Owner value) { assert(value); values_.push_back(std::move(value)); }
   Owner Take(size_t i) { assert(values_[i]); return std::move(values_[i]); }
   Owner TakeFront() requires Queue {

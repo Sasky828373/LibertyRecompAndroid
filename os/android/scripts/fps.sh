@@ -29,5 +29,9 @@ span = (t[-1] - t[0]) / 1e9
 d = sorted((b - a) / 1e6 for a, b in zip(t, t[1:]))
 print(f"fps {(len(t) - 1) / span:.1f} over {span:.1f}s  frame ms: "
       f"median {d[len(d) // 2]:.1f}  p95 {d[int(len(d) * .95)]:.1f}  max {d[-1]:.1f}")
+# Display intervals in vsyncs: an even 30 fps is all "2"; a mix of 1/2/3 judders.
+vs = [round((b - a) / 1e6 / 16.667) for a, b in zip(t, t[1:])]
+hist = {k: vs.count(k) for k in sorted(set(vs))}
+print("vsyncs per frame:", "  ".join(f"{k}x={v}" for k, v in hist.items()))
 EOF
 rm -f "$OUT"
