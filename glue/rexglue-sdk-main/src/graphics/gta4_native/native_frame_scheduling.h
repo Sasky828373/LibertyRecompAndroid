@@ -18,6 +18,10 @@ inline constexpr uint32_t kNativeTextureBudgetPollPhaseFrames = 40;
 inline constexpr uint32_t kNativeTexturePressureEnterPercent = 90;
 inline constexpr uint32_t kNativeTexturePressureExitPercent = 85;
 inline constexpr size_t kNativeBufferShadowValidationSlices = 64;
+// Upper bound for one validation step: 1/64 of a large vertex buffer is tens of
+// KiB of cold guest memory compared on the guest thread for every stream of
+// every draw. The sweep still covers every byte, over more reuses.
+inline constexpr size_t kNativeBufferShadowValidationMaxBytes = 2048;
 inline constexpr uint32_t kNativeBufferCacheRetentionFrames = 600;
 inline constexpr uint32_t kNativeBufferCachePollFrames = 120;
 inline constexpr uint32_t kNativeBufferCachePollPhaseFrames = 80;
@@ -86,6 +90,9 @@ constexpr NativeBufferShadowValidationRange GetNativeBufferShadowValidationRange
   }
   if (!slice_size) {
     slice_size = 1;
+  }
+  if (slice_size > kNativeBufferShadowValidationMaxBytes) {
+    slice_size = kNativeBufferShadowValidationMaxBytes;
   }
   const size_t remaining = payload_size - offset;
   const size_t length = slice_size < remaining ? slice_size : remaining;

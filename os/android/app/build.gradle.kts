@@ -24,7 +24,7 @@ android {
     defaultConfig {
         applicationId = "com.libertyrecomp"
         // 28: ASharedMemory (26) for guest memory and AAudio (27) for audio.
-        minSdk        = 28
+        minSdk        = 29
         targetSdk     = 35
         versionCode   = 1
         versionName   = "0.1.0-dev"
