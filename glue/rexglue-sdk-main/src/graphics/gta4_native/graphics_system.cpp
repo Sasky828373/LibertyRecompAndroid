@@ -169,6 +169,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_dump_shaders, false, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_UINT32(gta4_native_water_reflection_interval, 1, "GTA IV/Graphics/Reflections",
                       "Re-render the water reflection every N frames (1 = every frame); in between "
                       "the previous reflection is reused");
+REXCVAR_DEFINE_BOOL(gta4_native_stage_draw_commands, true, "GTA IV/Graphics/Native Renderer",
+                    "Publish captured draws to the render worker in batches (one render queue "
+                    "lock per batch instead of per draw)");
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
@@ -3524,6 +3527,16 @@ uint32_t Gta4NativeGraphicsSystem::GetTitleCommandAbi(uint32_t title_id) const {
   return title_id == kTitleId ? kTitleCommandAbi : 0;
 }
 
+void Gta4NativeGraphicsSystem::PublishStagedDrawCommandsLocked() {
+  for (auto& staged : staged_draw_commands_) {
+    staged->diagnostic_submit_sequence = ++diagnostic_submit_sequence_;
+    staged->diagnostic_producer_epoch = diagnostic_producer_epoch_;
+    QueueTextureProtection(*staged, true);
+    render_queue_.push_back(std::move(staged));
+  }
+  staged_draw_commands_.clear();
+}
+
 bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t abi_version,
                                                   const void* command, size_t command_size) {
   if (title_id != kTitleId || !command || !memory_) {
@@ -3602,6 +3615,23 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
 
   CommandHeader title_header{};
   std::memcpy(&title_header, title_command, sizeof(title_header));
+  // Draws never make the title wait on the worker, so they can sit in a
+  // producer-side batch; every other command flushes the batch first, keeping
+  // the queue order identical.
+  constexpr size_t kStagedDrawBatch = 32;
+  // The worker sleeps only on an empty queue; wake it per batch and at frame
+  // boundaries rather than per command (a futex round trip each).
+  constexpr size_t kWorkerWakeBatch = 32;
+  const bool draw_command = native_command.type == CommandType::kDrawPrimitive ||
+                            native_command.type == CommandType::kDrawPrimitiveUp ||
+                            native_command.type == CommandType::kDrawIndexedPrimitive;
+  if (draw_command && !phone_envelope && !tv_envelope && !fire_envelope && !profile_transport &&
+      REXCVAR_GET(gta4_native_stage_draw_commands)) {
+    staged_draw_commands_.push_back(std::move(native_command_owner));
+    if (staged_draw_commands_.size() < kStagedDrawBatch) {
+      return true;
+    }
+  }
   bool wake_worker = false;
   {
     const uint64_t queue_lock_begin = profile_transport ? profile::CpuTick() : 0;
@@ -3617,6 +3647,13 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
     if (!render_worker_running_) {
       return false;
     }
+    const size_t queued_before = render_queue_.size();
+    PublishStagedDrawCommandsLocked();
+    if (!native_command_owner) {
+      // This draw completed the batch and was published with it.
+      wake_worker = queued_before == 0 ||
+                    (queued_before < kWorkerWakeBatch && render_queue_.size() >= kWorkerWakeBatch);
+    } else {
     native_command.diagnostic_submit_sequence = ++diagnostic_submit_sequence_;
     native_command.diagnostic_producer_epoch = diagnostic_producer_epoch_;
     if (fire_envelope && fire_context.guest_frame % FireTraceConfig().interval == 0)
@@ -3633,9 +3670,9 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
     // The worker sleeps only on an empty queue. Waking it for every command
     // turned each submit into a futex round trip and a render_mutex_ fight;
     // wake it per batch and at frame boundaries instead.
-    constexpr size_t kWorkerWakeBatch = 32;
-    wake_worker = render_queue_.size() + 1 == kWorkerWakeBatch ||
+    wake_worker = (queued_before < kWorkerWakeBatch && render_queue_.size() + 1 >= kWorkerWakeBatch) ||
                   title_header.type == CommandType::kPresent ||
+                  (queued_before == 0 && !render_queue_.empty()) ||
                   (render_queue_.empty() && !REXCVAR_GET(gta4_native_batched_worker_wake));
     if(profile_transport) {
       const uint64_t enqueued = profile::CpuTick();
@@ -3647,6 +3684,7 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
     if (title_header.type == CommandType::kPresent) {
       ++queued_title_presents_;
       ++diagnostic_producer_epoch_;
+    }
     }
   }
   if (wake_worker) render_condition_.notify_one();
@@ -3819,6 +3857,7 @@ bool Gta4NativeGraphicsSystem::ExecuteTitleCommand(uint32_t title_id, uint32_t a
     if (!render_worker_running_) {
       return false;
     }
+    PublishStagedDrawCommandsLocked();  // Keep queue order: staged draws precede this command.
     native_command.diagnostic_submit_sequence = ++diagnostic_submit_sequence_;
     native_command.diagnostic_producer_epoch = diagnostic_producer_epoch_;
     if (phone_envelope) PhoneTraceLog("native-sync-queued", fmt::format(

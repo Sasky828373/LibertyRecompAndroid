@@ -1719,6 +1719,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::pmr::synchronized_pool_resource snapshot_pool_;
   NativeCommandPool<NativeCommand> native_command_pool_;
   NativeOwnedCommands<NativeCommand, true> render_queue_;
+  // Draws captured but not yet published to render_queue_ (guarded by
+  // command_capture_mutex_); flushed in batches and before any other command.
+  std::vector<NativeCommandPool<NativeCommand>::Owner> staged_draw_commands_;
   // Worker-owned bulk handoff. Pending commands remain resource-protected
   // across presents, allocation recovery and synchronous readback boundaries.
   NativeOwnedCommands<NativeCommand> worker_command_batch_;
@@ -1822,6 +1825,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   NativeCommandRetirer<NativeCommand> command_retirer_{native_command_pool_};
   NativeDeferredReleaser<ConstantStateVersion> constant_releaser_;
   bool ResetImmutableBindings(NativeFrameConstantArena& arena);
+  // Moves staged draws into render_queue_. Requires command_capture_mutex_ and
+  // render_mutex_.
+  void PublishStagedDrawCommandsLocked();
   NativeFrameResources recording_resources_;
   std::unordered_set<uint64_t> frame_texture_protection_;
   const NativeCommand* active_worker_command_ = nullptr;
