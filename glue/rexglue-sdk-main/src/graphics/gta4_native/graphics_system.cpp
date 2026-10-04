@@ -162,6 +162,10 @@ REXCVAR_DEFINE_BOOL(gta4_native_ubo_layout, true, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_BOOL(gta4_native_skip_attachment_barriers, false, "GTA IV/Graphics/Native Renderer",
                     "Skip attachment-to-same-attachment layout barriers between rendering scopes "
                     "(Turnip keeps draw order across scopes)");
+REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_trigger, 0, "GTA IV/Diagnostics",
+                      "TEMP: changing this value starts one native profile capture");
+REXCVAR_DEFINE_BOOL(gta4_native_dump_shaders, false, "GTA IV/Diagnostics",
+                    "TEMP: write every registered stock shader's SPIR-V to spv/ in the user folder");
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
@@ -392,6 +396,12 @@ std::array<std::atomic<uint32_t>, 4096> g_rendering_split_reasons{};
 // TEMP: resolve-class GPU work per call site, and resolve reuse totals.
 std::array<std::atomic<uint32_t>, 65536> g_resolve_sites{};
 std::atomic<uint64_t> g_resolve_reuse_candidates{0}, g_resolve_reuse_hits{0};
+std::mutex g_resolve_kinds_mutex;
+std::map<std::string, uint32_t> g_resolve_kinds;
+void NoteResolveKind(std::string key) {
+  std::lock_guard lock(g_resolve_kinds_mutex);
+  ++g_resolve_kinds[std::move(key)];
+}
 std::array<std::atomic<uint32_t>, 32> g_light_reuse_failures{};
 
 // Hot producer/worker/recorder critical sections last microseconds, but bionic parks a
@@ -6304,6 +6314,19 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
               std::string top;
               for (size_t i = 0; i < sites.size() && i < 12; ++i)
                 top += fmt::format(" L{}={:.1f}", sites[i].second, sites[i].first / 120.0);
+              {
+                std::map<std::string, uint32_t> kinds;
+                {
+                  std::lock_guard lock(g_resolve_kinds_mutex);
+                  kinds.swap(g_resolve_kinds);
+                }
+                std::string line;
+                for (const auto& [key, n] : kinds)
+                  if (n >= 60) line += fmt::format(" [{}]={:.1f}", key, n / 120.0);
+                for (size_t offset = 0; offset < line.size(); offset += 900)
+                  __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "resolve-kinds:%s",
+                                      line.substr(offset, 900).c_str());
+              }
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "resolves/frame:%s reuse=%.1f/%.1f", top.c_str(),
                                   g_resolve_reuse_hits.exchange(0) / 120.0,
@@ -7412,6 +7435,18 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         ubo_rewritten_loads_ += rewritten->rewritten_loads;
       }
     };
+    if (REXCVAR_GET(gta4_native_dump_shaders)) {
+      // Untransformed recompiler output, for offline analysis.
+      const auto directory = rex::filesystem::GetUserFolder() / "spv";
+      std::error_code error;
+      std::filesystem::create_directories(directory, error);
+      const auto path = directory / fmt::format("{:016X}_{}.spv", command.hash,
+                                                command.stage == ShaderStage::kVertex ? "vs" : "ps");
+      if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
+        std::fwrite(stock_early_spirv.data(), sizeof(uint32_t), stock_early_spirv.size(), file);
+        std::fclose(file);
+      }
+    }
     RemapSpirvDrawDescriptorSets(stock_early_spirv);
     RemapSpirvDrawDescriptorSets(stock_late_spirv);
     apply_loop_watchdog(stock_early_spirv);
@@ -9892,6 +9927,17 @@ bool Gta4NativeGraphicsSystem::BeginNativeGpuProfileFrame(VkCommandBuffer comman
   }
   profile_payload_in_flight |= native_gpu_profile_state_.completed_samples.size() != 0;
   profile_payload_in_flight |= native_gpu_profile_state_.completed_attribution.size() != 0;
+  {
+    static uint32_t last_trigger = 0;
+    const uint32_t trigger = REXCVAR_GET(gta4_profile_native_capture_trigger);
+    if (trigger != last_trigger) {
+      last_trigger = trigger;
+      g_native_profile_capture_requested.store(true, std::memory_order_release);
+#if REX_PLATFORM_ANDROID
+      __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "profile-capture: requested");
+#endif
+    }
+  }
   if (g_native_profile_capture_requested.load(std::memory_order_acquire) &&
       profile_payload_in_flight) {
     // Do not let a manual restart clear a sample whose exact slot fence has not
@@ -24161,6 +24207,8 @@ bool Gta4NativeGraphicsSystem::RecordSurfaceMaterialization(
     return false;
   }
 
+  NoteResolveKind(fmt::format("M: {}x{} f{}->{}", destination.width, destination.height,
+                              uint32_t(source->format), uint32_t(destination.format)));
   MarkNativeSurfaceImageUsed(*source);
   MarkNativeSurfaceImageUsed(destination);
 
@@ -25681,6 +25729,21 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
     return false;
   }
 
+  {
+    static constexpr const char* kOperationNames[] = {"copy", "blit", "msaa", "convert", "dconvert"};
+    const uint32_t operation_index = uint32_t(operation);
+    const bool full = source_left == 0 && source_top == 0 && destination_x == 0 && destination_y == 0 &&
+                      source_copy_width == content_source->width &&
+                      source_copy_height == content_source->height &&
+                      destination_copy_width == mip_width && destination_copy_height == mip_height;
+    NoteResolveKind(fmt::format(
+        "R:{}{}{}{}{} {}x{} f{}->{} s{}",
+        operation_index < 5 ? kOperationNames[operation_index] : "?", depth ? ":depth" : "",
+        full ? ":full" : ":part", (resolve.flags & (1u << 8)) ? ":clrC" : "",
+        (resolve.flags & (1u << 9)) ? ":clrD" : "", destination_copy_width, destination_copy_height,
+        uint32_t(content_source->format), uint32_t(destination->format),
+        uint32_t(content_source->samples)));
+  }
   NativeResolveReuseKey resolve_reuse_key{};
   if (REXCVAR_GET(gta4_native_lossless_resolve_optimization) && color_resolve &&
       !high_precision_destination && !resolve.parameters_valid &&
