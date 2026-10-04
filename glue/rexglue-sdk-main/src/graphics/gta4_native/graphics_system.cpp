@@ -5235,18 +5235,21 @@ Gta4NativeGraphicsSystem::CaptureTextureResource(uint32_t handle,
     }
   }
 
+  const bool stock_font_shape = info.format == xenos::TextureFormat::k_DXT4_5 &&
+                                info.width + 1 == kStockFontAtlasExtent &&
+                                info.height + 1 == kStockFontAtlasExtent &&
+                                info.mip_min_level == 0 && info.mip_max_level == 0;
+  // Font ids only matter for atlas-shaped textures; skip the extra lock for
+  // every other texture of every draw. A font-id handle captured with another
+  // shape just misses the font identity check and takes the full path.
   uint32_t vector_font_id = 0;
-  {
+  if (stock_font_shape) {
     auto lock = LockWithSpin(texture_resource_mutex_);
     const auto font = vector_font_ids_.find(handle);
     if (font != vector_font_ids_.end()) {
       vector_font_id = font->second;
     }
   }
-  const bool stock_font_shape = info.format == xenos::TextureFormat::k_DXT4_5 &&
-                                info.width + 1 == kStockFontAtlasExtent &&
-                                info.height + 1 == kStockFontAtlasExtent &&
-                                info.mip_min_level == 0 && info.mip_max_level == 0;
   std::optional<size_t> vector_font_index;
   if (REXCVAR_GET(gta4_native_vector_fonts) && stock_font_shape) {
     switch (vector_font_id) {

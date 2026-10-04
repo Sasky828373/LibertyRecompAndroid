@@ -106,6 +106,7 @@ class NativeCommandPool {
       assert(count <= live_);
       last->next = free_;
       free_ = first;
+      free_count_ += count;
       live_ -= count;
     }
     Statistics GetStatistics() const {
@@ -132,9 +133,10 @@ class NativeCommandPool {
             slot.next = free_;
             free_ = &slot;
           }
+          free_count_ += kSlotsPerSlab;
         }
-        size_t taken = 0;
-        for (Slot* slot = free_; slot; slot = slot->next) ++taken;
+        const size_t taken = free_count_;
+        free_count_ = 0;
         local_ = free_;
         local_count_ = taken;
         free_ = nullptr;
@@ -163,6 +165,7 @@ class NativeCommandPool {
       assert(live_ != 0);
       slot->next = free_;
       free_ = slot;
+      ++free_count_;
       --live_;
     }
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
@@ -170,6 +173,7 @@ class NativeCommandPool {
     }
     mutable std::mutex mutex_;
     Slot* local_ = nullptr;  // Allocator-private free slots.
+    size_t free_count_ = 0;  // Length of free_.
     size_t local_count_ = 0;
     Slab* slabs_ = nullptr;
     Slot* free_ = nullptr;
