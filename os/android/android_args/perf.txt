@@ -7,11 +7,12 @@
 #--diagnostics_categories=logging
 --log_level=warn
 
-# Render at 1280x720 (the console's own resolution) and upscale to the 1080p
-# panel with FSR 1 (EASU + RCAS sharpening) instead of a bilinear stretch:
-# the display stays 1080p and FSR "quality" renders at 1/1.5 of it.
+# Render below the 1080p panel and upscale with FSR 1 (EASU + RCAS sharpening)
+# instead of a bilinear stretch. "balanced" renders at 1/1.7 (~635p): on the
+# 5.5" panel it looks like the console's 720p ("quality") and keeps frame times
+# steadier in the open world.
 --gta4_native_upscaler=fsr1
---gta4_fsr1_quality=quality
+--gta4_fsr1_quality=balanced
 
 # Cheaper anti-aliasing (off | fxaa | smaa)
 --gta4_native_anti_aliasing=fxaa

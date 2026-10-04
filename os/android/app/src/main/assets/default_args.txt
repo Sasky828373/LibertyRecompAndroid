@@ -1,6 +1,6 @@
 --log_level=warn
 --gta4_native_upscaler=fsr1
---gta4_fsr1_quality=quality
+--gta4_fsr1_quality=balanced
 --gta4_native_anti_aliasing=fxaa
 --gta4_draw_distance_scale=1.0
 --gta4_dynamic_draw_distance=true
