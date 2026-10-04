@@ -68,6 +68,9 @@ VkShaderModule Gta4NativeGraphicsSystem::GetTemporalShaderModule(
   if (words.empty()) return VK_NULL_HANDLE;
   std::vector<uint32_t> module(words.begin(), words.end());
   RemapSpirvDrawDescriptorSets(module);
+  if (REXCVAR_GET(gta4_native_loop_watchdog)) {
+    if (auto guarded = AddSpirvLoopWatchdog(module, 16384)) module = std::move(guarded->words);
+  }
   if (stage == temporal::ShaderStage::kPixel) {
     std::string error;
     auto transformed = AddNativeColorOutputEpilogue(module, &error, 0x70u);

@@ -112,7 +112,9 @@ public class LibertyActivity extends SDLActivity {
         addInstallSources(new File(dataRoot, "install"), arguments);
         mArguments = arguments.toArray(new String[0]);
         String driver = readFirstLine(new File(dataRoot, "driver.txt"));
-        if (driver != null && driver.trim().equals(DriverBridge.SYSTEM)) {
+        if (driver != null && driver.trim().startsWith(DriverBridge.CUSTOM_PREFIX)) {
+            mDriverMode = driver.trim();
+        } else if (driver != null && driver.trim().equals(DriverBridge.SYSTEM)) {
             mDriverMode = DriverBridge.SYSTEM;
         }
         Log.i(TAG, "data=" + dataRoot + " resources=" + resources

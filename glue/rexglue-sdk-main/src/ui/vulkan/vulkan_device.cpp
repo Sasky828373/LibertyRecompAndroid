@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <cstdlib>
 #include <atomic>
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -296,6 +297,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       // #237.
       XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION(KHR_spirv_1_4, 1, 2)
     }
+  }
+  if (!with_gpu_emulation && with_native_shader_support && get_physical_device_properties2_supported &&
+      std::getenv("REX_VK_ROBUST") && std::getenv("REX_VK_ROBUST")[0] == '1') {
+    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_robustness2)
   }
 
 #undef XE_UI_VULKAN_STRUCT_EXTENSION
@@ -817,6 +822,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   XE_UI_VULKAN_LIMIT(optimalBufferCopyRowPitchAlignment)
   XE_UI_VULKAN_LIMIT(nonCoherentAtomSize)
 
+  // TEMP (Android GPU hang hunt): REX_VK_ROBUST=1 also enables bounds-checked
+  // buffer access and null descriptors for the native GTA IV renderer.
+  const bool native_robustness = with_native_shader_support && std::getenv("REX_VK_ROBUST") &&
+                                 std::getenv("REX_VK_ROBUST")[0] == '1';
+  if (native_robustness && !with_gpu_emulation) {
+    XE_UI_VULKAN_FEATURE(robustBufferAccess)
+  }
   if (with_gpu_emulation) {
     if (device->properties_.driverID != VK_DRIVER_ID_MOLTENVK) {
       XE_UI_VULKAN_FEATURE(robustBufferAccess)
@@ -974,7 +986,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   }
 
   if (device->extensions_.ext_EXT_robustness2) {
-    if (with_gpu_emulation) {
+    if (with_gpu_emulation || native_robustness) {
       XE_UI_VULKAN_FEATURE_2(features_EXT_robustness2, nullDescriptor)
     }
   }

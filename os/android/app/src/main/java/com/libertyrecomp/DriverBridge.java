@@ -42,17 +42,19 @@ final class DriverBridge {
 
     static final String TURNIP = "turnip";
     static final String SYSTEM = "system";
+    /** "custom:NAME" loads an AdrenoTools package unpacked in drivers/NAME next to driver.txt. */
+    static final String CUSTOM_PREFIX = "custom:";
 
     private static final String TAG = "LibertyDriver";
-    private static final String BUNDLE_ASSET = "drivers/turnip-t30.zip";
-    private static final String LIBRARY = "vulkan.purple.so";
+    private static final String BUNDLE_ASSET = "drivers/turnip-r6.zip";
+    private static final String LIBRARY = "libvulkan_freedreno.so";
     private static final String META = "meta.json";
     private static final String ZIP_HASH =
-            "f65b2d3353fd4aa7190bb5426b94468e99ffea7a58a830bc0c4651db89353227";
+            "5fa2305eb9eff64d9347a670e6ca5ef7c518f60e9e782a4db7ee5588c9852d81";
     private static final String LIB_HASH =
-            "1d80dfa019659b008e4669311db5b1e4a02af59ff1d5458a98e2f5fe18ed013b";
+            "4fd2fd30311af301ae5564139bc24cc727390d4dc3c90a20192c25ec91287c59";
     private static final String META_HASH =
-            "bf6c432ffd05a254a9531920f6ec826abb2bcf91c52a0c5467167a0ee1940f73";
+            "b6dae160802aec1ab48a0953fd9b09d76465a282c4a1d134645218af2a62d9d3";
 
     private static boolean sInitialized;
 
@@ -69,7 +71,21 @@ final class DriverBridge {
         String nativeDir = context.getApplicationInfo().nativeLibraryDir;
         boolean custom = TURNIP.equals(mode);
         File driverDir = new File(context.getFilesDir(), "drivers");
-        if (custom) {
+        String library = LIBRARY;
+        if (mode != null && mode.startsWith(CUSTOM_PREFIX)) {
+            try {
+                String name = mode.substring(CUSTOM_PREFIX.length()).trim();
+                driverDir = prepareCustom(context, name);
+                library = customLibrary(driverDir);
+                custom = true;
+                Log.i(TAG, "custom driver " + name + " library=" + library);
+            } catch (IOException | RuntimeException e) {
+                Log.e(TAG, "custom driver unusable, using the bundled Turnip", e);
+                mode = TURNIP;
+                custom = true;
+            }
+        }
+        if (custom && LIBRARY.equals(library)) {
             try {
                 driverDir = prepareBundle(context);
             } catch (IOException | RuntimeException e) {
@@ -82,7 +98,7 @@ final class DriverBridge {
         }
         System.load(new File(nativeDir, "libvulkan.so").getAbsolutePath());
         String status = nativeInit(nativeDir, driverDir.getAbsolutePath(),
-                custom ? LIBRARY : "", custom);
+                custom ? library : "", custom);
         sInitialized = true;
         boolean ok = false;
         try {
@@ -97,10 +113,54 @@ final class DriverBridge {
         return status;
     }
 
+    /** Copies an unpacked package from external storage into exec-capable private storage. */
+    private static File prepareCustom(Context context, String name) throws IOException {
+        if (name.isEmpty() || name.contains("/") || name.contains("..")) {
+            throw new IOException("bad custom driver name: " + name);
+        }
+        File source = new File(context.getExternalFilesDir(null), "drivers/" + name);
+        File[] files = source.listFiles();
+        if (files == null || files.length == 0) {
+            throw new IOException("no custom driver files in " + source);
+        }
+        File destination = new File(new File(context.getFilesDir(), "drivers"), "custom-" + name);
+        deleteRecursively(destination);
+        if (!destination.mkdirs()) {
+            throw new IOException("cannot create " + destination);
+        }
+        for (File file : files) {
+            if (!file.isFile()) continue;
+            try (InputStream in = new java.io.FileInputStream(file);
+                 OutputStream out = new FileOutputStream(new File(destination, file.getName()))) {
+                copy(in, out);
+            }
+        }
+        return destination;
+    }
+
+    /** meta.json libraryName, else the only .so in the package. */
+    private static String customLibrary(File dir) throws IOException {
+        File meta = new File(dir, META);
+        if (meta.isFile()) {
+            try (InputStream in = new java.io.FileInputStream(meta)) {
+                java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                copy(in, bytes);
+                String name = new JSONObject(bytes.toString("UTF-8")).optString("libraryName", "");
+                if (!name.isEmpty() && new File(dir, name).isFile()) return name;
+            } catch (JSONException ignored) {
+            }
+        }
+        File[] libraries = dir.listFiles((d, n) -> n.endsWith(".so"));
+        if (libraries == null || libraries.length != 1) {
+            throw new IOException("cannot pick the driver library in " + dir);
+        }
+        return libraries[0].getName();
+    }
+
     /** Extracts the hash-pinned two-file Turnip package into private storage. */
     private static File prepareBundle(Context context) throws IOException {
         File parent = new File(context.getFilesDir(), "drivers");
-        File destination = new File(parent, "t30-" + LIB_HASH.substring(0, 12));
+        File destination = new File(parent, "r6-" + LIB_HASH.substring(0, 12));
         if (valid(new File(destination, LIBRARY), LIB_HASH)
                 && valid(new File(destination, META), META_HASH)) {
             return destination;
@@ -108,8 +168,8 @@ final class DriverBridge {
         if (!parent.isDirectory() && !parent.mkdirs()) {
             throw new IOException("cannot create " + parent);
         }
-        File archive = File.createTempFile("turnip-t30-", ".zip", context.getCacheDir());
-        File staging = new File(parent, ".t30-staging-" + Process.myPid());
+        File archive = File.createTempFile("turnip-r6-", ".zip", context.getCacheDir());
+        File staging = new File(parent, ".r6-staging-" + Process.myPid());
         try {
             try (InputStream in = context.getAssets().open(BUNDLE_ASSET);
                  OutputStream out = new FileOutputStream(archive)) {

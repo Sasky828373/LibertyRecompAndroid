@@ -10,6 +10,7 @@
 #include "native_pipeline_stats.h"
 #include "native_gpu_counters.h"
 #include "native_spirv_descriptor_remap.h"
+#include "native_spirv_loop_watchdog.h"
 #include "native_spirv_ubo_constants.h"
 #include "native_spirv_constant_range.h"
 #include "native_fixed_state_hash.h"
@@ -161,6 +162,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_ubo_layout, true, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_BOOL(gta4_native_skip_attachment_barriers, false, "GTA IV/Graphics/Native Renderer",
                     "Skip attachment-to-same-attachment layout barriers between rendering scopes "
                     "(Turnip keeps draw order across scopes)");
+REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, false, "GTA IV/Graphics/Native Renderer",
+                    "Bound shader loops by an iteration budget so a runaway loop ends the "
+                    "invocation instead of hanging the GPU");
 REXCVAR_DEFINE_UINT32(gta4_native_debug_skip_gpu_range, 0, "GTA IV/Diagnostics",
                       "TEMP: skip draws of one GPU range (performance::GpuRange + 1; 0 = none)");
 REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, false, "GTA IV/Graphics/Native Renderer",
@@ -7353,6 +7357,31 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         stock_late_spirv_size = stock_late_spirv.size() * sizeof(uint32_t);
       }
     }
+    const auto apply_loop_watchdog = [&](std::vector<uint32_t>& spirv) {
+      if (!REXCVAR_GET(gta4_native_loop_watchdog) || spirv.empty()) return;
+      auto guarded = AddSpirvLoopWatchdog(spirv, 16384);
+      if (!guarded) return;
+#if REX_PLATFORM_ANDROID
+      // TEMP: keep a few guarded modules for offline validation.
+      static std::atomic<uint32_t> dumped{0};
+      if (dumped.fetch_add(1) < 6) {
+        const auto path = rex::filesystem::GetUserFolder() /
+                          fmt::format("wd_{:016X}_{}.spv", command.hash,
+                                      command.stage == ShaderStage::kVertex ? "vs" : "ps");
+        if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
+          std::fwrite(guarded->words.data(), sizeof(uint32_t), guarded->words.size(), file);
+          std::fclose(file);
+        }
+      }
+      static std::atomic<uint32_t> guarded_shaders{0}, guarded_loops{0};
+      guarded_loops += guarded->guarded_loops;
+      const uint32_t shaders = ++guarded_shaders;
+      if ((shaders & (shaders - 1)) == 0)
+        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "loop-watchdog: shaders=%u loops=%u",
+                            shaders, guarded_loops.load());
+#endif
+      spirv = std::move(guarded->words);
+    };
     // Constant bank reads through uniform buffers (descriptor set 6).
     const auto apply_ubo_constants = [&](std::vector<uint32_t>& spirv) {
       if (!REXCVAR_GET(gta4_native_ubo_constants) || !REXCVAR_GET(gta4_native_ubo_layout) ||
@@ -7385,6 +7414,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
     };
     RemapSpirvDrawDescriptorSets(stock_early_spirv);
     RemapSpirvDrawDescriptorSets(stock_late_spirv);
+    apply_loop_watchdog(stock_early_spirv);
+    apply_loop_watchdog(stock_late_spirv);
     apply_ubo_constants(stock_early_spirv);
     stock_early_spirv_size = stock_early_spirv.size() * sizeof(uint32_t);
     if (!stock_late_spirv.empty()) {
@@ -7562,6 +7593,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
       if (!override_rejection) {
         RemapSpirvDrawDescriptorSets(override_early_spirv);
         RemapSpirvDrawDescriptorSets(override_late_spirv);
+        apply_loop_watchdog(override_early_spirv);
+        apply_loop_watchdog(override_late_spirv);
         apply_ubo_constants(override_early_spirv);
         apply_ubo_constants(override_late_spirv);
         const size_t effective_early_size = override_early_spirv.size() * sizeof(uint32_t);
