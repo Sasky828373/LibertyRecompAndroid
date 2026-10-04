@@ -166,6 +166,9 @@ REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_trigger, 0, "GTA IV/Diagnostic
                       "TEMP: changing this value starts one native profile capture");
 REXCVAR_DEFINE_BOOL(gta4_native_dump_shaders, false, "GTA IV/Diagnostics",
                     "TEMP: write every registered stock shader's SPIR-V to spv/ in the user folder");
+REXCVAR_DEFINE_UINT32(gta4_native_water_reflection_interval, 1, "GTA IV/Graphics/Reflections",
+                      "Re-render the water reflection every N frames (1 = every frame); in between "
+                      "the previous reflection is reused");
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
@@ -28473,8 +28476,21 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         PhoneTraceConfig().readbacks));
   }
   const uint32_t debug_skip_gpu_range = REXCVAR_GET(gta4_native_debug_skip_gpu_range);
+  const uint32_t water_reflection_interval = REXCVAR_GET(gta4_native_water_reflection_interval);
+  const bool skip_water_reflection =
+      water_reflection_interval > 1 && submitted_frame % water_reflection_interval != 0;
   for (size_t command_index = 0; command_index < current_frame_.size(); ++command_index) {
     const NativeCommand& queued_command = current_frame_[command_index];
+    // Draws, clears and resolves of the water reflection capture: the reflection
+    // texture keeps the previous capture on skipped frames.
+    if (skip_water_reflection &&
+        (queued_command.type == CommandType::kDrawPrimitive ||
+         queued_command.type == CommandType::kDrawPrimitiveUp ||
+         queued_command.type == CommandType::kDrawIndexedPrimitive ||
+         queued_command.type == CommandType::kClear || queued_command.type == CommandType::kResolve) &&
+        performance_range_for_command(queued_command) == performance::GpuRange::kWaterReflections) {
+      continue;
+    }
     const auto* profile_state = queued_command.pipeline_state.get();
     const profile::CpuContextScope detail_command_context({uint32_t(command_index), uint32_t(queued_command.render_phase),
         profile_state && profile_state->vertex_shader_resource ? profile_state->vertex_shader_resource->hash : 0,
