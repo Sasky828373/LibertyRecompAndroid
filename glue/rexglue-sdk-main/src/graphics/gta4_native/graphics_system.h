@@ -165,8 +165,6 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     std::array<uint64_t, 4> module_code_hashes{};
     std::string filename;
     std::vector<NativeVertexInput> vertex_inputs;
-    // Reads gl_VertexIndex/gl_InstanceIndex: its draws cannot be concatenated.
-    bool uses_vertex_index = false;
     // Bytes of this stage's guest constant bank any of its modules can read
     // (SpirvConstantRange::kUnbounded: the whole bank).
     uint32_t constant_bytes = 0xFFFFFFFFu;
@@ -1688,12 +1686,6 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   bool RecordPrimitiveUp(VkCommandBuffer command_buffer, const NativeCommand& command,
                          uint32_t width, uint32_t height, const NativeRenderingTarget& target,
                          NativeFrameResources& resources);
-  // Consecutive DrawPrimitiveUp commands with identical state drawn as one
-  // indexed triangle list over their concatenated vertices.
-  bool RecordPrimitiveUpBatch(VkCommandBuffer command_buffer,
-                              const std::vector<const NativeCommand*>& run, uint32_t width,
-                              uint32_t height, const NativeRenderingTarget& target,
-                              NativeFrameResources& resources);
   bool RecordIndexedPrimitive(VkCommandBuffer command_buffer, const NativeCommand& command,
                               uint32_t width, uint32_t height, const NativeRenderingTarget& target,
                               NativeFrameResources& resources);
