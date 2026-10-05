@@ -26,7 +26,7 @@
 --gta4_dynamic_draw_distance=true
 --gta4_dynamic_draw_distance_min=0.7
 --gta4_shadow_map_base_size=256
---gta4_shadow_distance_scale=1.0
+--gta4_shadow_distance_scale=0.75
 --gta4_reflection_resolution=original
 --gta4_reflection_capture_distance=near
 # 4x MSAA on the low-resolution water/mirror captures is invisible but costs
@@ -49,3 +49,5 @@
 # Renderer profiling scopes (on by default upstream)
 --gta4_profile_native_detailed_cpu=false
 --gta4_profile_native_detailed_gpu=false
+# Motion blur costs a full-screen composite and steadies frame times when off.
+--gta4_motion_blur=false

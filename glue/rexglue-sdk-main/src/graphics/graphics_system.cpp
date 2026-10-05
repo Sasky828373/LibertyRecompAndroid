@@ -30,10 +30,23 @@
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
+#include <rex/platform.h>
+
+#if REX_PLATFORM_ANDROID
+#include <android/choreographer.h>
+#include <android/looper.h>
+#include <atomic>
+#include <chrono>
+#endif
 
 REXCVAR_DEFINE_STRING(trace_gpu_prefix, "", "GPU", "GPU trace file prefix");
 
 REXCVAR_DEFINE_BOOL(trace_gpu_stream, false, "GPU", "Enable GPU trace streaming");
+
+REXCVAR_DEFINE_BOOL(vsync_display_source, true, "GPU",
+                    "Android: raise guest vblanks from the display's vsync (Choreographer) "
+                    "instead of a free-running timer, so title frames stay phase-locked to "
+                    "the panel");
 
 REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
     .allowed({"none", "fxaa", "fxaa_extreme"})
@@ -162,6 +175,57 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+#if REX_PLATFORM_ANDROID
+        // A free-running 60 Hz timer beats against the panel's own 60 Hz: the
+        // title's two-vblank frames drift in phase until they straddle a vsync
+        // and alternate 16/50 ms. Choreographer callbacks are the panel's vsync.
+        if (REXCVAR_GET(vsync_display_source) && REXCVAR_GET(vsync) && ALooper_prepare(0)) {
+          if (AChoreographer* choreographer = AChoreographer_getInstance()) {
+            struct DisplayVsync {
+              GraphicsSystem* system;
+              AChoreographer* choreographer;
+              int64_t guest_interval_ns;
+              int64_t last_vblank_ns = 0;
+              std::atomic<int64_t> last_callback_ns{0};
+            };
+            static void (*const kCallback)(long, void*) = [](long frame_time_ns, void* data) {
+              auto* state = static_cast<DisplayVsync*>(data);
+              // Keep the guest rate on faster panels: skip callbacks that come
+              // well inside one guest interval.
+              if (!state->last_vblank_ns ||
+                  frame_time_ns - state->last_vblank_ns >= state->guest_interval_ns * 3 / 4) {
+                state->last_vblank_ns = frame_time_ns;
+                state->system->MarkVblank();
+              }
+              state->last_callback_ns.store(frame_time_ns, std::memory_order_relaxed);
+              AChoreographer_postFrameCallback(state->choreographer, kCallback, data);
+            };
+            DisplayVsync state{this, choreographer,
+                               int64_t(1'000'000'000.0 / refresh_rate_hz)};
+            AChoreographer_postFrameCallback(choreographer, kCallback, &state);
+            auto now_ns = [] {
+              return int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count());
+            };
+            int64_t last_fallback_ns = now_ns();
+            while (vsync_worker_running_ && REXCVAR_GET(vsync_display_source)) {
+              ALooper_pollOnce(8, nullptr, nullptr, nullptr);
+              // No callbacks (surface gone, app in background): keep the guest
+              // alive on the timer rate until the display returns.
+              const int64_t now = now_ns();
+              const int64_t last = state.last_callback_ns.load(std::memory_order_relaxed);
+              if (now - last > 100'000'000 && now - last_fallback_ns >= state.guest_interval_ns) {
+                last_fallback_ns = now;
+                MarkVblank();
+              }
+            }
+            // Drain the pending callback before the state goes out of scope.
+            while (ALooper_pollOnce(0, nullptr, nullptr, nullptr) == ALOOPER_POLL_CALLBACK) {
+            }
+            last_frame_time = chrono::Clock::QueryGuestTickCount();
+          }
+        }
+#endif
         while (vsync_worker_running_) {
           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
           uint64_t interval_ticks =

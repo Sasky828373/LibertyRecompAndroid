@@ -118,6 +118,11 @@ function(rexgpu_configure_plugin target export_name)
         snappy
     )
 
+    if(ANDROID)
+        # Guest vblanks follow the display through AChoreographer.
+        target_link_libraries(${target} PRIVATE android)
+    endif()
+
     if(REXGLUE_USE_VULKAN)
         target_link_libraries(${target} PRIVATE
             volk::volk

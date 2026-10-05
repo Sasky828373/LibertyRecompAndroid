@@ -6,7 +6,7 @@
 --gta4_dynamic_draw_distance=true
 --gta4_dynamic_draw_distance_min=0.7
 --gta4_shadow_map_base_size=256
---gta4_shadow_distance_scale=1.0
+--gta4_shadow_distance_scale=0.75
 --gta4_reflection_resolution=original
 --gta4_reflection_capture_distance=near
 --gta4_frame_limit=30
@@ -16,3 +16,4 @@
 --gta4_scenario_ped_density_scale=0.4
 --gta4_profile_native_detailed_cpu=false
 --gta4_profile_native_detailed_gpu=false
+--gta4_motion_blur=false
