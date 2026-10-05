@@ -21,10 +21,10 @@
 # count is what sets the frame rate on Snapdragon 865 (stock ~5800 draws,
 # this profile ~1400-1700). Shadows were ~45% of all draws.
 --gta4_draw_distance_scale=1.0
-# Console draw distance, lowered automatically (down to 70%) only while
+# Console draw distance, lowered automatically (down to 55%) only while
 # frames miss the 30 fps budget.
 --gta4_dynamic_draw_distance=true
---gta4_dynamic_draw_distance_min=0.7
+--gta4_dynamic_draw_distance_min=0.55
 --gta4_shadow_map_base_size=256
 --gta4_shadow_distance_scale=0.75
 --gta4_reflection_resolution=original
@@ -51,3 +51,5 @@
 --gta4_profile_native_detailed_gpu=false
 # Motion blur costs a full-screen composite and steadies frame times when off.
 --gta4_motion_blur=false
+# Let the title run three frames ahead so the worker, recorder and GPU overlap.
+--gta4_native_max_queued_frames=3
