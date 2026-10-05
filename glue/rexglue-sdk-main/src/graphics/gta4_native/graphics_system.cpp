@@ -30,6 +30,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -34269,6 +34270,17 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
   }
   if (!InitializeNativeRendererObjects()) {
     REXLOG_ERROR("gta4-native: failed to initialize native Vulkan renderer objects");
+#if REX_PLATFORM_ANDROID
+    // After a GPU reset the device is lost and re-initialization fails on
+    // every frame: the title freezes for good. Leave instead, so the player
+    // only has to relaunch.
+    static uint32_t consecutive_failures = 0;
+    if (++consecutive_failures >= 30) {
+      __android_log_print(ANDROID_LOG_ERROR, "LibertyRecomp",
+                          "gta4-native: Vulkan device lost (GPU reset); exiting");
+      std::_Exit(3);
+    }
+#endif
     return false;
   }
 
