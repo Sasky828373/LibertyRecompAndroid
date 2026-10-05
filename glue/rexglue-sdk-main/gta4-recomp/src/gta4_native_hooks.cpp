@@ -69,6 +69,10 @@ REXCVAR_DECLARE(std::string, gta4_reflection_aa);
 REXCVAR_DECLARE(std::string, gta4_reflection_capture_distance);
 REXCVAR_DECLARE(std::string, gta4_native_upscaler);
 REXCVAR_DECLARE(std::string, gta4_fsr1_quality);
+REXCVAR_DEFINE_UINT32(gta4_output_height_cap, 0, "GTA IV/Graphics/Upscaling",
+                      "Cap the game's output height (e.g. 720); the presenter scales that image "
+                      "to the display. 0 keeps the display resolution")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DECLARE(std::string, gta4_aspect_ratio);
 REXCVAR_DECLARE(bool, gta4_force_highest_lod);
 REXCVAR_DECLARE(double, gta4_draw_distance_scale);
@@ -2830,8 +2834,16 @@ NativeResolutionOverride GetNativeResolutionOverride(uint32_t requested_width,
       REXCVAR_GET(gta4_aspect_ratio), drawable);
   result.display_width = result.width = selected.width;
   result.display_height = result.height = selected.height;
-  result.override_width |= selected.width != requested_width;
-  result.override_height |= selected.height != requested_height;
+  if (const uint32_t cap = REXCVAR_GET(gta4_output_height_cap);
+      cap >= 360 && result.display_height > cap) {
+    // Same shape, fewer output pixels: FSR upscales to this size and the
+    // presenter stretches the result to the display.
+    result.display_width = result.width =
+        std::max(2u, uint32_t(uint64_t(result.display_width) * cap / result.display_height) & ~1u);
+    result.display_height = result.height = cap;
+  }
+  result.override_width |= result.display_width != requested_width;
+  result.override_height |= result.display_height != requested_height;
 
   const uint32_t requested_ssaa_factor =
       GetAntiAliasingRoute(GetActiveAntiAliasingMode()).supersampling_pixel_factor;

@@ -1245,6 +1245,16 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   // device, and the minimum swap chain size on the whole instance - fail to
   // create until the surface becomes smaller).
   VkExtent2D max_framebuffer_extent = util::GetMax2DFramebufferExtent(vulkan_device->properties());
+#if REX_PLATFORM_ANDROID
+  // The window's buffer size (SurfaceHolder.setFixedSize) is authoritative on
+  // Android: the compositor scales that buffer to the view. Requesting the view
+  // size instead would draw a smaller image into a corner.
+  if (surface_capabilities.currentExtent.width != UINT32_MAX &&
+      surface_capabilities.currentExtent.width && surface_capabilities.currentExtent.height) {
+    width = surface_capabilities.currentExtent.width;
+    height = surface_capabilities.currentExtent.height;
+  }
+#endif
   VkExtent2D image_extent;
   image_extent.width = std::min(std::max(std::min(width, max_framebuffer_extent.width),
                                          surface_capabilities.minImageExtent.width),

@@ -1,5 +1,6 @@
 package com.libertyrecomp;
 
+import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.res.AssetManager;
 import android.os.Bundle;
@@ -10,6 +11,7 @@ import android.view.View;
 import android.view.WindowManager;
 
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLSurface;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -51,6 +53,10 @@ public class LibertyActivity extends SDLActivity {
     private static final String DEFAULT_ARGS = "default_args.txt";
 
     private String[] mArguments = new String[0];
+    /** "--android_surface=WxH" in args.txt: fixed swapchain size, scaled to the panel by the display hardware. */
+    private static final String SURFACE_ARGUMENT = "--android_surface=";
+    private int mSurfaceWidth;
+    private int mSurfaceHeight;
     private String mDriverMode = DriverBridge.TURNIP;
 
     @Override
@@ -66,6 +72,16 @@ public class LibertyActivity extends SDLActivity {
     public void loadLibraries() {
         DriverBridge.initialize(this, mDriverMode);
         super.loadLibraries();
+    }
+
+    @Override
+    protected SDLSurface createSDLSurface(Context context) {
+        SDLSurface surface = super.createSDLSurface(context);
+        if (mSurfaceWidth > 0 && mSurfaceHeight > 0) {
+            surface.getHolder().setFixedSize(mSurfaceWidth, mSurfaceHeight);
+            Log.i(TAG, "fixed surface " + mSurfaceWidth + "x" + mSurfaceHeight);
+        }
+        return surface;
     }
 
     @Override
@@ -110,6 +126,20 @@ public class LibertyActivity extends SDLActivity {
         }
         List<String> arguments = new ArrayList<>(Arrays.asList(readArguments(argsFile)));
         addInstallSources(new File(dataRoot, "install"), arguments);
+        for (int i = arguments.size() - 1; i >= 0; --i) {
+            String argument = arguments.get(i);
+            if (!argument.startsWith(SURFACE_ARGUMENT)) continue;
+            arguments.remove(i);  // Java-side setting; the runtime does not know it.
+            String[] size = argument.substring(SURFACE_ARGUMENT.length()).split("x");
+            try {
+                if (size.length == 2) {
+                    mSurfaceWidth = Integer.parseInt(size[0].trim());
+                    mSurfaceHeight = Integer.parseInt(size[1].trim());
+                }
+            } catch (NumberFormatException e) {
+                Log.w(TAG, "bad " + argument);
+            }
+        }
         mArguments = arguments.toArray(new String[0]);
         String driver = readFirstLine(new File(dataRoot, "driver.txt"));
         if (driver != null && driver.trim().startsWith(DriverBridge.CUSTOM_PREFIX)) {
