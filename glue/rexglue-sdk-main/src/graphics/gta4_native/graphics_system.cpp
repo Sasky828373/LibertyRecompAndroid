@@ -402,6 +402,8 @@ std::array<std::atomic<uint32_t>, 4096> g_rendering_split_reasons{};
 // TEMP: resolve-class GPU work per call site, and resolve reuse totals.
 std::array<std::atomic<uint32_t>, 65536> g_resolve_sites{};
 std::atomic<uint64_t> g_resolve_reuse_candidates{0}, g_resolve_reuse_hits{0};
+// TEMP: recorded draws per performance::GpuRange.
+std::array<std::atomic<uint32_t>, 64> g_draws_by_range{};
 std::mutex g_resolve_kinds_mutex;
 std::map<std::string, uint32_t> g_resolve_kinds;
 void NoteResolveKind(std::string key) {
@@ -6373,6 +6375,18 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                 for (size_t offset = 0; offset < line.size(); offset += 900)
                   __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "resolve-kinds:%s",
                                       line.substr(offset, 900).c_str());
+              }
+              {
+                std::vector<std::pair<uint32_t, uint32_t>> ranges;
+                for (uint32_t r = 0; r < g_draws_by_range.size(); ++r)
+                  if (const uint32_t n = g_draws_by_range[r].exchange(0)) ranges.emplace_back(n, r);
+                std::sort(ranges.rbegin(), ranges.rend());
+                std::string line;
+                for (size_t i = 0; i < ranges.size() && i < 10; ++i)
+                  line += fmt::format(" {}={:.0f}", performance::GpuRangeName(performance::GpuRange(ranges[i].second)),
+                                      ranges[i].first / 120.0);
+                __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "draws-by-range/frame:%s",
+                                    line.c_str());
               }
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "resolves/frame:%s reuse=%.1f/%.1f", top.c_str(),
@@ -30694,9 +30708,10 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     const bool draw_command = command.type == CommandType::kDrawPrimitive ||
                               command.type == CommandType::kDrawPrimitiveUp ||
                               command.type == CommandType::kDrawIndexedPrimitive;
-    if (draw_command && debug_skip_gpu_range &&
-        uint32_t(performance_range_for_command(command)) + 1 == debug_skip_gpu_range) {
-      continue;
+    if (draw_command) {
+      const uint32_t range = uint32_t(performance_range_for_command(command));
+      if (range < g_draws_by_range.size()) ++g_draws_by_range[range];
+      if (debug_skip_gpu_range && range + 1 == debug_skip_gpu_range) continue;
     }
     const bool artificial_light_trace_requested =
         ShouldCaptureArtificialLightFrame(submitted_frame);
