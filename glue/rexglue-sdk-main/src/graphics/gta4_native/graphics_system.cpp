@@ -30,6 +30,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -8812,6 +8813,24 @@ void Gta4NativeGraphicsSystem::RollbackActiveNativeFrameSlot() {
 bool Gta4NativeGraphicsSystem::RecoverFailedNativeFrameRecording() {
   gpu_flight::Record("native.recovery-begin", active_frame_slot_, command_buffer_submission_,
                      active_texture_frame_, secondary_command_buffer_submission_);
+#if REX_PLATFORM_ANDROID
+  {
+    // After a GPU reset every submission fails and recovery rebuilds the
+    // renderer each frame forever: the title freezes. Leave instead.
+    static std::chrono::steady_clock::time_point window_begin{};
+    static uint32_t recoveries = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window_begin > std::chrono::seconds(5)) {
+      window_begin = now;
+      recoveries = 0;
+    }
+    if (++recoveries >= 10) {
+      __android_log_print(ANDROID_LOG_ERROR, "LibertyRecomp",
+                          "gta4-native: frame recording keeps failing (GPU reset); exiting");
+      std::_Exit(3);
+    }
+  }
+#endif
   auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
   const ui::vulkan::VulkanDevice* vulkan_device =
       vulkan_provider ? vulkan_provider->vulkan_device() : nullptr;
