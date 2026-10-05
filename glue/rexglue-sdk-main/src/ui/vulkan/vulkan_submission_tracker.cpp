@@ -15,6 +15,12 @@
 #include <rex/diagnostics/gpu_flight_recorder.h>
 #include <rex/logging.h>
 #include <rex/ui/vulkan/submission_tracker.h>
+
+#include <cstdlib>
+#include <rex/platform.h>
+#if REX_PLATFORM_ANDROID
+#include <android/log.h>
+#endif
 #include <rex/ui/vulkan/util.h>
 
 namespace rex {
@@ -161,8 +167,26 @@ bool VulkanSubmissionTracker::AwaitSubmissionCompletion(uint64_t submission_inde
         // Wait if requested.
         gpu_flight::Record("fence.wait-begin", uint64_t(uintptr_t(pending_pair.second)),
                            pending_pair.first, 0, uint64_t(uintptr_t(this)), submission_index);
-        const VkResult wait_result =
-            dfn.vkWaitForFences(device, 1, &pending_pair.second, VK_TRUE, UINT64_MAX);
+        VkResult wait_result = VK_TIMEOUT;
+#if REX_PLATFORM_ANDROID
+        // A fence of a submission the kernel dropped during a GPU reset may
+        // never signal; an unbounded wait then freezes every thread behind it.
+        // Frames take tens of milliseconds and a reset ~100 ms: after 5 s the
+        // GPU is gone, so leave and let the player relaunch.
+        for (uint32_t waited_ms = 0;; waited_ms += 500) {
+          wait_result =
+              dfn.vkWaitForFences(device, 1, &pending_pair.second, VK_TRUE, 500'000'000ull);
+          if (wait_result != VK_TIMEOUT) break;
+          if (waited_ms >= 5000) {
+            __android_log_print(ANDROID_LOG_ERROR, "LibertyRecomp",
+                                "vulkan: submission fence did not signal for 5 s (GPU reset); "
+                                "exiting");
+            std::_Exit(3);
+          }
+        }
+#else
+        wait_result = dfn.vkWaitForFences(device, 1, &pending_pair.second, VK_TRUE, UINT64_MAX);
+#endif
         gpu_flight::Record("fence.wait-end", uint64_t(uintptr_t(pending_pair.second)),
                            pending_pair.first, 0, uint64_t(uintptr_t(this)), submission_index,
                            int32_t(wait_result));

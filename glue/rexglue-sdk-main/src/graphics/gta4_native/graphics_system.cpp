@@ -26750,7 +26750,7 @@ bool Gta4NativeGraphicsSystem::ReadbackTextureToGuest(const TextureLockCommand& 
   // only the final CPU-visible readback requires a host wait.
   auto& readback = texture_readback_;
   if (readback.pending) {
-    if (dfn.vkWaitForFences(device, 1, &readback.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+    if (dfn.vkWaitForFences(device, 1, &readback.fence, VK_TRUE, 5'000'000'000ull) != VK_SUCCESS) {
       return false;
     }
     readback.pending = false;
@@ -26882,7 +26882,7 @@ bool Gta4NativeGraphicsSystem::ReadbackTextureToGuest(const TextureLockCommand& 
     }
   }
   readback.pending = true;
-  if (dfn.vkWaitForFences(device, 1, &readback.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+  if (dfn.vkWaitForFences(device, 1, &readback.fence, VK_TRUE, 5'000'000'000ull) != VK_SUCCESS) {
     // Keep submitted objects alive if completion could not be established.
     return false;
   }
