@@ -372,6 +372,14 @@ elseif(ANDROID)
         # instead of through this library's own PLT (nothing interposes them).
         "-Wl,-Bsymbolic-functions"
     )
+    # ThinLTO across the recompiled game: with direct calls, small guest
+    # functions can now be inlined into their callers at link time.
+    option(LIBERTY_ANDROID_THINLTO "ThinLTO for libmain on Android" ON)
+    if(LIBERTY_ANDROID_THINLTO)
+        target_compile_options(LibertyRecomp PRIVATE -flto=thin)
+        target_link_options(LibertyRecomp PRIVATE -flto=thin "-Wl,--thinlto-jobs=8"
+            "-Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/thinlto-cache")
+    endif()
 else()
     add_library(gta4_recomp INTERFACE)
     target_include_directories(gta4_recomp INTERFACE
