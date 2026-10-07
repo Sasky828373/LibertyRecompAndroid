@@ -170,6 +170,8 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     // Bytes of this stage's guest constant bank any of its modules can read
     // (SpirvConstantRange::kUnbounded: the whole bank).
     uint32_t constant_bytes = 0xFFFFFFFFu;
+    // Loops bounded by the loop watchdog in the stock modules (diagnostics).
+    uint32_t watchdog_loops = 0;
     // Vertex conversion depends only on the input interface, so converted and
     // persistent vertex data are shared by every shader with the same inputs.
     uint64_t input_signature_hash = 0;

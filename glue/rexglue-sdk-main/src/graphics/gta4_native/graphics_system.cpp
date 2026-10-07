@@ -183,6 +183,11 @@ REXCVAR_DEFINE_UINT32(gta4_native_merge_up_max, 16, "GTA IV/Graphics/Native Rend
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
+REXCVAR_DEFINE_UINT32(gta4_native_loop_watchdog_budget, 16384, "GTA IV/Graphics/Native Renderer",
+                      "Loop-header iterations one shader invocation may run before it returns")
+    .range(64, 1u << 20);
+REXCVAR_DEFINE_STRING(gta4_native_debug_skip_ps, "", "GTA IV/Diagnostics",
+                      "TEMP: skip draws whose pixel shader hash starts with this hex prefix");
 REXCVAR_DEFINE_UINT32(gta4_native_debug_skip_gpu_range, 0, "GTA IV/Diagnostics",
                       "TEMP: skip draws of one GPU range (performance::GpuRange + 1; 0 = none)");
 REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, false, "GTA IV/Graphics/Native Renderer",
@@ -7506,10 +7511,18 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         stock_late_spirv_size = stock_late_spirv.size() * sizeof(uint32_t);
       }
     }
+    uint32_t watchdog_loops = 0;
     const auto apply_loop_watchdog = [&](std::vector<uint32_t>& spirv) {
       if (!REXCVAR_GET(gta4_native_loop_watchdog) || spirv.empty()) return;
-      auto guarded = AddSpirvLoopWatchdog(spirv, 16384);
+      auto guarded = AddSpirvLoopWatchdog(spirv, REXCVAR_GET(gta4_native_loop_watchdog_budget));
       if (!guarded) return;
+      watchdog_loops += guarded->guarded_loops;
+#if REX_PLATFORM_ANDROID
+      if (guarded->guarded_loops)
+        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "loop-watchdog: %s %016llX loops=%u",
+                            command.stage == ShaderStage::kVertex ? "vs" : "ps",
+                            (unsigned long long)command.hash, guarded->guarded_loops);
+#endif
 #if REX_PLATFORM_ANDROID
       // TEMP: keep a few guarded modules for offline validation.
       static std::atomic<uint32_t> dumped{0};
@@ -7603,6 +7616,7 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
     auto resource = std::make_unique<NativeShader>();
     resource->stage = command.stage;
     resource->hash = command.hash;
+    resource->watchdog_loops = watchdog_loops;
     resource->specialization_constants_mask = cache_entry->specConstantsMask;
     resource->used_texture_mask = cache_entry->usedTextureMask;
     resource->color_output_mask = stock_color_output_mask;
@@ -30951,6 +30965,53 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         uint32_t(performance_range_for_command(command)) + 1 == debug_skip_gpu_range) {
       continue;
     }
+#if REX_PLATFORM_ANDROID
+    // TEMP: water-dive GPU hang hunt. Log every shader pair drawn in the
+    // deferred light volumes once; optionally skip one pixel shader.
+    if (draw_command && command.pipeline_state) {
+      const NativeShader* vs = command.pipeline_state->vertex_shader_resource;
+      const NativeShader* ps = command.pipeline_state->pixel_shader_resource;
+      const uint32_t range = uint32_t(performance_range_for_command(command));
+      if (range == uint32_t(performance::GpuRange::kDeferredLightVolumes) ||
+          range == uint32_t(performance::GpuRange::kLightSetup)) {
+        static std::set<std::pair<uint64_t, uint64_t>> seen;
+        const auto key = std::make_pair(vs ? vs->hash : 0, ps ? ps->hash : 0);
+        if (seen.size() < 512 && seen.insert(key).second)
+          __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                              "light-pair: range=%u vs=%016llX/%u ps=%016llX/%u type=%u",
+                              range, (unsigned long long)key.first, vs ? vs->watchdog_loops : 0,
+                              (unsigned long long)key.second, ps ? ps->watchdog_loops : 0,
+                              uint32_t(command.type));
+      }
+      if (range == uint32_t(performance::GpuRange::kDeferredLightVolumes) &&
+          command.type == CommandType::kDrawPrimitive &&
+          command.bytes.size() >= sizeof(DrawPrimitiveCommand)) {
+        DrawPrimitiveCommand draw{};
+        std::memcpy(&draw, command.bytes.data(), sizeof(draw));
+        const uint32_t stride = command.pipeline_state->vertex_streams[0].stride;
+        const uint32_t offset = command.pipeline_state->vertex_streams[0].offset;
+        const size_t payload = command.vertex_buffers[0] ? command.vertex_buffers[0]->payload.size() : 0;
+        const uint64_t end = uint64_t(offset) + (uint64_t(draw.start_vertex) + draw.vertex_count) * stride;
+        static uint32_t max_count = 0;
+        static uint32_t odd_logs = 0;
+        const bool odd = end > payload || draw.vertex_count > 20000 || !stride;
+        if ((odd && odd_logs < 64) || draw.vertex_count > max_count) {
+          if (odd) ++odd_logs;
+          max_count = std::max(max_count, draw.vertex_count);
+          __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+              "light-draw: %s prim=%u start=%u count=%u stride=%u offset=%u payload=%zu vb=%08X ps=%016llX",
+              odd ? "ODD" : "max", draw.primitive_type, draw.start_vertex, draw.vertex_count, stride,
+              offset, payload, command.vertex_buffers[0] ? command.vertex_buffers[0]->handle : 0,
+              (unsigned long long)(ps ? ps->hash : 0));
+        }
+      }
+      const std::string& skip_ps = REXCVAR_GET(gta4_native_debug_skip_ps);
+      if (!skip_ps.empty() && ps &&
+          fmt::format("{:016X}", ps->hash).starts_with(skip_ps)) {
+        continue;
+      }
+    }
+#endif
     const bool artificial_light_trace_requested =
         ShouldCaptureArtificialLightFrame(submitted_frame);
     const NativeShader* diagnostic_vertex_shader =
