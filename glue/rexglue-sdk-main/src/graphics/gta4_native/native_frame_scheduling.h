@@ -21,7 +21,7 @@ inline constexpr size_t kNativeBufferShadowValidationSlices = 64;
 // Upper bound for one validation step: 1/64 of a large vertex buffer is tens of
 // KiB of cold guest memory compared on the guest thread for every stream of
 // every draw. The sweep still covers every byte, over more reuses.
-inline constexpr size_t kNativeBufferShadowValidationMaxBytes = 2048;
+inline constexpr size_t kNativeBufferShadowValidationMaxBytes = 512;
 inline constexpr uint32_t kNativeBufferCacheRetentionFrames = 600;
 inline constexpr uint32_t kNativeBufferCachePollFrames = 120;
 inline constexpr uint32_t kNativeBufferCachePollPhaseFrames = 80;

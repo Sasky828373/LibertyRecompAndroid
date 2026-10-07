@@ -1306,6 +1306,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   SurfaceDescriptor CaptureSurfaceDescriptor(uint32_t handle) const;
   std::shared_ptr<const NativeTextureResource> CaptureTextureResource(
       uint32_t handle, const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t stage);
+  std::shared_ptr<const NativeTextureResource> CaptureTextureResourceUncached(
+      uint32_t handle, const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t stage,
+      bool& cacheable);
   void StartRenderWorker();
   void RenderWorkerMain();
   void BeginModernShaderFrame();
@@ -1768,6 +1771,26 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     BufferCaptureCacheSlot& slot = buffer_capture_cache_[(handle >> 4) & (buffer_capture_cache_.size() - 1)];
     if (slot.handle == handle) slot.handle = 0;
   }
+  // Producer-only memo of clean texture captures: same handle and identical
+  // fetch words with no texture-map change since give the same resource, so
+  // Prepare, both texture_resource_mutex_ acquisitions and three hash lookups
+  // are skipped. Producer-side mutations forget the handle; any other thread
+  // that changes the maps bumps the epoch.
+  struct TextureCaptureCacheSlot {
+    uint32_t handle = 0;
+    std::array<uint32_t, 6> fetch{};
+    uint64_t epoch = 0;
+    std::weak_ptr<const NativeTextureResource> resource;
+  };
+  std::array<TextureCaptureCacheSlot, 2048> texture_capture_cache_{};  // command_capture_mutex_
+  std::atomic<uint64_t> texture_resources_epoch_{1};
+  TextureCaptureCacheSlot& TextureCaptureSlot(uint32_t handle) {
+    return texture_capture_cache_[(handle >> 4) & (texture_capture_cache_.size() - 1)];
+  }
+  void ForgetTextureCapture(uint32_t handle) {
+    TextureCaptureCacheSlot& slot = TextureCaptureSlot(handle);
+    if (slot.handle == handle) slot.handle = 0;
+  }
   DirtyDeltaScratch producer_dirty_scratch_;  // command_capture_mutex_
   // Pipelined recording: the worker assembles frame N+1 while the recorder
   // thread records and submits frame N from current_frame_. Commands that
@@ -1857,6 +1880,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::mutex device_snapshot_mutex_;
   std::unordered_map<uint32_t, std::shared_ptr<const std::vector<uint8_t>>> last_device_snapshots_;
   std::unordered_set<uint32_t> initialized_constant_capture_devices_;
+  // Last device known to be in the set above, so the per-draw check and
+  // insert skip device_snapshot_mutex_. Zero after any erase or clear.
+  std::atomic<uint32_t> producer_initialized_constant_device_{0};
   uint64_t next_vertex_declaration_generation_ = 1;
   bool shader_cache_load_attempted_ = false;
   bool shader_cache_initialized_ = false;
@@ -2294,6 +2320,23 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   VkPipelineLayout cached_pipeline_layout_ = VK_NULL_HANDLE;
   std::unordered_map<NativePipelineKey, NativePipeline, NativePipelineKeyHash> native_pipelines_;
   NativePipelineLookupLifetime native_pipeline_lookup_lifetime_;
+  // Recorder-owned memo across pipeline-state snapshots. A snapshot forks on
+  // every texture or stream change, so its inline memo rarely sees a second
+  // draw. This one is keyed by what GetOrCreatePipeline actually reads; shader
+  // and declaration hashes guard against a freed object's address reuse.
+  struct DrawPipelineCacheEntry {
+    const NativeShader* vertex_shader = nullptr;
+    const NativeShader* pixel_shader = nullptr;
+    const NativeVertexDeclaration* vertex_declaration = nullptr;
+    uint64_t vertex_shader_hash = 0;
+    uint64_t pixel_shader_hash = 0;
+    uint64_t vertex_declaration_hash = 0;
+    std::array<uint32_t, kVertexStreamCount> strides{};
+    NativeFixedFunctionState fixed{};
+    NativePipelineLookupContext<kRenderTargetCount> context{};
+    VkPipeline pipeline = VK_NULL_HANDLE;
+  };
+  std::vector<DrawPipelineCacheEntry> draw_pipeline_cache_;
   std::vector<NativeResolveConversionPipeline> resolve_conversion_pipelines_;
   VkPipeline hdr_present_pipeline_ = VK_NULL_HANDLE;
   std::array<NativeTextureImage, NativeFrameContextRing::kSlotCount> hdr_present_mirrors_{};

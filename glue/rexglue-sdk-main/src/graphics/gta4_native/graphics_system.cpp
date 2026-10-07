@@ -4067,6 +4067,7 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
       if (previous == vector_font_ids_.end() || previous->second != set_texture.vector_font_id) {
         vector_font_ids_[set_texture.texture] = set_texture.vector_font_id;
         dirty_texture_handles_.insert(set_texture.texture);
+        ForgetTextureCapture(set_texture.texture);
         REXLOG_INFO("gta4-native-fonts: registered font{} owner texture {:08X}",
                     set_texture.vector_font_id, set_texture.texture);
       }
@@ -4136,6 +4137,7 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
     std::lock_guard lock(texture_resource_mutex_);
     const VirtualResourceRegistrationResult result =
         virtual_resource_registry_.Register(registration);
+    ForgetTextureCapture(registration.resource);
     const NativeVirtualResourceRecord* record =
         virtual_resource_registry_.Find(registration.resource);
     if (result == VirtualResourceRegistrationResult::kReplaced) {
@@ -4173,6 +4175,8 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
         companion = virtual_resource->companion;
       }
       decision = ClassifyResourceUnlock(virtual_resource != nullptr, unlock.access);
+      ForgetTextureCapture(unlock.resource);
+      if (companion) ForgetTextureCapture(companion);
       if (decision == ResourceUnlockDecision::kDirtyGuestResource) {
         dirty_texture_handles_.insert(unlock.resource);
       } else if (decision == ResourceUnlockDecision::kInvalidateVirtualHostOwnership) {
@@ -4223,6 +4227,7 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
         released_texture_retained_bytes = texture->second->payload.capacity();
       }
       erased_texture = texture_resources_.erase(release.resource) != 0;
+      ForgetTextureCapture(release.resource);
       dirty_texture_handles_.erase(release.resource);
       vector_font_ids_.erase(release.resource);
       virtual_resource_registry_.Erase(release.resource);
@@ -4347,6 +4352,7 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
     std::lock_guard snapshot_lock(device_snapshot_mutex_);
     last_device_snapshots_.erase(device);
     initialized_constant_capture_devices_.erase(device);
+    producer_initialized_constant_device_.store(0, std::memory_order_relaxed);
   }
   if (header.type == CommandType::kPresent) {
     const auto& present = *static_cast<const PresentCommand*>(command);
@@ -4516,7 +4522,7 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
                                     producer_dirty_scratch_);
 
       bool initialize_constants = false;
-      {
+      if (device != producer_initialized_constant_device_.load(std::memory_order_relaxed)) {
         std::lock_guard state_lock(device_snapshot_mutex_);
         initialize_constants = !initialized_constant_capture_devices_.contains(device);
       }
@@ -4677,8 +4683,11 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
 
   if (draw_command || header.type == CommandType::kClear) {
     const uint32_t device = CommandDevice(header.type, command);
-    std::lock_guard state_lock(device_snapshot_mutex_);
-    initialized_constant_capture_devices_.insert(device);
+    if (device != producer_initialized_constant_device_.load(std::memory_order_relaxed)) {
+      std::lock_guard state_lock(device_snapshot_mutex_);
+      initialized_constant_capture_devices_.insert(device);
+      producer_initialized_constant_device_.store(device, std::memory_order_relaxed);
+    }
   }
 
   return true;
@@ -4711,6 +4720,7 @@ Gta4NativeGraphicsSystem::CreateResolvedTextureResource(const ResolveCommand& co
     }
     return nullptr;
   };
+  ForgetTextureCapture(command.destination_texture);
   if (!TextureInfo::Prepare(fetch, &info)) {
     return reject("prepare");
   }
@@ -5014,9 +5024,37 @@ std::shared_ptr<const Gta4NativeGraphicsSystem::NativeTextureResource>
 Gta4NativeGraphicsSystem::CaptureTextureResource(uint32_t handle,
                                                  const xenos::xe_gpu_texture_fetch_t& fetch,
                                                  uint32_t stage) {
+  const std::array<uint32_t, 6> fetch_words = {fetch.dword_0, fetch.dword_1, fetch.dword_2,
+                                               fetch.dword_3, fetch.dword_4, fetch.dword_5};
+  TextureCaptureCacheSlot& slot = TextureCaptureSlot(handle);
+  const uint64_t epoch = texture_resources_epoch_.load(std::memory_order_acquire);
+  if (slot.handle == handle && slot.epoch == epoch && slot.fetch == fetch_words &&
+      stage < kShaderTextureCount) {
+    if (auto cached = slot.resource.lock()) {
+      return cached;
+    }
+    slot.handle = 0;
+  }
+  bool cacheable = false;
+  auto resource = CaptureTextureResourceUncached(handle, fetch, stage, cacheable);
+  if (cacheable && resource) {
+    slot.handle = handle;
+    slot.fetch = fetch_words;
+    slot.epoch = epoch;
+    slot.resource = resource;
+  }
+  return resource;
+}
+
+std::shared_ptr<const Gta4NativeGraphicsSystem::NativeTextureResource>
+Gta4NativeGraphicsSystem::CaptureTextureResourceUncached(
+    uint32_t handle, const xenos::xe_gpu_texture_fetch_t& fetch, uint32_t stage,
+    bool& cacheable) {
+  cacheable = false;
   if (stage >= kShaderTextureCount) {
     return nullptr;
   }
+  bool virtual_handle = false;
 
   TextureInfo info{};
   bool cache_entry_present = false;
@@ -5091,6 +5129,7 @@ Gta4NativeGraphicsSystem::CaptureTextureResource(uint32_t handle,
     auto lock = LockWithSpin(texture_resource_mutex_);
     const NativeVirtualResourceRecord* virtual_resource = virtual_resource_registry_.Find(handle);
     if (virtual_resource) {
+      virtual_handle = true;
       const auto existing = texture_resources_.find(handle);
       const auto resource = existing == texture_resources_.end()
                                 ? std::shared_ptr<const NativeTextureResource>{}
@@ -5315,6 +5354,7 @@ Gta4NativeGraphicsSystem::CaptureTextureResource(uint32_t handle,
         // image's shape; the draw's current fetch still supplies sampler state.
         if (cache_font_identity_matches && (cache_reusable_vector_font || cache_gpu_image_matches ||
                                             (cache_fetch_matches && !cache_entry_dirty))) {
+          cacheable = !virtual_handle && !stock_font_shape && !vector_font_id;
           return resource;
         }
       }
@@ -6002,6 +6042,7 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
           texture_resources_.clear();
           dirty_texture_handles_.clear();
           virtual_resource_registry_.Clear();
+          texture_resources_epoch_.fetch_add(1, std::memory_order_release);
         }
         reflection_resources_.clear();
         break;
@@ -18693,6 +18734,7 @@ void Gta4NativeGraphicsSystem::EvictNativeTextureImages(uint32_t submitted_frame
                                   uint32_t(resource->second->info.format));
       texture_resources_.erase(resource);
       dirty_texture_handles_.erase(handle);
+      texture_resources_epoch_.fetch_add(1, std::memory_order_release);
     }
   }
 }
@@ -19766,10 +19808,63 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreateDrawPipeline(
       return pipeline;
     }
   }
+  DrawPipelineCacheEntry* cache_entry = nullptr;
+  std::array<uint32_t, kVertexStreamCount> strides;
+  const NativeVertexDeclaration* vertex_declaration = state.vertex_declaration_resource.get();
+  if (!trace_pipeline && !target.temporal_shader && context.lifetime &&
+      state.vertex_shader_resource && vertex_declaration) {
+    if (draw_pipeline_cache_.empty()) draw_pipeline_cache_.resize(4096);
+    for (uint32_t stream = 0; stream < kVertexStreamCount; ++stream) {
+      strides[stream] = state.vertex_streams[stream].stride;
+    }
+    uint64_t h = 0x243F6A8885A308D3ull;
+    const auto mix = [&h](uint64_t value) {
+      h = (h ^ value) * 0x9E3779B97F4A7C15ull;
+      h ^= h >> 29;
+    };
+    mix(reinterpret_cast<uintptr_t>(state.vertex_shader_resource));
+    mix(reinterpret_cast<uintptr_t>(state.pixel_shader_resource));
+    mix(reinterpret_cast<uintptr_t>(vertex_declaration));
+    mix(uint64_t(strides[0]) | uint64_t(context.primitive_type) << 32);
+    mix(uint64_t(context.color_formats[0]) | uint64_t(context.depth_format) << 32);
+    mix(uint64_t(context.color_write_mask) | uint64_t(memo_state.color_write_mask) << 32);
+    mix(uint64_t(memo_state.blend_controls[0]) | uint64_t(memo_state.cull_mode) << 32);
+    mix(uint64_t(memo_state.depth_enable) | uint64_t(memo_state.depth_write_enable) << 8 |
+        uint64_t(memo_state.depth_function) << 16 | uint64_t(memo_state.stencil_enable) << 24 |
+        uint64_t(memo_state.alpha_test_enable) << 32 | uint64_t(memo_state.blend_enable) << 40);
+    mix(uint64_t(context.width) | uint64_t(context.height) << 32);
+    cache_entry = &draw_pipeline_cache_[h & (draw_pipeline_cache_.size() - 1)];
+    const uint64_t pixel_shader_hash =
+        state.pixel_shader_resource ? state.pixel_shader_resource->hash : 0;
+    if (cache_entry->pipeline && cache_entry->vertex_shader == state.vertex_shader_resource &&
+        cache_entry->pixel_shader == state.pixel_shader_resource &&
+        cache_entry->vertex_declaration == vertex_declaration &&
+        cache_entry->vertex_shader_hash == state.vertex_shader_resource->hash &&
+        cache_entry->pixel_shader_hash == pixel_shader_hash &&
+        cache_entry->vertex_declaration_hash == vertex_declaration->content_hash &&
+        cache_entry->strides == strides && cache_entry->context == context &&
+        cache_entry->fixed == memo_state) {
+      AddNativeGpuProfileCounter(performance::Counter::kPipelineRequestReuses);
+      return cache_entry->pipeline;
+    }
+  }
   VkPipeline pipeline = GetOrCreatePipeline(state, command.fixed_function_state, primitive_type,
                                               target, user_pointer_stride,
                                               primitive_restart_enable, prewarm);
   if (!target.temporal_shader) state.pipeline_lookup_memo.Store(&state, memo_state, context, pipeline);
+  if (cache_entry && pipeline) {
+    cache_entry->vertex_shader = state.vertex_shader_resource;
+    cache_entry->pixel_shader = state.pixel_shader_resource;
+    cache_entry->vertex_declaration = vertex_declaration;
+    cache_entry->vertex_shader_hash = state.vertex_shader_resource->hash;
+    cache_entry->pixel_shader_hash =
+        state.pixel_shader_resource ? state.pixel_shader_resource->hash : 0;
+    cache_entry->vertex_declaration_hash = vertex_declaration->content_hash;
+    cache_entry->strides = strides;
+    cache_entry->fixed = memo_state;
+    cache_entry->context = context;
+    cache_entry->pipeline = pipeline;
+  }
   return pipeline;
 }
 
@@ -35154,6 +35249,7 @@ void Gta4NativeGraphicsSystem::DestroyVulkanWorkerObjects() {
     std::lock_guard lock(texture_resource_mutex_);
     texture_resources_.clear();
     dirty_texture_handles_.clear();
+    texture_resources_epoch_.fetch_add(1, std::memory_order_release);
     next_texture_generation_ = 1;
   }
   device_constant_states_.clear();
@@ -35163,6 +35259,7 @@ void Gta4NativeGraphicsSystem::DestroyVulkanWorkerObjects() {
     std::lock_guard lock(device_snapshot_mutex_);
     last_device_snapshots_.clear();
     initialized_constant_capture_devices_.clear();
+    producer_initialized_constant_device_.store(0, std::memory_order_relaxed);
   }
 }
 
