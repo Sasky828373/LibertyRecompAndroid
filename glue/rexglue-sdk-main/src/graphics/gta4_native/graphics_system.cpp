@@ -231,7 +231,7 @@ REXCVAR_DEFINE_BOOL(gta4_native_early_fragment_tests, true, "GTA IV/Graphics/Nat
 REXCVAR_DEFINE_BOOL(gta4_native_fs_relaxed_precision, false, "GTA IV/Graphics/Native Renderer",
                     "Experimental: mark pixel shader arithmetic RelaxedPrecision (FP16 where the "
                     "driver lowers mediump; applies when shaders load)");
-REXCVAR_DEFINE_UINT32(gta4_native_ieee_mul, 1, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_UINT32(gta4_native_ieee_mul, 2, "GTA IV/Graphics/Native Renderer",
                       "Plain IEEE products instead of Xenos zero-preserving multiplies "
                       "(not bit-exact): 0 = off, 1 = vertex shaders, 2 = all shaders")
     .range(0, 2);
@@ -248,7 +248,7 @@ REXCVAR_DEFINE_STRING(gta4_native_skip_pixel_shaders, "2673E2AF", "GTA IV/Graphi
                       "Comma-separated pixel shader hash prefixes whose draws are not recorded");
 REXCVAR_DEFINE_UINT32(gta4_native_debug_skip_gpu_range, 0, "GTA IV/Diagnostics",
                       "TEMP: skip draws of one GPU range (performance::GpuRange + 1; 0 = none)");
-REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, false, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, true, "GTA IV/Graphics/Native Renderer",
                     "Run local light stencil setups inside the open lighting pass using the "
                     "draw's own shaders");
 REXCVAR_DEFINE_BOOL(gta4_native_ubo_bind_always, false, "GTA IV/Diagnostics",
