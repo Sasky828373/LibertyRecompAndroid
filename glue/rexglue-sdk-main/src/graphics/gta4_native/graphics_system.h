@@ -2349,6 +2349,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::vector<DrawPipelineCacheEntry> draw_pipeline_cache_;
   std::vector<NativeResolveConversionPipeline> resolve_conversion_pipelines_;
   VkPipeline hdr_present_pipeline_ = VK_NULL_HANDLE;
+  uint64_t legacy_mul_rewrites_ = 0;  // Shader registration thread only.
   std::array<NativeTextureImage, NativeFrameContextRing::kSlotCount> hdr_present_mirrors_{};
   std::vector<NativeSampler> native_samplers_;
   std::unordered_map<VkFormat, VkFormatProperties> native_format_properties_;

@@ -11,6 +11,7 @@
 #include "native_gpu_counters.h"
 #include "native_spirv_descriptor_remap.h"
 #include "native_spirv_loop_watchdog.h"
+#include "native_spirv_legacy_mul.h"
 #include "native_spirv_ubo_constants.h"
 #include "native_spirv_constant_range.h"
 #include "native_fixed_state_hash.h"
@@ -169,6 +170,10 @@ REXCVAR_DEFINE_BOOL(gta4_native_dump_shaders, false, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_UINT32(gta4_native_water_reflection_interval, 1, "GTA IV/Graphics/Reflections",
                       "Re-render the water reflection every N frames (1 = every frame); in between "
                       "the previous reflection is reused");
+REXCVAR_DEFINE_UINT32(gta4_native_environment_reflection_interval, 1, "GTA IV/Graphics/Reflections",
+                      "Re-render the environment (vehicle) reflection every N frames; the cubemap "
+                      "keeps its previous capture in between")
+    .range(1, 4);
 REXCVAR_DEFINE_BOOL(gta4_native_stage_draw_commands, true, "GTA IV/Graphics/Native Renderer",
                     "Publish captured title commands to the render worker in batches (one "
                     "render queue lock per batch instead of per command)");
@@ -180,6 +185,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_merge_up_draws, true, "GTA IV/Graphics/Native Re
 REXCVAR_DEFINE_UINT32(gta4_native_merge_up_max, 16, "GTA IV/Graphics/Native Renderer",
                       "Most consecutive DrawPrimitiveUp patches recorded as one draw")
     .range(2, 128);
+REXCVAR_DEFINE_BOOL(gta4_native_fast_legacy_mul, true, "GTA IV/Graphics/Native Renderer",
+                    "Rewrite Xenos zero-preserving multiplies in recompiled shaders into an "
+                    "equivalent cheaper form (applies when shaders load)");
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
@@ -6374,9 +6382,11 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                                 pipeline_sync_wait_ticks_ * ms_per_tick / 120.0,
                                 pipeline_present_wait_ticks_ * ms_per_tick / 120.0,
                                 dynamic_draw_distance_factor_, types.c_str());
-            __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "vk: %s ubo-shaders=%u ubo-loads=%llu",
+            __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                                "vk: %s ubo-shaders=%u ubo-loads=%llu legacy-mul=%llu",
                                 ui::vulkan::ConsumeCommandCounters(120).c_str(), ubo_rewritten_shaders_,
-                                (unsigned long long)ubo_rewritten_loads_);
+                                (unsigned long long)ubo_rewritten_loads_,
+                                (unsigned long long)legacy_mul_rewrites_);
             if (pipeline_stats_.ready() && ++pipeline_stats_reports_ % 5 == 0) {
               const std::string report = pipeline_stats_.Report(14);
               size_t begin = 0;
@@ -7488,6 +7498,13 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         stock_late_spirv_size = stock_late_spirv.size() * sizeof(uint32_t);
       }
     }
+    const auto apply_legacy_mul = [&](std::vector<uint32_t>& spirv) {
+      if (!REXCVAR_GET(gta4_native_fast_legacy_mul) || spirv.empty()) return;
+      if (auto simplified = SimplifySpirvLegacyMultiplies(spirv)) {
+        legacy_mul_rewrites_ += simplified->rewritten;
+        spirv = std::move(simplified->words);
+      }
+    };
     uint32_t watchdog_loops = 0;
     const auto apply_loop_watchdog = [&](std::vector<uint32_t>& spirv) {
       if (!REXCVAR_GET(gta4_native_loop_watchdog) || spirv.empty()) return;
@@ -7563,6 +7580,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         std::fclose(file);
       }
     }
+    apply_legacy_mul(stock_early_spirv);
+    apply_legacy_mul(stock_late_spirv);
     RemapSpirvDrawDescriptorSets(stock_early_spirv);
     RemapSpirvDrawDescriptorSets(stock_late_spirv);
     apply_loop_watchdog(stock_early_spirv);
@@ -7756,6 +7775,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         }
       }
       if (!override_rejection) {
+        apply_legacy_mul(override_early_spirv);
+        apply_legacy_mul(override_late_spirv);
         RemapSpirvDrawDescriptorSets(override_early_spirv);
         RemapSpirvDrawDescriptorSets(override_late_spirv);
         apply_loop_watchdog(override_early_spirv);
@@ -28762,6 +28783,10 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
   const uint32_t water_reflection_interval = REXCVAR_GET(gta4_native_water_reflection_interval);
   const bool skip_water_reflection =
       water_reflection_interval > 1 && submitted_frame % water_reflection_interval != 0;
+  const uint32_t environment_reflection_interval =
+      REXCVAR_GET(gta4_native_environment_reflection_interval);
+  const bool skip_environment_reflection =
+      environment_reflection_interval > 1 && submitted_frame % environment_reflection_interval != 0;
   size_t merged_up_until = 0;
   std::vector<const NativeCommand*> up_run;
   for (size_t command_index = 0; command_index < current_frame_.size(); ++command_index) {
@@ -28777,6 +28802,15 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
          queued_command.type == CommandType::kDrawIndexedPrimitive ||
          queued_command.type == CommandType::kClear || queued_command.type == CommandType::kResolve) &&
         performance_range_for_command(queued_command) == performance::GpuRange::kWaterReflections) {
+      continue;
+    }
+    if (skip_environment_reflection &&
+        (queued_command.type == CommandType::kDrawPrimitive ||
+         queued_command.type == CommandType::kDrawPrimitiveUp ||
+         queued_command.type == CommandType::kDrawIndexedPrimitive ||
+         queued_command.type == CommandType::kClear || queued_command.type == CommandType::kResolve) &&
+        performance_range_for_command(queued_command) ==
+            performance::GpuRange::kEnvironmentReflections) {
       continue;
     }
     const auto* profile_state = queued_command.pipeline_state.get();
