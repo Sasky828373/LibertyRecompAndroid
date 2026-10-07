@@ -200,8 +200,8 @@ REXCVAR_DEFINE_BOOL(gta4_native_water_reflection_on_demand, true, "GTA IV/Graphi
                     "every 8th frame while occlusion queries find all of that water hidden");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
-                      "the 30 Hz budget (0 = off; 1 = reflections every other frame; "
-                      "2 = also half shadow distance; 3 = rarer reflections, shorter shadows)")
+                      "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
+                      "3 = also environment reflection every other frame)")
     .range(0, 3);
 REXCVAR_DEFINE_BOOL(gta4_native_resolve_swap, true, "GTA IV/Graphics/Native Renderer",
                     "Resolves that copy a whole surface into a same-format texture and then clear "
@@ -6776,10 +6776,11 @@ void Gta4NativeGraphicsSystem::ApplyFpsGuardLevel(uint32_t level) {
     const char* shadows;
   };
   static constexpr Step kSteps[] = {
+      // The water reflection stays per frame: a stale one is visible at once.
       {"1", "1", "1.0"},   // full quality
-      {"2", "2", "1.0"},   // reflections every other frame
-      {"2", "2", "0.5"},   // + half shadow distance
-      {"3", "4", "0.35"},  // + rarer reflections, shorter shadows
+      {"1", "1", "0.5"},   // half shadow distance
+      {"1", "1", "0.35"},  // shorter shadows
+      {"1", "2", "0.35"},  // + environment reflection every other frame
   };
   const Step& step = kSteps[std::min<uint32_t>(level, 3)];
   rex::cvar::SetFlagByName("gta4_native_water_reflection_interval", step.water);
@@ -29491,7 +29492,9 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         break;
       }
     }
-    if (!frame_has_water || (water_hidden_frames_ >= 2 && submitted_frame % 8 != 0)) {
+    // Occlusion results proved unreliable (water at the bridge read as hidden
+    // in ~88% of frames), so only frames without any scene water skip it.
+    if (!frame_has_water) {
       skip_water_reflection = true;
       g_water_reflections_skipped.fetch_add(1, std::memory_order_relaxed);
     }
