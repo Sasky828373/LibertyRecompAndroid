@@ -5024,19 +5024,46 @@ std::shared_ptr<const Gta4NativeGraphicsSystem::NativeTextureResource>
 Gta4NativeGraphicsSystem::CaptureTextureResource(uint32_t handle,
                                                  const xenos::xe_gpu_texture_fetch_t& fetch,
                                                  uint32_t stage) {
-  const std::array<uint32_t, 6> fetch_words = {fetch.dword_0, fetch.dword_1, fetch.dword_2,
-                                               fetch.dword_3, fetch.dword_4, fetch.dword_5};
+  // Sampler words (filters, clamps, LOD bias) change between draws of the same
+  // image and select neither the resource nor its Prepare shape.
+  const std::array<uint32_t, 6> fetch_words = NativeTextureImageFetchKey(fetch);
   TextureCaptureCacheSlot& slot = TextureCaptureSlot(handle);
   const uint64_t epoch = texture_resources_epoch_.load(std::memory_order_acquire);
+#if REX_PLATFORM_ANDROID
+  // TEMP: texture capture memo effectiveness (perf investigation).
+  static std::array<uint64_t, 7> memo_stats{};
+  const auto memo_report = [] {
+    if (++memo_stats[0] % 50000) return;
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+        "tex-memo: n=%llu hit=%llu other=%llu epoch=%llu fetch=%llu expired=%llu uncacheable=%llu",
+        (unsigned long long)memo_stats[0], (unsigned long long)memo_stats[1],
+        (unsigned long long)memo_stats[2], (unsigned long long)memo_stats[3],
+        (unsigned long long)memo_stats[4], (unsigned long long)memo_stats[5],
+        (unsigned long long)memo_stats[6]);
+  };
+  memo_report();
+  if (slot.handle != handle) ++memo_stats[2];
+  else if (slot.epoch != epoch) ++memo_stats[3];
+  else if (slot.fetch != fetch_words) ++memo_stats[4];
+#endif
   if (slot.handle == handle && slot.epoch == epoch && slot.fetch == fetch_words &&
       stage < kShaderTextureCount) {
     if (auto cached = slot.resource.lock()) {
+#if REX_PLATFORM_ANDROID
+      ++memo_stats[1];
+#endif
       return cached;
     }
+#if REX_PLATFORM_ANDROID
+    ++memo_stats[5];
+#endif
     slot.handle = 0;
   }
   bool cacheable = false;
   auto resource = CaptureTextureResourceUncached(handle, fetch, stage, cacheable);
+#if REX_PLATFORM_ANDROID
+  if (!cacheable) ++memo_stats[6];
+#endif
   if (cacheable && resource) {
     slot.handle = handle;
     slot.fetch = fetch_words;
@@ -5195,6 +5222,9 @@ Gta4NativeGraphicsSystem::CaptureTextureResourceUncached(
           shape_matches, host_generation_matches, virtual_resource->guest_write_conflict,
           guest_backing_complete);
       if (action == VirtualTextureCaptureAction::kUseHostGeneration) {
+        // Depends only on this handle's registry record and map entry; every
+        // producer-side change to either forgets the memo slot.
+        cacheable = true;
         return resource;
       }
       if (action == VirtualTextureCaptureAction::kCreateDeterministicHostGeneration) {

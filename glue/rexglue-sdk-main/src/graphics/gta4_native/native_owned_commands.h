@@ -92,7 +92,7 @@ class NativeCommandPool {
   class FixedResource final : public std::pmr::memory_resource {
    public:
     ~FixedResource() override {
-      live_ -= local_count_;  // Taken by the allocator cache, never handed out.
+      live_ -= local_.size();  // Taken by the allocator cache, never handed out.
       // Destruction occurs after the render worker has joined and owners drain.
       assert(live_ == 0);
       for (Slab* slab = slabs_; slab;) {
@@ -101,12 +101,13 @@ class NativeCommandPool {
         slab = next;
       }
     }
+    // The retiring thread just wrote these links, so walking them here is
+    // cache-hot; the allocator then never reads cold slot memory.
     void ReturnList(Slot* first, Slot* last, size_t count) {
+      (void)last;
       std::lock_guard lock(mutex_);
       assert(count <= live_);
-      last->next = free_;
-      free_ = first;
-      free_count_ += count;
+      for (Slot* slot = first; slot; slot = slot->next) free_.push_back(slot);
       live_ -= count;
     }
     Statistics GetStatistics() const {
@@ -118,38 +119,33 @@ class NativeCommandPool {
     void* do_allocate(size_t bytes, size_t alignment) override {
       if (bytes != sizeof(T) || alignment != alignof(T)) throw std::bad_alloc();
       // Allocation is single-threaded (the producer holds its capture mutex),
-      // while slots return from the retirement thread. The allocator takes the
-      // whole shared free list under one lock and then hands slots out from a
-      // private list, instead of locking for every command.
-      if (!local_) {
+      // while slots return from the retirement thread. The allocator swaps out
+      // the whole shared free array under one lock and pops from a private
+      // one. Free slots are tracked as a pointer array, not an intrusive list:
+      // reading a link from a command freed on another core was a cache miss
+      // on every allocation.
+      if (local_.empty()) {
         std::lock_guard lock(mutex_);
-        if (!free_) {
+        if (free_.empty()) {
           // Nothing changes until allocation succeeds. Empty storage is not a T.
           Slab* slab = new Slab;
           slab->next = slabs_;
           slabs_ = slab;
           ++slab_count_;
-          for (Slot& slot : slab->slots) {
-            slot.next = free_;
-            free_ = &slot;
-          }
-          free_count_ += kSlotsPerSlab;
+          free_.reserve(free_.size() + kSlotsPerSlab);
+          for (Slot& slot : slab->slots) free_.push_back(&slot);
         }
-        const size_t taken = free_count_;
-        free_count_ = 0;
-        local_ = free_;
-        local_count_ = taken;
-        free_ = nullptr;
-        live_ += taken;  // Counted as live while cached; never returned uncached.
+        local_.swap(free_);
+        live_ += local_.size();  // Counted as live while cached; never returned uncached.
       }
-      Slot* slot = local_;
-      local_ = slot->next;
-      --local_count_;
-      // Slots come back from the retirement thread's core. Construction
-      // zero-fills the whole command, so start owning the next free slot's
-      // lines now; the following allocation is microseconds away.
-      if (local_) {
-        const auto* next = reinterpret_cast<const char*>(local_);
+      Slot* slot = local_.back();
+      local_.pop_back();
+      // Construction zero-fills the whole command, so start owning the next
+      // free slot's lines now; the following allocation is microseconds away.
+      // (Zeroing the slot here instead measured worse: the cost is the line
+      // ownership transfer from the recorder's core, not the stale data.)
+      if (!local_.empty()) {
+        const auto* next = reinterpret_cast<const char*>(local_.back());
         for (size_t offset = 0; offset < sizeof(Slot); offset += 64)
           __builtin_prefetch(next + offset, 1);
       }
@@ -163,20 +159,16 @@ class NativeCommandPool {
       auto* slot = reinterpret_cast<Slot*>(value);
       std::lock_guard lock(mutex_);
       assert(live_ != 0);
-      slot->next = free_;
-      free_ = slot;
-      ++free_count_;
+      free_.push_back(slot);
       --live_;
     }
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
       return this == &other;
     }
     mutable std::mutex mutex_;
-    Slot* local_ = nullptr;  // Allocator-private free slots.
-    size_t free_count_ = 0;  // Length of free_.
-    size_t local_count_ = 0;
+    std::vector<Slot*> local_;  // Allocator-private free slots.
+    std::vector<Slot*> free_;   // Shared, under mutex_.
     Slab* slabs_ = nullptr;
-    Slot* free_ = nullptr;
     size_t slab_count_ = 0;
     size_t live_ = 0;
   };

@@ -1772,7 +1772,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     if (slot.handle == handle) slot.handle = 0;
   }
   // Producer-only memo of clean texture captures: same handle and identical
-  // fetch words with no texture-map change since give the same resource, so
+  // image fetch words with no texture-map change since give the same resource, so
   // Prepare, both texture_resource_mutex_ acquisitions and three hash lookups
   // are skipped. Producer-side mutations forget the handle; any other thread
   // that changes the maps bumps the epoch.
