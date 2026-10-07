@@ -40,8 +40,14 @@ fi
 
 # Calls between unhooked recompiled functions bypass the weak sub_X aliases so
 # the compiler can inline them (idempotent; a new codegen loses the rewrite).
+# Off by default: no measurable gain on the device, and the first build with it
+# crashed in game code (SIGSEGV after deeper inlining). DIRECT_CALLS=1 enables.
 DIRECT_CALLS="$REPO/glue/rexglue-sdk-main/gta4-recomp/tools/direct_calls.py"
-python "$(cygpath -m "$DIRECT_CALLS")" apply
+if [ "${DIRECT_CALLS_ENABLE:-0}" = "1" ]; then
+  python "$(cygpath -m "$DIRECT_CALLS")" apply
+else
+  python "$(cygpath -m "$DIRECT_CALLS")" undo
+fi
 echo "== building with $JOBS jobs"
 cmake --build "$BUILD_DIR" --target LibertyRecomp -- -j"$JOBS" || { echo "!! native build failed"; exit 1; }
 
