@@ -203,7 +203,7 @@ REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
                       "3 = also environment reflection every other frame)")
     .range(0, 3);
-REXCVAR_DEFINE_BOOL(gta4_native_resolve_swap, true, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_resolve_swap, false, "GTA IV/Graphics/Native Renderer",
                     "Resolves that copy a whole surface into a same-format texture and then clear "
                     "the surface exchange the two images instead of copying");
 REXCVAR_DEFINE_BOOL(gta4_native_present_from_surface, true, "GTA IV/Graphics/Native Renderer",
