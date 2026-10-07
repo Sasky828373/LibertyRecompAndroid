@@ -13,6 +13,7 @@
 #include "native_spirv_loop_watchdog.h"
 #include "native_spirv_legacy_mul.h"
 #include "native_vertex_cache.h"
+#include "native_spirv_relaxed.h"
 #include "native_spirv_ubo_constants.h"
 #include "native_spirv_constant_range.h"
 #include "native_fixed_state_hash.h"
@@ -189,10 +190,13 @@ REXCVAR_DEFINE_UINT32(gta4_native_merge_up_max, 16, "GTA IV/Graphics/Native Rend
 REXCVAR_DEFINE_BOOL(gta4_native_fast_legacy_mul, true, "GTA IV/Graphics/Native Renderer",
                     "Rewrite Xenos zero-preserving multiplies in recompiled shaders into an "
                     "equivalent cheaper form (applies when shaders load)");
-REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, true, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, false, "GTA IV/Graphics/Native Renderer",
                     "Reorder the triangles of order-independent indexed triangle-list draws for "
                     "the GPU vertex cache (once per index range)");
-REXCVAR_DEFINE_UINT32(gta4_native_ieee_mul, 0, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_fs_relaxed_precision, false, "GTA IV/Graphics/Native Renderer",
+                    "Experimental: mark pixel shader arithmetic RelaxedPrecision (FP16 where the "
+                    "driver lowers mediump; applies when shaders load)");
+REXCVAR_DEFINE_UINT32(gta4_native_ieee_mul, 1, "GTA IV/Graphics/Native Renderer",
                       "Plain IEEE products instead of Xenos zero-preserving multiplies "
                       "(not bit-exact): 0 = off, 1 = vertex shaders, 2 = all shaders")
     .range(0, 2);
@@ -434,6 +438,8 @@ std::array<std::atomic<uint32_t>, 4096> g_rendering_split_reasons{};
 // TEMP: resolve-class GPU work per call site, and resolve reuse totals.
 std::array<std::atomic<uint32_t>, 65536> g_resolve_sites{};
 std::atomic<uint64_t> g_resolve_reuse_candidates{0}, g_resolve_reuse_hits{0};
+// TEMP: vertex-cache reordering coverage: [0] rejected, [1] eligible.
+std::array<std::atomic<uint64_t>, 2> g_vertex_cache_draws{}, g_vertex_cache_indices{};
 std::mutex g_resolve_kinds_mutex;
 std::map<std::string, uint32_t> g_resolve_kinds;
 void NoteResolveKind(std::string key) {
@@ -6454,6 +6460,12 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                                       line.substr(offset, 900).c_str());
               }
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                                  "vertex-cache/frame: eligible draws=%.0f indices=%.0f rejected draws=%.0f indices=%.0f",
+                                  g_vertex_cache_draws[1].exchange(0) / 120.0,
+                                  g_vertex_cache_indices[1].exchange(0) / 120.0,
+                                  g_vertex_cache_draws[0].exchange(0) / 120.0,
+                                  g_vertex_cache_indices[0].exchange(0) / 120.0);
+              __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "resolves/frame:%s reuse=%.1f/%.1f", top.c_str(),
                                   g_resolve_reuse_hits.exchange(0) / 120.0,
                                   g_resolve_reuse_candidates.exchange(0) / 120.0);
@@ -7515,6 +7527,11 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         spirv = std::move(simplified->words);
       }
     };
+    const auto apply_relaxed = [&](std::vector<uint32_t>& spirv) {
+      if (command.stage != ShaderStage::kPixel || spirv.empty() ||
+          !REXCVAR_GET(gta4_native_fs_relaxed_precision)) return;
+      if (auto relaxed = MarkSpirvArithmeticRelaxed(spirv)) spirv = std::move(relaxed->words);
+    };
     uint32_t watchdog_loops = 0;
     const auto apply_loop_watchdog = [&](std::vector<uint32_t>& spirv) {
       if (!REXCVAR_GET(gta4_native_loop_watchdog) || spirv.empty()) return;
@@ -7597,9 +7614,11 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
     apply_loop_watchdog(stock_early_spirv);
     apply_loop_watchdog(stock_late_spirv);
     apply_ubo_constants(stock_early_spirv);
+    apply_relaxed(stock_early_spirv);
     stock_early_spirv_size = stock_early_spirv.size() * sizeof(uint32_t);
     if (!stock_late_spirv.empty()) {
       apply_ubo_constants(stock_late_spirv);
+      apply_relaxed(stock_late_spirv);
       stock_late_spirv_size = stock_late_spirv.size() * sizeof(uint32_t);
     }
     VkShaderModule stock_early_module = ui::vulkan::util::CreateShaderModule(
@@ -7793,6 +7812,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         apply_loop_watchdog(override_late_spirv);
         apply_ubo_constants(override_early_spirv);
         apply_ubo_constants(override_late_spirv);
+        apply_relaxed(override_early_spirv);
+        apply_relaxed(override_late_spirv);
         const size_t effective_early_size = override_early_spirv.size() * sizeof(uint32_t);
         const size_t effective_late_size = override_late_spirv.size() * sizeof(uint32_t);
         VkShaderModule override_early_module = ui::vulkan::util::CreateShaderModule(
@@ -22477,10 +22498,27 @@ bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_bu
     const bool monotonic_depth = fixed.depth_enable &&
         (fixed.depth_function == 1 || fixed.depth_function == 3 || fixed.depth_function == 4 ||
          fixed.depth_function == 6);
+    // Stencil is order-independent when this draw cannot read its own
+    // writes: no writes at all, or a constant written under an ALWAYS test
+    // only where the fragment also passed depth (Xenos ops: 0 keep, 1 zero,
+    // 2 replace; function 7 always).
+    const auto constant_write = [](uint32_t fail, uint32_t depth_fail, uint32_t pass) {
+      return fail == 0 && depth_fail == 0 && pass <= 2;
+    };
+    const bool stencil_ok =
+        !fixed.stencil_enable || !(fixed.stencil_write_mask & 0xFFu) ||
+        (fixed.stencil_function == 7 &&
+         constant_write(fixed.stencil_fail, fixed.stencil_depth_fail, fixed.stencil_pass) &&
+         (!fixed.two_sided_stencil ||
+          (fixed.ccw_stencil_function == 7 &&
+           constant_write(fixed.ccw_stencil_fail, fixed.ccw_stencil_depth_fail,
+                          fixed.ccw_stencil_pass))));
     const bool order_independent =
-        monotonic_depth && !fixed.stencil_enable &&
+        monotonic_depth && stencil_ok &&
         (fixed.depth_write_enable || !fixed.color_write_mask) &&
         !NativeBlendEnableMask(fixed.blend_controls, 0xFu);
+    ++g_vertex_cache_draws[order_independent ? 1 : 0];
+    g_vertex_cache_indices[order_independent ? 1 : 0] += host_index_count;
     if (order_independent) {
       auto& ranges = command.index_buffer->vertex_cache_ranges;
       const uint64_t range_key = uint64_t(draw.start_index) << 32 | draw.index_count;
