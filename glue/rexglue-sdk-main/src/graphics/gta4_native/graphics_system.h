@@ -320,6 +320,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     mutable std::vector<uint8_t> host_index16_payload;
     mutable std::vector<uint8_t> host_index32_payload;
     mutable NativeTriangleFanCache triangle_fan_cache;
+    // Recorder-only: host-endian index ranges reordered for the vertex cache,
+    // keyed by start << 32 | count (null = not reorderable).
+    mutable std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>>
+        vertex_cache_ranges;
     mutable NativeOwnerRetirementWatch<NativePersistentBufferEntry> persistent_retirement;
   };
 
@@ -1196,6 +1200,8 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     kIndex32,
     kTriangleFan16,
     kTriangleFan32,
+    kVertexCacheIndex16,  // One draw range reordered for the vertex cache.
+    kVertexCacheIndex32,
   };
 
   struct NativePersistentBufferKey {

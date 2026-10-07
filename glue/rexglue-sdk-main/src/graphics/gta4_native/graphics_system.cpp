@@ -12,6 +12,7 @@
 #include "native_spirv_descriptor_remap.h"
 #include "native_spirv_loop_watchdog.h"
 #include "native_spirv_legacy_mul.h"
+#include "native_vertex_cache.h"
 #include "native_spirv_ubo_constants.h"
 #include "native_spirv_constant_range.h"
 #include "native_fixed_state_hash.h"
@@ -188,6 +189,9 @@ REXCVAR_DEFINE_UINT32(gta4_native_merge_up_max, 16, "GTA IV/Graphics/Native Rend
 REXCVAR_DEFINE_BOOL(gta4_native_fast_legacy_mul, true, "GTA IV/Graphics/Native Renderer",
                     "Rewrite Xenos zero-preserving multiplies in recompiled shaders into an "
                     "equivalent cheaper form (applies when shaders load)");
+REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, true, "GTA IV/Graphics/Native Renderer",
+                    "Reorder the triangles of order-independent indexed triangle-list draws for "
+                    "the GPU vertex cache (once per index range)");
 REXCVAR_DEFINE_UINT32(gta4_native_ieee_mul, 0, "GTA IV/Graphics/Native Renderer",
                       "Plain IEEE products instead of Xenos zero-preserving multiplies "
                       "(not bit-exact): 0 = off, 1 = vertex shaders, 2 = all shaders")
@@ -22462,6 +22466,55 @@ bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_bu
     host_start_index = 0;
     host_index_buffer = quad_list_indices.buffer;
     host_index_offset = quad_list_indices.offset;
+  }
+  // Opaque, depth-resolved triangle lists render the same image in any
+  // triangle order: draw them from a copy ordered for the vertex cache.
+  if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kTriangleList) &&
+      !guest_restart_enabled && host_start_index == draw.start_index &&
+      host_index_count >= 96 && host_index_count % 3 == 0 &&
+      REXCVAR_GET(gta4_native_vertex_cache_order)) {
+    const NativeFixedFunctionState& fixed = command.fixed_function_state;
+    const bool monotonic_depth = fixed.depth_enable &&
+        (fixed.depth_function == 1 || fixed.depth_function == 3 || fixed.depth_function == 4 ||
+         fixed.depth_function == 6);
+    const bool order_independent =
+        monotonic_depth && !fixed.stencil_enable &&
+        (fixed.depth_write_enable || !fixed.color_write_mask) &&
+        !NativeBlendEnableMask(fixed.blend_controls, 0xFu);
+    if (order_independent) {
+      auto& ranges = command.index_buffer->vertex_cache_ranges;
+      const uint64_t range_key = uint64_t(draw.start_index) << 32 | draw.index_count;
+      auto found = ranges.find(range_key);
+      if (found == ranges.end()) {
+        auto reordered =
+            std::make_shared<std::vector<uint8_t>>(size_t(host_index_count) * element_size);
+        const bool ok =
+            index32 ? OptimizeTriangleListForVertexCache(
+                          reinterpret_cast<const uint32_t*>(selected_index_bytes),
+                          host_index_count / 3, reinterpret_cast<uint32_t*>(reordered->data()))
+                    : OptimizeTriangleListForVertexCache(
+                          reinterpret_cast<const uint16_t*>(selected_index_bytes),
+                          host_index_count / 3, reinterpret_cast<uint16_t*>(reordered->data()));
+        found = ranges.emplace(range_key, ok ? std::move(reordered) : nullptr).first;
+      }
+      if (const auto& reordered = found->second) {
+        NativePersistentBufferKey key{};
+        key.generation = command.index_buffer->generation;
+        key.kind = index32 ? NativePersistentBufferKind::kVertexCacheIndex32
+                           : NativePersistentBufferKind::kVertexCacheIndex16;
+        key.stream_offset = draw.start_index;
+        key.stride = draw.index_count;
+        NativeUploadAllocation reordered_allocation{};
+        if (GetOrCreatePersistentBuffer(command_buffer, command.index_buffer, key,
+                                        reordered->data(), VkDeviceSize(reordered->size()),
+                                        NativeUploadKind::kIndex, reordered_allocation)) {
+          selected_index_bytes = reordered->data();
+          host_start_index = 0;
+          host_index_buffer = reordered_allocation.buffer;
+          host_index_offset = reordered_allocation.offset;
+        }
+      }
+    }
   }
   if (guest_restart_enabled && draw.primitive_type != uint32_t(xenos::PrimitiveType::kTriangleFan)) {
     const VkDeviceSize restart_size = VkDeviceSize(host_index_count) * element_size;
