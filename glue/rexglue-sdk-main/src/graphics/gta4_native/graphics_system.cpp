@@ -479,6 +479,8 @@ std::atomic<uint64_t> g_lazy_resolves_skipped{0};
 std::atomic<uint64_t> g_draw_state_kept{0};
 std::atomic<uint64_t> g_resolve_swaps_planned{0}, g_resolve_swaps_fast{0};
 std::atomic<uint64_t> g_present_from_surface{0};
+// TEMP: first failing condition of resolve swaps (A2) and surface presents (A11).
+std::array<std::atomic<uint32_t>, 24> g_resolve_swap_rejects{}, g_present_surface_rejects{};
 std::mutex g_resolve_kinds_mutex;
 std::map<std::string, uint32_t> g_resolve_kinds;
 void NoteResolveKind(std::string key) {
@@ -6516,6 +6518,18 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                                   g_resolve_swaps_fast.exchange(0) / 120.0,
                                   g_resolve_swaps_planned.exchange(0) / 120.0,
                                   g_present_from_surface.exchange(0) / 120.0);
+              {
+                std::string a2, a11;
+                for (uint32_t i = 0; i < g_resolve_swap_rejects.size(); ++i) {
+                  if (const uint32_t n = g_resolve_swap_rejects[i].exchange(0))
+                    a2 += fmt::format(" r{}={:.1f}", i, n / 120.0);
+                  if (const uint32_t n = g_present_surface_rejects[i].exchange(0))
+                    a11 += fmt::format(" r{}={:.2f}", i, n / 120.0);
+                }
+                __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                                    "swap-rejects/frame:%s | present-rejects/frame:%s", a2.c_str(),
+                                    a11.c_str());
+              }
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "vertex-cache/frame: eligible draws=%.0f indices=%.0f rejected draws=%.0f indices=%.0f",
                                   g_vertex_cache_draws[1].exchange(0) / 120.0,
@@ -15524,20 +15538,26 @@ bool Gta4NativeGraphicsSystem::AllocateNativeSamplerDescriptor(NativeSampler& sa
 bool Gta4NativeGraphicsSystem::PlanResolveSwap(NativeCommand& command,
                                                NativeTextureImage& texture) {
   command.resolve_swap = UINT32_MAX;
-  if (!REXCVAR_GET(gta4_native_resolve_swap) ||
-      native_descriptor_backend_ != NativeDescriptorBackend::kIndexed || native_descriptor_paging_ ||
-      !native_stable_image_descriptor_table_ || native_descriptor_pages_.size() != 1 ||
-      command.bytes.size() < sizeof(ResolveCommand)) {
+  const auto reject = [](uint32_t reason) {
+    ++g_resolve_swap_rejects[reason];
     return false;
-  }
+  };
+  if (!REXCVAR_GET(gta4_native_resolve_swap)) return false;
+  const bool paged = native_descriptor_backend_ == NativeDescriptorBackend::kIndexed &&
+                     native_descriptor_paging_;
+  const bool stable_slots = native_descriptor_backend_ == NativeDescriptorBackend::kIndexed &&
+                            !native_descriptor_paging_ && native_stable_image_descriptor_table_ &&
+                            native_descriptor_pages_.size() == 1;
+  if ((!paged && !stable_slots) || command.bytes.size() < sizeof(ResolveCommand)) return reject(1);
   ResolveCommand resolve;
   std::memcpy(&resolve, command.bytes.data(), sizeof(resolve));
   const uint32_t flags = NormalizeResolveSampleFlags(resolve.flags, resolve.source.sample_type);
   constexpr uint32_t kClearColor = 1u << 8;
-  if ((flags & 7u) == 4u || !(flags & kClearColor) || resolve.parameters_valid ||
-      NativeResolveExponent(flags) != 0 || resolve.destination_level ||
-      resolve.destination_slice_or_face) {
-    return false;
+  if ((flags & 7u) == 4u) return reject(2);
+  if (!(flags & kClearColor)) return reject(3);
+  if (resolve.parameters_valid || NativeResolveExponent(flags) != 0 ||
+      resolve.destination_level || resolve.destination_slice_or_face) {
+    return reject(4);
   }
   constexpr VkImageUsageFlags kSwappableUsage =
       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -15545,64 +15565,96 @@ bool Gta4NativeGraphicsSystem::PlanResolveSwap(NativeCommand& command,
   const auto identity = [](VkComponentSwizzle swizzle, VkComponentSwizzle self) {
     return swizzle == VK_COMPONENT_SWIZZLE_IDENTITY || swizzle == self;
   };
-  if (texture.aspect != VK_IMAGE_ASPECT_COLOR_BIT || texture.is_reflection ||
-      texture.mip_levels != 1 || texture.samples != VK_SAMPLE_COUNT_1_BIT || !texture.source ||
-      texture.source->packed_depth_source ||
+  if (texture.aspect != VK_IMAGE_ASPECT_COLOR_BIT || texture.is_reflection) return reject(5);
+  if (texture.mip_levels != 1 || texture.samples != VK_SAMPLE_COUNT_1_BIT) return reject(6);
+  if (!texture.source || texture.source->packed_depth_source ||
       texture.source->info.dimension != xenos::DataDimension::k2DOrStacked ||
-      texture.source->info.is_stacked || texture.view_type != VK_IMAGE_VIEW_TYPE_2D ||
-      texture.usage != kSwappableUsage || texture.packed_stencil_view ||
-      texture.descriptor_retirement_queued || !texture.resource.view ||
-      !native_stable_image_descriptor_table_->IsLive(texture.descriptor_slot) ||
-      !identity(texture.view_components.r, VK_COMPONENT_SWIZZLE_R) ||
+      texture.source->info.is_stacked || texture.view_type != VK_IMAGE_VIEW_TYPE_2D) {
+    return reject(7);
+  }
+  if (texture.usage != kSwappableUsage) return reject(8);
+  if (texture.packed_stencil_view || texture.descriptor_retirement_queued ||
+      !texture.resource.view ||
+      (stable_slots && !native_stable_image_descriptor_table_->IsLive(texture.descriptor_slot))) {
+    return reject(9);
+  }
+  if (!identity(texture.view_components.r, VK_COMPONENT_SWIZZLE_R) ||
       !identity(texture.view_components.g, VK_COMPONENT_SWIZZLE_G) ||
       !identity(texture.view_components.b, VK_COMPONENT_SWIZZLE_B) ||
       !identity(texture.view_components.a, VK_COMPONENT_SWIZZLE_A)) {
-    return false;
+    return reject(10);
   }
   GuestSurfaceView view{};
-  if (!DecodeGuestSurfaceView(resolve.source, false, view) ||
-      view.msaa_samples != xenos::MsaaSamples::k1X) {
-    return false;
-  }
+  if (!DecodeGuestSurfaceView(resolve.source, false, view)) return reject(11);
+  if (view.msaa_samples != xenos::MsaaSamples::k1X) return reject(12);
   NativeSurfaceImage* surface = GetOrCreateSurfaceImage(
       resolve.source, false, VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, false);
-  if (!surface || surface->is_reflection || surface->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
-      surface->samples != VK_SAMPLE_COUNT_1_BIT || surface->format != texture.format ||
-      surface->width != texture.width || surface->height != texture.height ||
-      surface->logical_width != texture.logical_width ||
-      surface->logical_height != texture.logical_height || !surface->resource.view ||
-      pending_surface_release_ids_.contains(surface->lifetime_id)) {
-    return false;
+  if (!surface) return reject(13);
+  if (surface->is_reflection || surface->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+      surface->samples != VK_SAMPLE_COUNT_1_BIT) {
+    return reject(14);
+  }
+  if (surface->format != texture.format) return reject(15);
+  if (surface->width != texture.width || surface->height != texture.height) return reject(16);
+  if (surface->logical_width != texture.logical_width ||
+      surface->logical_height != texture.logical_height) {
+    return reject(17);
+  }
+  if (!surface->resource.view || pending_surface_release_ids_.contains(surface->lifetime_id)) {
+    return reject(18);
   }
   if (resolve.source_rectangle_valid &&
       (resolve.source_rectangle.left > 0 || resolve.source_rectangle.top > 0 ||
        resolve.source_rectangle.right < int32_t(surface->logical_width) ||
        resolve.source_rectangle.bottom < int32_t(surface->logical_height))) {
-    return false;
+    return reject(19);
   }
   if (resolve.destination_point_valid &&
       (resolve.destination_point.x || resolve.destination_point.y)) {
-    return false;
+    return reject(20);
+  }
+  if (!surface->swap_descriptor_lifetime) {
+    if (next_native_image_lifetime_ == std::numeric_limits<uint64_t>::max()) return reject(21);
+    surface->swap_descriptor_lifetime = ++next_native_image_lifetime_;
+  }
+  if (paged) {
+    // Draws after this resolve bind what each object will hold by then.
+    const auto texture_entry = prepared_texture_views_.find(&texture);
+    const PreparedImageView texture_current =
+        texture_entry != prepared_texture_views_.end()
+            ? texture_entry->second
+            : PreparedImageView{texture.resource.view, texture.descriptor_lifetime};
+    const auto surface_entry = prepared_surface_views_.find(surface);
+    const PreparedImageView surface_current =
+        surface_entry != prepared_surface_views_.end()
+            ? surface_entry->second
+            : PreparedImageView{surface->resource.view, surface->swap_descriptor_lifetime};
+    prepared_texture_views_[&texture] = surface_current;
+    prepared_surface_views_[surface] = texture_current;
+    command.resolve_swap = uint32_t(planned_resolve_swaps_.size());
+    planned_resolve_swaps_.push_back({surface, &texture, &command, false});
+    g_resolve_swaps_planned.fetch_add(1, std::memory_order_relaxed);
+    return true;
   }
   if (!native_stable_image_descriptor_table_->IsLive(surface->swap_descriptor_slot)) {
     // A surface already planned this frame holds another image by now.
     for (const PlannedResolveSwap& planned : planned_resolve_swaps_) {
-      if (planned.surface == surface) return false;
+      if (planned.surface == surface) return reject(22);
     }
     const NativeDescriptorAllocation allocation = native_stable_image_descriptor_table_->Allocate();
-    if (!allocation) return false;
+    if (!allocation) return reject(23);
     const std::array<VkImageView, 4> views = {surface->resource.view, null_texture_2d_array_.view,
                                               null_texture_3d_.view, null_texture_cube_.view};
     if (!UpdateIndexedImageDescriptor(allocation.handle, views)) {
       native_stable_image_descriptor_table_->AbortUnsubmitted(allocation.handle);
-      return false;
+      return reject(23);
     }
     surface->swap_descriptor_slot = allocation.handle;
   }
   // Later draws of this frame are prepared against the post-swap slot.
   std::swap(texture.descriptor_slot, surface->swap_descriptor_slot);
   command.resolve_swap = uint32_t(planned_resolve_swaps_.size());
-  planned_resolve_swaps_.push_back({surface, &texture, &command, false});
+  planned_resolve_swaps_.push_back({surface, &texture, &command, false, true});
   g_resolve_swaps_planned.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
@@ -15614,6 +15666,7 @@ void Gta4NativeGraphicsSystem::ExecuteResolveSwap(PlannedResolveSwap& swap) {
   std::swap(surface.resource, texture.resource);
   std::swap(surface.swap_mip_views, texture.mip_views);
   std::swap(surface.layout, texture.layout);
+  std::swap(surface.swap_descriptor_lifetime, texture.descriptor_lifetime);
   texture.identical_resolve.reset();
   // Both objects now own an image this submission writes or reads.
   texture.last_used_frame = std::max(texture.last_used_frame, active_texture_frame_);
@@ -15631,15 +15684,20 @@ void Gta4NativeGraphicsSystem::FinalizePlannedResolveSwaps() {
   // The commands may already be gone; PlanResolveSwap resets their indices.
   for (PlannedResolveSwap& swap : planned_resolve_swaps_) ExecuteResolveSwap(swap);
   planned_resolve_swaps_.clear();
+  prepared_texture_views_.clear();
+  prepared_surface_views_.clear();
 }
 
 void Gta4NativeGraphicsSystem::UndoPlannedResolveSwaps() {
   for (auto swap = planned_resolve_swaps_.rbegin(); swap != planned_resolve_swaps_.rend(); ++swap) {
     if (swap->executed) continue;
-    std::swap(swap->texture->descriptor_slot, swap->surface->swap_descriptor_slot);
+    if (swap->slots_swapped)
+      std::swap(swap->texture->descriptor_slot, swap->surface->swap_descriptor_slot);
     if (swap->command) swap->command->resolve_swap = UINT32_MAX;
   }
   std::erase_if(planned_resolve_swaps_, [](const PlannedResolveSwap& swap) { return !swap.executed; });
+  prepared_texture_views_.clear();
+  prepared_surface_views_.clear();
 }
 
 void Gta4NativeGraphicsSystem::RetireNativeTextureDescriptor(NativeTextureImage& image) {
@@ -18145,8 +18203,9 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     if (command.resolve_destination && !resolve_destination_image) {
       return false;
     }
-    if (command.type == CommandType::kResolve && resolve_destination_image && !trace_reflections) {
-      PlanResolveSwap(command, *resolve_destination_image);
+    if (command.type == CommandType::kResolve && resolve_destination_image && !trace_reflections &&
+        PlanResolveSwap(command, *resolve_destination_image)) {
+      previous_prepared_draw = nullptr;
     }
     if (command.depth_handoff_source &&
         !prepared_image(command.depth_handoff_source)) {
@@ -18254,23 +18313,31 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
         StageNativeTextureFlightResources(*image);
       }
       if (image) {
+        VkImageView image_view = image->resource.view;
         image_lifetimes[stage] = image->descriptor_lifetime;
+        if (!prepared_texture_views_.empty()) {
+          if (const auto swapped = prepared_texture_views_.find(image);
+              swapped != prepared_texture_views_.end()) {
+            image_view = swapped->second.view;
+            image_lifetimes[stage] = swapped->second.lifetime;
+          }
+        }
         switch (image->source->info.dimension) {
           case xenos::DataDimension::k3D:
-            images_3d[stage].imageView = image->resource.view;
+            images_3d[stage].imageView = image_view;
             break;
           case xenos::DataDimension::kCube:
-            images_cube[stage].imageView = image->resource.view;
+            images_cube[stage].imageView = image_view;
             break;
           case xenos::DataDimension::k2DOrStacked:
             if (image->source->info.is_stacked) {
-              images_2d_array[stage].imageView = image->resource.view;
+              images_2d_array[stage].imageView = image_view;
             } else {
-              images_2d[stage].imageView = image->resource.view;
+              images_2d[stage].imageView = image_view;
             }
             break;
           default:
-            images_2d[stage].imageView = image->resource.view;
+            images_2d[stage].imageView = image_view;
             break;
         }
         NativeSamplerKey effective_sampler_key{};
@@ -30253,6 +30320,16 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
           std::lock_guard lock(cpu_read_textures_mutex_);
           cpu_read = cpu_read_textures_.contains(resolve.destination_texture);
         }
+        uint32_t present_reject =
+            !frontbuffer ? 1 : !surface ? 2 : (owner && owner->image != surface) ? 3
+            : cpu_read ? 4
+            : (other_use != texture_input_frames_.end() && other_use->second + 120 >= submitted_frame) ? 5
+            : (flags & 0x300u) ? 6 : NativeResolveExponent(flags) != 0 ? 7
+            : surface->samples != VK_SAMPLE_COUNT_1_BIT ? 8
+            : (surface->width != frontbuffer->width || surface->height != frontbuffer->height) ? 9
+            : (frontbuffer->width != frontbuffer->logical_width ||
+               surface->logical_width != frontbuffer->logical_width) ? 10
+            : (!surface->ever_written || surface->layout == VK_IMAGE_LAYOUT_UNDEFINED) ? 11 : 0;
         const bool eligible =
             frontbuffer && surface && (!owner || owner->image == surface) && !cpu_read &&
             (other_use == texture_input_frames_.end() || other_use->second + 120 < submitted_frame) &&
@@ -30277,6 +30354,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
              (!resolve.destination_point.x && !resolve.destination_point.y)) &&
             DecodeGuestSurfaceView(resolve.source, false, view) &&
             view.msaa_samples == xenos::MsaaSamples::k1X;
+        if (!eligible) ++g_present_surface_rejects[present_reject ? present_reject : 12];
         if (eligible) {
           MarkNativeSurfaceImageUsed(*surface);
           // Should a later frame present without resolving the frontbuffer,

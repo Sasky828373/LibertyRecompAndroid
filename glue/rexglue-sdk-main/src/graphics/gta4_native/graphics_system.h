@@ -1029,6 +1029,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     // stable descriptor slot that samples it.
     std::vector<VkImageView> swap_mip_views;
     NativeDescriptorSlotHandle swap_descriptor_slot{};
+    uint64_t swap_descriptor_lifetime = 0;
   };
 
   struct NativePlacementOwner {
@@ -1539,12 +1540,21 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     NativeTextureImage* texture = nullptr;
     NativeCommand* command = nullptr;
     bool executed = false;
+    bool slots_swapped = false;  // stable-slot mode exchanged descriptor slots
   };
   bool PlanResolveSwap(NativeCommand& command, NativeTextureImage& texture);
   void ExecuteResolveSwap(PlannedResolveSwap& swap);
   void FinalizePlannedResolveSwaps();
   void UndoPlannedResolveSwaps();
   std::vector<PlannedResolveSwap> planned_resolve_swaps_;
+  // Paged descriptors are built from views during preparation: after a planned
+  // swap, the image (view and descriptor lifetime) each object will hold then.
+  struct PreparedImageView {
+    VkImageView view = VK_NULL_HANDLE;
+    uint64_t lifetime = 0;
+  };
+  std::unordered_map<const NativeTextureImage*, PreparedImageView> prepared_texture_views_;
+  std::unordered_map<const NativeSurfaceImage*, PreparedImageView> prepared_surface_views_;
   // A11: the frame's last resolve into the frontbuffer is skipped and the
   // present samples this surface, repeating the RGBA8 conversion in its shader.
   NativeSurfaceImage* present_surface_override_ = nullptr;
