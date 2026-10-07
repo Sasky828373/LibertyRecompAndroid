@@ -188,6 +188,10 @@ REXCVAR_DEFINE_UINT32(gta4_native_merge_up_max, 16, "GTA IV/Graphics/Native Rend
 REXCVAR_DEFINE_BOOL(gta4_native_fast_legacy_mul, true, "GTA IV/Graphics/Native Renderer",
                     "Rewrite Xenos zero-preserving multiplies in recompiled shaders into an "
                     "equivalent cheaper form (applies when shaders load)");
+REXCVAR_DEFINE_UINT32(gta4_native_ieee_mul, 0, "GTA IV/Graphics/Native Renderer",
+                      "Plain IEEE products instead of Xenos zero-preserving multiplies "
+                      "(not bit-exact): 0 = off, 1 = vertex shaders, 2 = all shaders")
+    .range(0, 2);
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
@@ -7500,7 +7504,9 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
     }
     const auto apply_legacy_mul = [&](std::vector<uint32_t>& spirv) {
       if (!REXCVAR_GET(gta4_native_fast_legacy_mul) || spirv.empty()) return;
-      if (auto simplified = SimplifySpirvLegacyMultiplies(spirv)) {
+      const uint32_t ieee_mode = REXCVAR_GET(gta4_native_ieee_mul);
+      const bool ieee = ieee_mode == 2 || (ieee_mode == 1 && command.stage == ShaderStage::kVertex);
+      if (auto simplified = SimplifySpirvLegacyMultiplies(spirv, ieee)) {
         legacy_mul_rewrites_ += simplified->rewritten;
         spirv = std::move(simplified->words);
       }

@@ -29,14 +29,16 @@ struct SpirvLegacyMulResult {
   uint32_t rewritten = 0;
 };
 
+// ieee: drop the zero-preserving rule and use the plain IEEE product (one
+// operation; 0 * inf and 0 * NaN become NaN instead of 0). Not bit-exact.
 inline std::optional<SpirvLegacyMulResult> SimplifySpirvLegacyMultiplies(
-    const std::vector<uint32_t>& in) {
+    const std::vector<uint32_t>& in, bool ieee = false) {
   constexpr uint16_t kOpExtInstImport = 11, kOpExtInst = 12, kOpMemoryModel = 14,
                      kOpTypeBool = 20, kOpTypeFloat = 22, kOpTypeVector = 23, kOpConstant = 43,
                      kOpConstantComposite = 44, kOpConstantNull = 46, kOpFunction = 54,
                      kOpBitcast = 124, kOpFMul = 133, kOpLogicalOr = 166, kOpSelect = 169,
                      kOpIEqual = 170, kOpINotEqual = 171, kOpFOrdLessThan = 184,
-                     kOpBitwiseOr = 197, kOpBitwiseAnd = 199;
+                     kOpBitwiseOr = 197, kOpBitwiseAnd = 199, kOpCopyObject = 83;
   constexpr uint32_t kGlslFAbs = 4;
   constexpr uint32_t kExponentMask = 0x7F800000u, kFltMinBits = 0x00800000u;
   if (in.size() < 5 || in[0] != 0x07230203u) return std::nullopt;
@@ -209,6 +211,12 @@ inline std::optional<SpirvLegacyMulResult> SimplifySpirvLegacyMultiplies(
       out.insert(out.end(), in.begin() + i, in.begin() + i + count);
     } else {
       const Match& m = match->second;
+      if (ieee) {
+        emit_to(out, kOpCopyObject, {m.type, m.result, m.product});
+        ++result.rewritten;
+        i += count;
+        continue;
+      }
       const auto [min_id, zero_id] = splats[m.type];
       const uint32_t abs_a = bound++, abs_b = bound++, small_a = bound++, small_b = bound++,
                      small = bound++;
