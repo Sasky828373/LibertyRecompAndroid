@@ -217,6 +217,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_skip_repeated_clears, true, "GTA IV/Graphics/Nat
 REXCVAR_DEFINE_BOOL(gta4_native_skip_invisible_draws, true, "GTA IV/Graphics/Native Renderer",
                     "Do not record draws that can change no pixel: no depth or stencil writes and "
                     "every written color target either masked off or blended as ZERO*src+ONE*dst");
+REXCVAR_DEFINE_BOOL(gta4_native_empty_fragment, true, "GTA IV/Graphics/Native Renderer",
+                    "Give pipelines without a pixel shader but with color attachments an empty "
+                    "fragment shader instead of none");
 REXCVAR_DEFINE_BOOL(gta4_native_colorless_fragment, true, "GTA IV/Graphics/Native Renderer",
                     "In pipelines without color attachments, use pixel shaders whose color outputs "
                     "are private variables so the color math (and vertex outputs only it reads) "
@@ -245,7 +248,7 @@ REXCVAR_DEFINE_STRING(gta4_native_skip_pixel_shaders, "2673E2AF", "GTA IV/Graphi
                       "Comma-separated pixel shader hash prefixes whose draws are not recorded");
 REXCVAR_DEFINE_UINT32(gta4_native_debug_skip_gpu_range, 0, "GTA IV/Diagnostics",
                       "TEMP: skip draws of one GPU range (performance::GpuRange + 1; 0 = none)");
-REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, true, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, false, "GTA IV/Graphics/Native Renderer",
                     "Run local light stencil setups inside the open lighting pass using the "
                     "draw's own shaders");
 REXCVAR_DEFINE_BOOL(gta4_native_ubo_bind_always, false, "GTA IV/Diagnostics",
@@ -3121,6 +3124,7 @@ size_t Gta4NativeGraphicsSystem::NativePipelineKeyHash::operator()(
   add(key.sample_mask);
   add(key.early_fragment_tests);
   add(key.colorless_fragment);
+  add(key.empty_fragment);
   add(key.depth_bias_enable);
   add(key.primitive_restart_enable);
   return size_t(hash);
@@ -8059,6 +8063,12 @@ void Gta4NativeGraphicsSystem::DestroyShaderResources() {
         for (VkShaderModule module : shader->colorless_modules) {
           if (module) dfn.vkDestroyShaderModule(device, module, nullptr);
         }
+      }
+      if (empty_fragment_module_) {
+        dfn.vkDestroyShaderModule(device, empty_fragment_module_, nullptr);
+        empty_fragment_module_ = VK_NULL_HANDLE;
+      }
+      for (const auto& shader : shader_resources_) {
         if (shader->override_late_module) {
           profile::CpuCall(profile::CpuOp::kDriverDestruction, [&] { return dfn.vkDestroyShaderModule(device, shader->override_late_module, nullptr); });
         }
@@ -20247,6 +20257,7 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreateDrawPipeline(
   context.host_fog = modern_shader_frame_.settings().enabled;
   context.early_fragment_tests = REXCVAR_GET(gta4_native_early_fragment_tests);
   context.colorless_fragment = REXCVAR_GET(gta4_native_colorless_fragment);
+  context.empty_fragment = REXCVAR_GET(gta4_native_empty_fragment);
 
   // Pipeline traces report every diagnostic draw, including cache hits. Keep
   // their original validation/logging path even when a prewarm receipt exists.
@@ -20669,6 +20680,10 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
     for (VkFormat format : key.color_formats) colorless &= format == VK_FORMAT_UNDEFINED;
     key.colorless_fragment = colorless;
     if (colorless) key.early_fragment_tests = false;
+    bool any_color = false;
+    for (VkFormat format : key.color_formats) any_color |= format != VK_FORMAT_UNDEFINED;
+    key.empty_fragment = REXCVAR_GET(gta4_native_empty_fragment) && !state.pixel_shader_resource &&
+                         !target.temporal_shader && !key.temporal_auxiliary && any_color;
   }
   AddNativeGpuProfileCounter(performance::Counter::kPipelineLookups);
   const auto existing_pipeline = native_pipelines_.find(key);
@@ -21101,6 +21116,19 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
       shader_stages[1].pSpecializationInfo = &specialization_info;
     }
     shader_stage_count = 2;
+  } else if (key.empty_fragment) {
+    if (!empty_fragment_module_) {
+      static constexpr uint32_t kEmptyFragment[] = {0x07230203,0x00010000,0x000d000a,0x00000006,0x00000000,0x00020011,0x00000001,0x0006000b,0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,0x0005000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00030010,0x00000004,0x00000007,0x00030003,0x00000002,0x000001c2,0x000a0004,0x475f4c47,0x4c474f4f,0x70635f45,0x74735f70,0x5f656c79,0x656e696c,0x7269645f,0x69746365,0x00006576,0x00080004,0x475f4c47,0x4c474f4f,0x6e695f45,0x64756c63,0x69645f65,0x74636572,0x00657669,0x00040005,0x00000004,0x6e69616d,0x00000000,0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x000100fd,0x00010038};
+      empty_fragment_module_ = ui::vulkan::util::CreateShaderModule(vulkan_device, kEmptyFragment,
+                                                                    sizeof(kEmptyFragment));
+    }
+    if (empty_fragment_module_) {
+      shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+      shader_stages[1].module = empty_fragment_module_;
+      shader_stages[1].pName = "main";  // not a title shader: never captured as a recipe
+      shader_stage_count = 2;
+    }
   }
 
   VkPipelineRenderingCreateInfo rendering_info{};

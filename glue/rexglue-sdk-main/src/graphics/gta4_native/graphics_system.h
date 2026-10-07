@@ -1190,6 +1190,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     bool primitive_restart_enable = false;
     bool early_fragment_tests = false;
     bool colorless_fragment = false;
+    bool empty_fragment = false;
 
     bool operator==(const NativePipelineKey&) const = default;
   };
@@ -1548,6 +1549,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void FinalizePlannedResolveSwaps();
   void UndoPlannedResolveSwaps();
   std::vector<PlannedResolveSwap> planned_resolve_swaps_;
+  // Fragment stage for pipelines without a pixel shader but with color
+  // attachments: writes nothing, instead of leaving the color undefined.
+  VkShaderModule empty_fragment_module_ = VK_NULL_HANDLE;
   // Paged descriptors are built from views during preparation: after a planned
   // swap, the image (view and descriptor lifetime) each object will hold then.
   struct PreparedImageView {

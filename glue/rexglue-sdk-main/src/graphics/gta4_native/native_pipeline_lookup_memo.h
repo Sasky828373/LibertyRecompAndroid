@@ -44,6 +44,7 @@ struct NativePipelineLookupContext {
   bool host_fog = false;
   bool early_fragment_tests = false;
   bool colorless_fragment = false;
+  bool empty_fragment = false;
 
   bool operator==(const NativePipelineLookupContext&) const = default;
 };
