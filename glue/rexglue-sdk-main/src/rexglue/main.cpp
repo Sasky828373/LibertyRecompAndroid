@@ -56,7 +56,16 @@ void ConfigureLogging(const std::string& level, const std::string& log_file, boo
 
 }  // namespace
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+// Bionic requires a 64-byte aligned TLS segment in executables built with
+// native (non-emulated) TLS.
+alignas(64) thread_local volatile char g_bionic_tls_alignment_pad;
+#endif
+
 int main(int argc, char** argv) {
+#if defined(__ANDROID__) && defined(__aarch64__)
+  g_bionic_tls_alignment_pad = 0;  // Keep the aligned TLS segment.
+#endif
   // The developer CLI is itself an explicit logging-oriented command-line
   // process. Configure its immutable policy before the early console logger;
   // game executables must instead opt in through their --diagnostics flags.
