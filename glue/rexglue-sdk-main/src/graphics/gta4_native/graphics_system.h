@@ -1542,7 +1542,8 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     bool executed = false;
     bool slots_swapped = false;  // stable-slot mode exchanged descriptor slots
   };
-  bool PlanResolveSwap(NativeCommand& command, NativeTextureImage& texture);
+  bool PlanResolveSwap(NativeCommand& command, NativeTextureImage& texture,
+                       const std::vector<NativeCommand*>& commands, size_t command_index);
   void ExecuteResolveSwap(PlannedResolveSwap& swap);
   void FinalizePlannedResolveSwaps();
   void UndoPlannedResolveSwaps();

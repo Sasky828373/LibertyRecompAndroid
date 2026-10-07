@@ -245,7 +245,7 @@ REXCVAR_DEFINE_STRING(gta4_native_skip_pixel_shaders, "2673E2AF", "GTA IV/Graphi
                       "Comma-separated pixel shader hash prefixes whose draws are not recorded");
 REXCVAR_DEFINE_UINT32(gta4_native_debug_skip_gpu_range, 0, "GTA IV/Diagnostics",
                       "TEMP: skip draws of one GPU range (performance::GpuRange + 1; 0 = none)");
-REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, false, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, true, "GTA IV/Graphics/Native Renderer",
                     "Run local light stencil setups inside the open lighting pass using the "
                     "draw's own shaders");
 REXCVAR_DEFINE_BOOL(gta4_native_ubo_bind_always, false, "GTA IV/Diagnostics",
@@ -15536,7 +15536,9 @@ bool Gta4NativeGraphicsSystem::AllocateNativeSamplerDescriptor(NativeSampler& sa
 }
 
 bool Gta4NativeGraphicsSystem::PlanResolveSwap(NativeCommand& command,
-                                               NativeTextureImage& texture) {
+                                               NativeTextureImage& texture,
+                                               const std::vector<NativeCommand*>& commands,
+                                               size_t command_index) {
   command.resolve_swap = UINT32_MAX;
   const auto reject = [](uint32_t reason) {
     ++g_resolve_swap_rejects[reason];
@@ -15554,7 +15556,6 @@ bool Gta4NativeGraphicsSystem::PlanResolveSwap(NativeCommand& command,
   const uint32_t flags = NormalizeResolveSampleFlags(resolve.flags, resolve.source.sample_type);
   constexpr uint32_t kClearColor = 1u << 8;
   if ((flags & 7u) == 4u) return reject(2);
-  if (!(flags & kClearColor)) return reject(3);
   if (resolve.parameters_valid || NativeResolveExponent(flags) != 0 ||
       resolve.destination_level || resolve.destination_slice_or_face) {
     return reject(4);
@@ -15613,6 +15614,52 @@ bool Gta4NativeGraphicsSystem::PlanResolveSwap(NativeCommand& command,
       (resolve.destination_point.x || resolve.destination_point.y)) {
     return reject(20);
   }
+  if (!(flags & kClearColor)) {
+    // Without its own clear, the surface's content must be dead after the
+    // resolve: its next use in this frame is a full clear of its color, and
+    // nothing in between reads that EDRAM range (another resolve, or a target
+    // that would materialize from it).
+    const SurfaceDescriptor& descriptor = surface->descriptor;
+    const auto same_memory = [&](const SurfaceDescriptor& other) {
+      return other.handle && (other.handle == descriptor.handle ||
+                              (other.address && other.address == descriptor.address));
+    };
+    bool dead = false;
+    for (size_t next = command_index + 1; next < commands.size() && !dead; ++next) {
+      const NativeCommand& later = *commands[next];
+      if (later.type == CommandType::kReleaseResource) continue;
+      if (later.type == CommandType::kResolve && later.bytes.size() >= sizeof(ResolveCommand)) {
+        ResolveCommand later_resolve;
+        std::memcpy(&later_resolve, later.bytes.data(), sizeof(later_resolve));
+        if (same_memory(later_resolve.source)) return reject(3);
+        continue;
+      }
+      if (!later.pipeline_state) continue;
+      bool touches = same_memory(later.pipeline_state->depth_stencil);
+      int32_t color_slot = -1;
+      for (uint32_t slot = 0; slot < kRenderTargetCount; ++slot) {
+        if (same_memory(later.pipeline_state->render_targets[slot])) {
+          touches = true;
+          color_slot = int32_t(slot);
+        }
+      }
+      if (!touches) continue;
+      if (later.type != CommandType::kClear || color_slot < 0 ||
+          later.bytes.size() < sizeof(ClearCommand) ||
+          !SurfaceDescriptorsEqual(later.pipeline_state->render_targets[color_slot], descriptor)) {
+        return reject(3);
+      }
+      ClearCommand clear;
+      std::memcpy(&clear, later.bytes.data(), sizeof(clear));
+      if (!(clear.flags & (1u << color_slot)) || clear.left > 0 || clear.top > 0 ||
+          clear.right < int32_t(surface->logical_width) ||
+          clear.bottom < int32_t(surface->logical_height)) {
+        return reject(3);
+      }
+      dead = true;
+    }
+    if (!dead) return reject(22);
+  }
   if (!surface->swap_descriptor_lifetime) {
     if (next_native_image_lifetime_ == std::numeric_limits<uint64_t>::max()) return reject(21);
     surface->swap_descriptor_lifetime = ++next_native_image_lifetime_;
@@ -15639,7 +15686,7 @@ bool Gta4NativeGraphicsSystem::PlanResolveSwap(NativeCommand& command,
   if (!native_stable_image_descriptor_table_->IsLive(surface->swap_descriptor_slot)) {
     // A surface already planned this frame holds another image by now.
     for (const PlannedResolveSwap& planned : planned_resolve_swaps_) {
-      if (planned.surface == surface) return reject(22);
+      if (planned.surface == surface) return reject(23);
     }
     const NativeDescriptorAllocation allocation = native_stable_image_descriptor_table_->Allocate();
     if (!allocation) return reject(23);
@@ -18204,7 +18251,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
       return false;
     }
     if (command.type == CommandType::kResolve && resolve_destination_image && !trace_reflections &&
-        PlanResolveSwap(command, *resolve_destination_image)) {
+        PlanResolveSwap(command, *resolve_destination_image, texture_commands, command_index)) {
       previous_prepared_draw = nullptr;
     }
     if (command.depth_handoff_source &&
