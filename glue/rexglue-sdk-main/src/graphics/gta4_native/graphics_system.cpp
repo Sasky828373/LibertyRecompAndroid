@@ -14,6 +14,7 @@
 #include "native_spirv_legacy_mul.h"
 #include "native_vertex_cache.h"
 #include "native_spirv_relaxed.h"
+#include "native_spirv_early_tests.h"
 #include "native_spirv_ubo_constants.h"
 #include "native_spirv_constant_range.h"
 #include "native_fixed_state_hash.h"
@@ -193,6 +194,10 @@ REXCVAR_DEFINE_BOOL(gta4_native_fast_legacy_mul, true, "GTA IV/Graphics/Native R
 REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, false, "GTA IV/Graphics/Native Renderer",
                     "Reorder the triangles of order-independent indexed triangle-list draws for "
                     "the GPU vertex cache (once per index range)");
+REXCVAR_DEFINE_BOOL(gta4_native_early_fragment_tests, true, "GTA IV/Graphics/Native Renderer",
+                    "Test depth before pixel shading for draws that write neither depth nor "
+                    "stencil (identical image; hidden fragments of alpha-tested/killing shaders "
+                    "are not shaded)");
 REXCVAR_DEFINE_BOOL(gta4_native_fs_relaxed_precision, false, "GTA IV/Graphics/Native Renderer",
                     "Experimental: mark pixel shader arithmetic RelaxedPrecision (FP16 where the "
                     "driver lowers mediump; applies when shaders load)");
@@ -3078,6 +3083,7 @@ size_t Gta4NativeGraphicsSystem::NativePipelineKeyHash::operator()(
   add(key.ccw_stencil_function);
   add(key.color_write_mask);
   add(key.sample_mask);
+  add(key.early_fragment_tests);
   add(key.depth_bias_enable);
   add(key.primitive_restart_enable);
   return size_t(hash);
@@ -7444,6 +7450,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
     };
 
     std::vector<uint32_t> stock_early_spirv;
+    std::vector<uint32_t> early_test_override_early_spirv;
+    std::vector<uint32_t> early_test_override_late_spirv;
     std::vector<uint32_t> stock_late_spirv;
     size_t stock_early_spirv_size = 0;
     size_t stock_late_spirv_size = 0;
@@ -7852,6 +7860,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
           resource->override_color_output_mask = override_color_output_mask;
           resource->override_early_module = override_early_module;
           resource->override_late_module = override_late_module;
+          early_test_override_early_spirv = override_early_spirv;
+          early_test_override_late_spirv = override_late_spirv;
           resource->module_code_hashes[2] =
               XXH3_64bits(override_early_spirv.data(), effective_early_size);
           resource->module_code_hashes[3] = override_late_spirv.empty()
@@ -7910,6 +7920,22 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
       }
     }
 #endif
+    if (command.stage == ShaderStage::kPixel) {
+      const auto make_early = [&](const std::vector<uint32_t>& spirv, uint32_t index) {
+        if (spirv.empty()) return;
+        auto early = AddSpirvEarlyFragmentTests(spirv);
+        if (!early) return;
+        resource->early_test_modules[index] = ui::vulkan::util::CreateShaderModule(
+            vulkan_device, early->data(), early->size() * sizeof(uint32_t));
+        if (resource->early_test_modules[index])
+          resource->module_code_hashes[4 + index] =
+              XXH3_64bits(early->data(), early->size() * sizeof(uint32_t));
+      };
+      make_early(stock_early_spirv, 0);
+      make_early(stock_late_spirv, 1);
+      make_early(early_test_override_early_spirv, 2);
+      make_early(early_test_override_late_spirv, 3);
+    }
     shader = resource.get();
     shader_resources_.push_back(std::move(resource));
     resources_by_hash.emplace(command.hash, shader);
@@ -7946,6 +7972,9 @@ void Gta4NativeGraphicsSystem::DestroyShaderResources() {
       const auto& dfn = vulkan_device->functions();
       const VkDevice device = vulkan_device->device();
       for (const auto& shader : shader_resources_) {
+        for (VkShaderModule module : shader->early_test_modules) {
+          if (module) dfn.vkDestroyShaderModule(device, module, nullptr);
+        }
         if (shader->override_late_module) {
           profile::CpuCall(profile::CpuOp::kDriverDestruction, [&] { return dfn.vkDestroyShaderModule(device, shader->override_late_module, nullptr); });
         }
@@ -15824,9 +15853,11 @@ void Gta4NativeGraphicsSystem::ReplayNativePipelineRecipes() {
         incompatible = true;
         break;
       }
-      const std::array<VkShaderModule, 4> modules = {
+      const std::array<VkShaderModule, 8> modules = {
           shader.early_module, shader.late_module, shader.override_early_module,
-          shader.override_late_module};
+          shader.override_late_module, shader.early_test_modules[0],
+          shader.early_test_modules[1], shader.early_test_modules[2],
+          shader.early_test_modules[3]};
       recipe.modules[stage] = modules[identity.variant];
     }
     if (incompatible) {
@@ -19888,6 +19919,7 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreateDrawPipeline(
   context.uses_presenter = target.uses_presenter;
   context.primitive_restart_enable = primitive_restart_enable;
   context.host_fog = modern_shader_frame_.settings().enabled;
+  context.early_fragment_tests = REXCVAR_GET(gta4_native_early_fragment_tests);
 
   // Pipeline traces report every diagnostic draw, including cache hits. Keep
   // their original validation/logging path even when a prewarm receipt exists.
@@ -20287,6 +20319,22 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
     key.ccw_stencil_depth_fail = 0;
     key.ccw_stencil_pass = 0;
     key.ccw_stencil_function = 0;
+  }
+  // Depth and stencil that write nothing make a discard invisible to them, so
+  // the tests can run before shading. Stencil writes are judged by the ops
+  // (the write mask is dynamic state shared by the pipeline's draws).
+  {
+    const uint32_t pixel_variant = shader_override_selection.pixel_override ? 2u : 0u;
+    const bool stencil_writes_nothing =
+        !key.stencil_enable ||
+        (!key.stencil_fail && !key.stencil_depth_fail && !key.stencil_pass &&
+         (!key.two_sided_stencil ||
+          (!key.ccw_stencil_fail && !key.ccw_stencil_depth_fail && !key.ccw_stencil_pass)));
+    key.early_fragment_tests =
+        REXCVAR_GET(gta4_native_early_fragment_tests) && !target.temporal_shader &&
+        state.pixel_shader_resource &&
+        state.pixel_shader_resource->early_test_modules[pixel_variant] &&
+        key.depth_enable && !key.depth_write_enable && stencil_writes_nothing;
   }
   AddNativeGpuProfileCounter(performance::Counter::kPipelineLookups);
   const auto existing_pipeline = native_pipelines_.find(key);
@@ -20705,6 +20753,11 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
     shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     shader_stages[1].module =
         use_late_module ? selected_pixel.late_module : selected_pixel.early_module;
+    if (key.early_fragment_tests) {
+      const uint32_t variant = (selected_pixel.override_selected ? 2u : 0u) + (use_late_module ? 1u : 0u);
+      if (VkShaderModule early = state.pixel_shader_resource->early_test_modules[variant])
+        shader_stages[1].module = early;
+    }
     shader_stages[1].pName = "shaderMain";
     if (selected_pixel.specialization_constants_mask) {
       shader_stages[1].pSpecializationInfo = &specialization_info;
@@ -20747,8 +20800,11 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
           recipe->data.shaders[0].variant];
       if (state.pixel_shader_resource) {
         recipe->data.shaders[1].title_hash = key.pixel_shader_hash;
-        recipe->data.shaders[1].variant = selected_pixel.override_selected
-            ? (use_late_module ? 3 : 2) : (use_late_module ? 1 : 0);
+        recipe->data.shaders[1].variant = (selected_pixel.override_selected
+            ? (use_late_module ? 3 : 2) : (use_late_module ? 1 : 0)) +
+            (key.early_fragment_tests &&
+             state.pixel_shader_resource->early_test_modules[(selected_pixel.override_selected ? 2 : 0) +
+                                                             (use_late_module ? 1 : 0)] ? 4 : 0);
         recipe->data.shaders[1].code_hash = state.pixel_shader_resource->module_code_hashes[
             recipe->data.shaders[1].variant];
       }

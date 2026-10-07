@@ -162,7 +162,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t color_output_mask = 0;
     VkShaderModule early_module = VK_NULL_HANDLE;
     VkShaderModule late_module = VK_NULL_HANDLE;
-    std::array<uint64_t, 4> module_code_hashes{};
+    // 0-3: early, late, override early, override late; 4-7: the same with
+    // EarlyFragmentTests (pixel shaders without depth writes only).
+    std::array<uint64_t, 8> module_code_hashes{};
+    std::array<VkShaderModule, 4> early_test_modules{};
     std::string filename;
     std::vector<NativeVertexInput> vertex_inputs;
     // Reads gl_VertexIndex/gl_InstanceIndex: its draws cannot be concatenated.
@@ -1173,6 +1176,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t sample_mask = 0;
     bool depth_bias_enable = false;
     bool primitive_restart_enable = false;
+    bool early_fragment_tests = false;
 
     bool operator==(const NativePipelineKey&) const = default;
   };
