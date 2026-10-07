@@ -186,8 +186,11 @@ REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Ren
 REXCVAR_DEFINE_UINT32(gta4_native_loop_watchdog_budget, 16384, "GTA IV/Graphics/Native Renderer",
                       "Loop-header iterations one shader invocation may run before it returns")
     .range(64, 1u << 20);
-REXCVAR_DEFINE_STRING(gta4_native_debug_skip_ps, "", "GTA IV/Diagnostics",
-                      "TEMP: skip draws whose pixel shader hash starts with this hex prefix");
+// PS 2673E2AF (VS 0872615B, an 8400-vertex deferred light volume) hangs the
+// Adreno 650 under Turnip near water and at the bridge (VFD/VBIF busy, SP idle);
+// with it skipped, five dives and bridge play stayed clean.
+REXCVAR_DEFINE_STRING(gta4_native_skip_pixel_shaders, "2673E2AF", "GTA IV/Graphics/Native Renderer",
+                      "Comma-separated pixel shader hash prefixes whose draws are not recorded");
 REXCVAR_DEFINE_UINT32(gta4_native_debug_skip_gpu_range, 0, "GTA IV/Diagnostics",
                       "TEMP: skip draws of one GPU range (performance::GpuRange + 1; 0 = none)");
 REXCVAR_DEFINE_BOOL(gta4_native_reuse_lighting_real, false, "GTA IV/Graphics/Native Renderer",
@@ -5042,41 +5045,15 @@ Gta4NativeGraphicsSystem::CaptureTextureResource(uint32_t handle,
   const std::array<uint32_t, 6> fetch_words = NativeTextureImageFetchKey(fetch);
   TextureCaptureCacheSlot& slot = TextureCaptureSlot(handle);
   const uint64_t epoch = texture_resources_epoch_.load(std::memory_order_acquire);
-#if REX_PLATFORM_ANDROID
-  // TEMP: texture capture memo effectiveness (perf investigation).
-  static std::array<uint64_t, 7> memo_stats{};
-  const auto memo_report = [] {
-    if (++memo_stats[0] % 50000) return;
-    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
-        "tex-memo: n=%llu hit=%llu other=%llu epoch=%llu fetch=%llu expired=%llu uncacheable=%llu",
-        (unsigned long long)memo_stats[0], (unsigned long long)memo_stats[1],
-        (unsigned long long)memo_stats[2], (unsigned long long)memo_stats[3],
-        (unsigned long long)memo_stats[4], (unsigned long long)memo_stats[5],
-        (unsigned long long)memo_stats[6]);
-  };
-  memo_report();
-  if (slot.handle != handle) ++memo_stats[2];
-  else if (slot.epoch != epoch) ++memo_stats[3];
-  else if (slot.fetch != fetch_words) ++memo_stats[4];
-#endif
   if (slot.handle == handle && slot.epoch == epoch && slot.fetch == fetch_words &&
       stage < kShaderTextureCount) {
     if (auto cached = slot.resource.lock()) {
-#if REX_PLATFORM_ANDROID
-      ++memo_stats[1];
-#endif
       return cached;
     }
-#if REX_PLATFORM_ANDROID
-    ++memo_stats[5];
-#endif
     slot.handle = 0;
   }
   bool cacheable = false;
   auto resource = CaptureTextureResourceUncached(handle, fetch, stage, cacheable);
-#if REX_PLATFORM_ANDROID
-  if (!cacheable) ++memo_stats[6];
-#endif
   if (cacheable && resource) {
     slot.handle = handle;
     slot.fetch = fetch_words;
@@ -30965,53 +30942,40 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         uint32_t(performance_range_for_command(command)) + 1 == debug_skip_gpu_range) {
       continue;
     }
-#if REX_PLATFORM_ANDROID
-    // TEMP: water-dive GPU hang hunt. Log every shader pair drawn in the
-    // deferred light volumes once; optionally skip one pixel shader.
-    if (draw_command && command.pipeline_state) {
-      const NativeShader* vs = command.pipeline_state->vertex_shader_resource;
-      const NativeShader* ps = command.pipeline_state->pixel_shader_resource;
-      const uint32_t range = uint32_t(performance_range_for_command(command));
-      if (range == uint32_t(performance::GpuRange::kDeferredLightVolumes) ||
-          range == uint32_t(performance::GpuRange::kLightSetup)) {
-        static std::set<std::pair<uint64_t, uint64_t>> seen;
-        const auto key = std::make_pair(vs ? vs->hash : 0, ps ? ps->hash : 0);
-        if (seen.size() < 512 && seen.insert(key).second)
-          __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
-                              "light-pair: range=%u vs=%016llX/%u ps=%016llX/%u type=%u",
-                              range, (unsigned long long)key.first, vs ? vs->watchdog_loops : 0,
-                              (unsigned long long)key.second, ps ? ps->watchdog_loops : 0,
-                              uint32_t(command.type));
-      }
-      if (range == uint32_t(performance::GpuRange::kDeferredLightVolumes) &&
-          command.type == CommandType::kDrawPrimitive &&
-          command.bytes.size() >= sizeof(DrawPrimitiveCommand)) {
-        DrawPrimitiveCommand draw{};
-        std::memcpy(&draw, command.bytes.data(), sizeof(draw));
-        const uint32_t stride = command.pipeline_state->vertex_streams[0].stride;
-        const uint32_t offset = command.pipeline_state->vertex_streams[0].offset;
-        const size_t payload = command.vertex_buffers[0] ? command.vertex_buffers[0]->payload.size() : 0;
-        const uint64_t end = uint64_t(offset) + (uint64_t(draw.start_vertex) + draw.vertex_count) * stride;
-        static uint32_t max_count = 0;
-        static uint32_t odd_logs = 0;
-        const bool odd = end > payload || draw.vertex_count > 20000 || !stride;
-        if ((odd && odd_logs < 64) || draw.vertex_count > max_count) {
-          if (odd) ++odd_logs;
-          max_count = std::max(max_count, draw.vertex_count);
-          __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
-              "light-draw: %s prim=%u start=%u count=%u stride=%u offset=%u payload=%zu vb=%08X ps=%016llX",
-              odd ? "ODD" : "max", draw.primitive_type, draw.start_vertex, draw.vertex_count, stride,
-              offset, payload, command.vertex_buffers[0] ? command.vertex_buffers[0]->handle : 0,
-              (unsigned long long)(ps ? ps->hash : 0));
+    if (draw_command && command.pipeline_state && command.pipeline_state->pixel_shader_resource) {
+      // Prefixes are parsed once per distinct setting, not per draw.
+      static std::string parsed_setting;
+      static std::vector<std::pair<uint64_t, uint64_t>> skipped_pixel_shaders;  // value, mask
+      const std::string& setting = REXCVAR_GET(gta4_native_skip_pixel_shaders);
+      if (setting != parsed_setting) {
+        parsed_setting = setting;
+        skipped_pixel_shaders.clear();
+        for (size_t begin = 0; begin < setting.size();) {
+          size_t end = setting.find(',', begin);
+          if (end == std::string::npos) end = setting.size();
+          const std::string_view prefix(setting.data() + begin, end - begin);
+          uint64_t value = 0;
+          bool valid = !prefix.empty() && prefix.size() <= 16;
+          for (char c : prefix) {
+            const int digit = c >= '0' && c <= '9' ? c - '0'
+                            : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                            : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+            if (digit < 0) { valid = false; break; }
+            value = value << 4 | uint64_t(digit);
+          }
+          if (valid) {
+            const uint32_t shift = uint32_t(64 - 4 * prefix.size());
+            const uint64_t mask = shift == 64 ? 0 : ~uint64_t(0) << shift;
+            skipped_pixel_shaders.emplace_back(shift == 64 ? 0 : value << shift, mask);
+          }
+          begin = end + 1;
         }
       }
-      const std::string& skip_ps = REXCVAR_GET(gta4_native_debug_skip_ps);
-      if (!skip_ps.empty() && ps &&
-          fmt::format("{:016X}", ps->hash).starts_with(skip_ps)) {
-        continue;
-      }
+      const uint64_t pixel_hash = command.pipeline_state->pixel_shader_resource->hash;
+      bool skip = false;
+      for (const auto& [value, mask] : skipped_pixel_shaders) skip |= (pixel_hash & mask) == value;
+      if (skip) continue;
     }
-#endif
     const bool artificial_light_trace_requested =
         ShouldCaptureArtificialLightFrame(submitted_frame);
     const NativeShader* diagnostic_vertex_shader =

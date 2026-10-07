@@ -12,7 +12,7 @@
 # 5.5" panel it looks like the console's 720p ("quality") and keeps frame times
 # steadier in the open world.
 --gta4_native_upscaler=fsr1
---gta4_fsr1_quality=balanced
+--gta4_fsr1_quality=quality
 
 # Cheaper anti-aliasing (off | fxaa | smaa)
 --gta4_native_anti_aliasing=fxaa
@@ -24,9 +24,9 @@
 # Console draw distance, lowered automatically (down to 55%) only while
 # frames miss the 30 fps budget.
 --gta4_dynamic_draw_distance=true
---gta4_dynamic_draw_distance_min=0.55
+--gta4_dynamic_draw_distance_min=0.75
 --gta4_shadow_map_base_size=256
---gta4_shadow_distance_scale=0.75
+--gta4_shadow_distance_scale=0.5
 --gta4_reflection_resolution=original
 --gta4_reflection_capture_distance=near
 # 4x MSAA on the low-resolution water/mirror captures is invisible but costs
@@ -53,3 +53,5 @@
 --gta4_motion_blur=false
 # Let the title run three frames ahead so the worker, recorder and GPU overlap.
 --gta4_native_max_queued_frames=3
+# FSR renders 1/1.5 of a 720p output; the presenter scales 720p to the panel.
+--gta4_output_height_cap=720

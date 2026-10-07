@@ -1,12 +1,12 @@
 --log_level=warn
 --gta4_native_upscaler=fsr1
---gta4_fsr1_quality=balanced
+--gta4_fsr1_quality=quality
 --gta4_native_anti_aliasing=fxaa
 --gta4_draw_distance_scale=1.0
 --gta4_dynamic_draw_distance=true
---gta4_dynamic_draw_distance_min=0.55
+--gta4_dynamic_draw_distance_min=0.75
 --gta4_shadow_map_base_size=256
---gta4_shadow_distance_scale=0.75
+--gta4_shadow_distance_scale=0.5
 --gta4_reflection_resolution=original
 --gta4_reflection_capture_distance=near
 --gta4_frame_limit=30
@@ -18,3 +18,5 @@
 --gta4_profile_native_detailed_gpu=false
 --gta4_motion_blur=false
 --gta4_native_max_queued_frames=3
+# FSR renders 1/1.5 of a 720p output; the presenter scales 720p to the panel.
+--gta4_output_height_cap=720
