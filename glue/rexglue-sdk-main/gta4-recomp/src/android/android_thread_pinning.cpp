@@ -26,7 +26,7 @@
 
 #include <rex/cvar.h>
 
-REXCVAR_DEFINE_UINT32(gta4_thread_pinning, 3, "GTA IV/Performance",
+REXCVAR_DEFINE_UINT32(gta4_thread_pinning, 0, "GTA IV/Performance",
                       "Give the N busiest threads a big core each and keep the others off them "
                       "(0 = leave scheduling to Android)")
     .range(0, 4);

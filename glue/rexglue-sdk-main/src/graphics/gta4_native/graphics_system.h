@@ -1889,6 +1889,14 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   double dynamic_draw_distance_interval_ms_ = 33.3;
   uint64_t dynamic_draw_distance_last_tick_ = 0;
   uint32_t dynamic_draw_distance_stable_frames_ = 0;
+  // B1 30 FPS guard: a ladder of content reductions above the draw distance.
+  void UpdateFpsGuard(double interval_ms, uint64_t now, uint64_t frequency);
+  void ApplyFpsGuardLevel(uint32_t level);
+  uint32_t fps_guard_level_ = 0;
+  uint32_t fps_guard_applied_level_ = UINT32_MAX;
+  uint64_t fps_guard_changed_tick_ = 0;
+  uint64_t fps_guard_slow_since_tick_ = 0;
+  uint64_t fps_guard_fast_since_tick_ = 0;
   NativeOwnedCommands<NativeCommand> assembly_frame_;
   // Worker-side protection visible to the recorder's eviction passes. Guarded
   // by worker_protection_mutex_ together with the worker batch and cursor.

@@ -134,6 +134,9 @@ REXCVAR_DEFINE_UINT32(gta4_shadow_map_base_size, 512, "GTA IV/Graphics/Shadows",
                       "Base shadow-map size (512 creates a 4096x4096 point-shadow cache)")
     .range(256, 1024)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_DOUBLE(gta4_shadow_distance_guard_factor, 1.0, "GTA IV/Graphics/Shadows",
+                      "Multiplier on the shadow distance owned by the 30 FPS guard")
+    .range(0.1, 1.0);
 REXCVAR_DEFINE_DOUBLE(gta4_shadow_distance_scale, 2.0, "GTA IV/Graphics/Shadows",
                       "Multiplier applied to GTA IV's directional shadow range")
     .range(0.1, 4.0)

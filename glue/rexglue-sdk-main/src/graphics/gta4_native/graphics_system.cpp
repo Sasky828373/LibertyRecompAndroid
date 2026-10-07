@@ -198,6 +198,11 @@ REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, false, "GTA IV/Graphics/Nati
 REXCVAR_DEFINE_BOOL(gta4_native_water_reflection_on_demand, true, "GTA IV/Graphics/Reflections",
                     "Render the water reflection only in frames that draw scene water, and only "
                     "every 8th frame while occlusion queries find all of that water hidden");
+REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
+                      "30 FPS guard: highest content reduction step it may take when frames miss "
+                      "the 30 Hz budget (0 = off; 1 = reflections every other frame; "
+                      "2 = also half shadow distance; 3 = rarer reflections, shorter shadows)")
+    .range(0, 3);
 REXCVAR_DEFINE_BOOL(gta4_native_resolve_swap, true, "GTA IV/Graphics/Native Renderer",
                     "Resolves that copy a whole surface into a same-format texture and then clear "
                     "the surface exchange the two images instead of copying");
@@ -6756,11 +6761,68 @@ void Gta4NativeGraphicsSystem::UpdateDynamicDrawDistance() {
     dynamic_draw_distance_stable_frames_ = 0;
   }
   factor = std::clamp(factor, minimum, 1.0);
+  UpdateFpsGuard(dynamic_draw_distance_interval_ms_, now, frequency);
   if (std::abs(factor - dynamic_draw_distance_published_) >= 0.0099) {
     rex::cvar::SetFlagByName("gta4_draw_distance_dynamic_factor", fmt::format("{:.3f}", factor));
     dynamic_draw_distance_published_ = factor;
   }
   dynamic_draw_distance_factor_ = factor;
+}
+
+void Gta4NativeGraphicsSystem::ApplyFpsGuardLevel(uint32_t level) {
+  struct Step {
+    const char* water;
+    const char* environment;
+    const char* shadows;
+  };
+  static constexpr Step kSteps[] = {
+      {"1", "1", "1.0"},   // full quality
+      {"2", "2", "1.0"},   // reflections every other frame
+      {"2", "2", "0.5"},   // + half shadow distance
+      {"3", "4", "0.35"},  // + rarer reflections, shorter shadows
+  };
+  const Step& step = kSteps[std::min<uint32_t>(level, 3)];
+  rex::cvar::SetFlagByName("gta4_native_water_reflection_interval", step.water);
+  rex::cvar::SetFlagByName("gta4_native_environment_reflection_interval", step.environment);
+  rex::cvar::SetFlagByName("gta4_shadow_distance_guard_factor", step.shadows);
+  fps_guard_applied_level_ = level;
+#if REX_PLATFORM_ANDROID
+  __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "fps-guard: level %u", level);
+#endif
+}
+
+void Gta4NativeGraphicsSystem::UpdateFpsGuard(double interval_ms, uint64_t now, uint64_t frequency) {
+  // Steps down after 3 s over budget (at most every 5 s) once the draw
+  // distance alone has not been enough, and back up only after 30 s with
+  // headroom, so the picture does not visibly oscillate.
+  const uint32_t maximum = REXCVAR_GET(gta4_fps_guard);
+  const auto seconds_since = [&](uint64_t tick) {
+    return tick ? double(now - tick) / double(frequency) : 0.0;
+  };
+  if (interval_ms > 36.0) {
+    if (!fps_guard_slow_since_tick_) fps_guard_slow_since_tick_ = now;
+    fps_guard_fast_since_tick_ = 0;
+  } else if (interval_ms <= 33.6) {
+    if (!fps_guard_fast_since_tick_) fps_guard_fast_since_tick_ = now;
+    fps_guard_slow_since_tick_ = 0;
+  } else {
+    fps_guard_slow_since_tick_ = 0;
+    fps_guard_fast_since_tick_ = 0;
+  }
+  uint32_t level = std::min(fps_guard_level_, maximum);
+  const bool can_change = !fps_guard_changed_tick_ || seconds_since(fps_guard_changed_tick_) >= 5.0;
+  if (can_change && level < maximum && seconds_since(fps_guard_slow_since_tick_) >= 3.0) {
+    ++level;
+    fps_guard_slow_since_tick_ = 0;
+  } else if (can_change && level > 0 && seconds_since(fps_guard_fast_since_tick_) >= 30.0) {
+    --level;
+    fps_guard_fast_since_tick_ = 0;
+  }
+  if (level != fps_guard_level_) {
+    fps_guard_level_ = level;
+    fps_guard_changed_tick_ = now;
+  }
+  if (fps_guard_level_ != fps_guard_applied_level_) ApplyFpsGuardLevel(fps_guard_level_);
 }
 
 void Gta4NativeGraphicsSystem::SignalGuestFrameComplete(uint32_t device, uint32_t frame) {

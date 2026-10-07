@@ -60,6 +60,7 @@ REXCVAR_DEFINE_UINT32(gta4_shadow_cascade_count, 0, "GTA IV/Graphics/Shadows",
     .range(0, 5)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DECLARE(double, gta4_shadow_distance_scale);
+REXCVAR_DECLARE(double, gta4_shadow_distance_guard_factor);
 REXCVAR_DECLARE(std::string, gta4_reflection_resolution);
 REXCVAR_DECLARE(std::string, gta4_reflection_resolution_cap);
 REXCVAR_DECLARE(std::string, gta4_mirror_reflection_resolution);
@@ -2697,7 +2698,8 @@ SupersampledExtent GetNativePrimaryPhysicalExtent(uint32_t logical_width, uint32
 }
 
 void ApplyShadowDistanceScale(uint8_t* base) {
-  const double configured_scale = REXCVAR_GET(gta4_shadow_distance_scale);
+  const double configured_scale =
+      REXCVAR_GET(gta4_shadow_distance_scale) * REXCVAR_GET(gta4_shadow_distance_guard_factor);
   static std::mutex shadow_range_mutex;
   static bool originals_captured = false;
   static std::array<float, kNativeShadowContextCount> original_ranges{};
@@ -4977,6 +4979,16 @@ extern "C" void sub_821DFFE8(PPCContext& ctx, uint8_t* base) {
 
   const float effective_scale = gta4::draw_distance::ResolveEngineScale(configured_scale);
   StoreU32(base, kDistanceScaleInputGlobal, std::bit_cast<uint32_t>(effective_scale));
+  {
+    // The 30 FPS guard changes the shadow range at run time; the quality
+    // table is otherwise written only when the shadow map is sized.
+    static double applied_guard = 1.0;
+    const double guard = REXCVAR_GET(gta4_shadow_distance_guard_factor);
+    if (guard != applied_guard) {
+      applied_guard = guard;
+      ApplyShadowDistanceScale(base);
+    }
+  }
   __imp__sub_821DFFE8(ctx, base);
 
   static std::atomic<uint64_t> override_count{0};
