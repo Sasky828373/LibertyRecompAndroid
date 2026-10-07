@@ -172,6 +172,14 @@ REXCVAR_DEFINE_UINT32(gta4_native_water_reflection_interval, 1, "GTA IV/Graphics
 REXCVAR_DEFINE_BOOL(gta4_native_stage_draw_commands, true, "GTA IV/Graphics/Native Renderer",
                     "Publish captured title commands to the render worker in batches (one "
                     "render queue lock per batch instead of per command)");
+REXCVAR_DEFINE_BOOL(gta4_native_merge_up_draws, true, "GTA IV/Graphics/Native Renderer",
+                    "Draw runs of identical consecutive DrawPrimitiveUp commands (water surface "
+                    "patches) as one indexed draw");
+// One merged draw must stay short: a 128-patch water batch seen from the
+// surface ran long enough for the kernel to declare a GPU hang on exit.
+REXCVAR_DEFINE_UINT32(gta4_native_merge_up_max, 16, "GTA IV/Graphics/Native Renderer",
+                      "Most consecutive DrawPrimitiveUp patches recorded as one draw")
+    .range(2, 128);
 REXCVAR_DEFINE_BOOL(gta4_native_loop_watchdog, true, "GTA IV/Graphics/Native Renderer",
                     "Bound shader loops by an iteration budget so a runaway loop ends the "
                     "invocation instead of hanging the GPU");
@@ -7618,6 +7626,19 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
       if (!stock_late_spirv.empty())
         bytes = std::max(bytes, AnalyzeSpirvConstantRange(stock_late_spirv.data(), stock_late_spirv.size()).bytes[bank]);
       resource->constant_bytes = bytes;
+    }
+    if (command.stage == ShaderStage::kVertex) {
+      // OpDecorate <id> BuiltIn VertexIndex(42)/InstanceIndex(43).
+      for (size_t i = 5; i + 3 < stock_early_spirv.size();) {
+        const uint32_t count = stock_early_spirv[i] >> 16;
+        if (!count) break;
+        if ((stock_early_spirv[i] & 0xFFFF) == 71 && count >= 4 && stock_early_spirv[i + 2] == 11 &&
+            (stock_early_spirv[i + 3] == 42 || stock_early_spirv[i + 3] == 43)) {
+          resource->uses_vertex_index = true;
+          break;
+        }
+        i += count;
+      }
     }
     if (command.stage == ShaderStage::kVertex &&
         !ReflectVertexInputs(stock_early_spirv, resource->vertex_inputs)) {
@@ -21627,6 +21648,108 @@ bool Gta4NativeGraphicsSystem::BindCommonDrawState(
   return true;
 }
 
+namespace {
+bool IsMergeableUpPrimitive(uint32_t type) {
+  return type == uint32_t(xenos::PrimitiveType::kTriangleList) ||
+         type == uint32_t(xenos::PrimitiveType::kTriangleStrip) ||
+         type == uint32_t(xenos::PrimitiveType::kTriangleFan) ||
+         type == uint32_t(xenos::PrimitiveType::kQuadList);
+}
+// Triangle-list index count for one sub-draw of `vertices` vertices.
+uint32_t UpTriangleIndexCount(uint32_t type, uint32_t vertices) {
+  if (type == uint32_t(xenos::PrimitiveType::kTriangleList)) return vertices / 3 * 3;
+  if (type == uint32_t(xenos::PrimitiveType::kQuadList)) return vertices / 4 * 6;
+  return vertices >= 3 ? (vertices - 2) * 3 : 0;  // Strip, fan.
+}
+uint32_t* WriteUpTriangleIndices(uint32_t* out, uint32_t type, uint32_t base, uint32_t vertices) {
+  if (type == uint32_t(xenos::PrimitiveType::kTriangleList)) {
+    for (uint32_t i = 0; i < vertices / 3 * 3; ++i) *out++ = base + i;
+  } else if (type == uint32_t(xenos::PrimitiveType::kQuadList)) {
+    for (uint32_t q = 0; q < vertices / 4; ++q) {
+      const uint32_t v = base + q * 4;
+      *out++ = v; *out++ = v + 1; *out++ = v + 2;
+      *out++ = v; *out++ = v + 2; *out++ = v + 3;
+    }
+  } else if (type == uint32_t(xenos::PrimitiveType::kTriangleStrip)) {
+    for (uint32_t t = 0; t + 2 < vertices; ++t) {
+      // Odd strip triangles swap their first two vertices to keep the winding.
+      *out++ = base + ((t & 1) ? t + 1 : t);
+      *out++ = base + ((t & 1) ? t : t + 1);
+      *out++ = base + t + 2;
+    }
+  } else {  // Fan.
+    for (uint32_t t = 0; t + 2 < vertices; ++t) {
+      *out++ = base; *out++ = base + t + 1; *out++ = base + t + 2;
+    }
+  }
+  return out;
+}
+}  // namespace
+
+bool Gta4NativeGraphicsSystem::RecordPrimitiveUpBatch(
+    VkCommandBuffer command_buffer, const std::vector<const NativeCommand*>& run, uint32_t width,
+    uint32_t height, const NativeRenderingTarget& target, NativeFrameResources& resources) {
+  const NativeCommand& first = *run.front();
+  DrawPrimitiveUpCommand first_draw{};
+  std::memcpy(&first_draw, first.bytes.data(), sizeof(first_draw));
+  const uint32_t type = first_draw.primitive_type;
+  const uint32_t stride = first_draw.stride;
+  size_t payload_bytes = 0;
+  uint64_t index_count = 0;
+  uint64_t vertex_total = 0;
+  for (const NativeCommand* command : run) {
+    DrawPrimitiveUpCommand draw{};
+    std::memcpy(&draw, command->bytes.data(), sizeof(draw));
+    payload_bytes += command->payload.size();
+    vertex_total += draw.vertex_count;
+    index_count += UpTriangleIndexCount(type, draw.vertex_count);
+  }
+  if (!index_count || vertex_total > UINT32_MAX || index_count > UINT32_MAX) return false;
+  // Triangle-list topology; the pipeline key otherwise matches every sub-draw.
+  VkPipeline pipeline = GetOrCreateDrawPipeline(
+      first, uint32_t(xenos::PrimitiveType::kTriangleList), target, stride);
+  if (!pipeline || !first.pipeline_state->vertex_declaration_resource ||
+      !first.pipeline_state->vertex_shader_resource) {
+    return false;
+  }
+  NativeUploadAllocation vertices{}, indices{};
+  if (!AllocateUpload(payload_bytes, 16, vertices, NativeUploadKind::kDrawUp) ||
+      !AllocateUpload(index_count * sizeof(uint32_t), alignof(uint32_t), indices,
+                      NativeUploadKind::kIndex)) {
+    return false;
+  }
+  const NativeVertexDeclaration& declaration = *first.pipeline_state->vertex_declaration_resource;
+  const NativeShader& shader = *first.pipeline_state->vertex_shader_resource;
+  size_t vertex_offset = 0;
+  uint32_t base_vertex = 0;
+  uint32_t* index_out = reinterpret_cast<uint32_t*>(indices.mapping);
+  for (const NativeCommand* command : run) {
+    DrawPrimitiveUpCommand draw{};
+    std::memcpy(&draw, command->bytes.data(), sizeof(draw));
+    ConvertGuestVertexPayload(vertices.mapping + vertex_offset, command->payload.data(),
+                              command->payload.size(), declaration, shader, 0, 0, stride);
+    index_out = WriteUpTriangleIndices(index_out, type, base_vertex, draw.vertex_count);
+    vertex_offset += command->payload.size();
+    base_vertex += draw.vertex_count;
+  }
+  if (!BindCommonDrawState(command_buffer, first, pipeline, width, height, target.logical_width,
+                           target.logical_height, target.samples, resources, target)) {
+    return false;
+  }
+  auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+  const auto& dfn = vulkan_provider->vulkan_device()->functions();
+  const VkBuffer default_vertex_buffer = upload_buffer_.buffer;
+  const VkDeviceSize default_vertex_offset = 0;
+  dfn.vkCmdBindVertexBuffers(command_buffer, kDefaultVertexBinding, 1, &default_vertex_buffer,
+                             &default_vertex_offset);
+  dfn.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertices.buffer, &vertices.offset);
+  dfn.vkCmdBindIndexBuffer(command_buffer, indices.buffer, indices.offset, VK_INDEX_TYPE_UINT32);
+  ObserveNativeGpuProfileDraw(first, pipeline, target.samples, 0, uint32_t(index_count));
+  dfn.vkCmdDrawIndexed(command_buffer, uint32_t(index_count), 1, 0, 0, 0);
+  TraceModernShaderDraw(first, target);
+  return true;
+}
+
 bool Gta4NativeGraphicsSystem::RecordPrimitiveUp(VkCommandBuffer command_buffer,
                                                  const NativeCommand& command, uint32_t width,
                                                  uint32_t height,
@@ -28648,7 +28771,12 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
   const uint32_t water_reflection_interval = REXCVAR_GET(gta4_native_water_reflection_interval);
   const bool skip_water_reflection =
       water_reflection_interval > 1 && submitted_frame % water_reflection_interval != 0;
+  size_t merged_up_until = 0;
+  std::vector<const NativeCommand*> up_run;
   for (size_t command_index = 0; command_index < current_frame_.size(); ++command_index) {
+    if (command_index < merged_up_until) {
+      continue;  // Recorded as part of the previous DrawPrimitiveUp batch.
+    }
     const NativeCommand& queued_command = current_frame_[command_index];
     // Draws, clears and resolves of the water reflection capture: the reflection
     // texture keeps the previous capture on skipped frames.
@@ -33112,8 +33240,61 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         command_recorded ? ++successful_draws : ++failed_draws;
       }
     } else if (command.type == CommandType::kDrawPrimitiveUp) {
-      command_recorded = RecordPrimitiveUp(command_buffer, command, target.width, target.height,
-                                           target, resources);
+      // Identical consecutive UP draws (GTA IV's water surface is hundreds of
+      // tiny patches) become one indexed draw over their concatenated vertices.
+      up_run.clear();
+      if (REXCVAR_GET(gta4_native_merge_up_draws) && &command == &queued_command &&
+          !diagnostic_frame && !legacy_diagnostics && !command.fire_trace && !command.bulb_trace &&
+          !command.phone_trace && command.pipeline_state && command.shader_state &&
+          command.pipeline_state->vertex_shader_resource &&
+          !command.pipeline_state->vertex_shader_resource->uses_vertex_index) {
+        DrawPrimitiveUpCommand head{};
+        std::memcpy(&head, command.bytes.data(), sizeof(head));
+        if (IsMergeableUpPrimitive(head.primitive_type) && head.vertex_count && head.stride &&
+            command.payload.size() == size_t(head.vertex_count) * head.stride) {
+          up_run.push_back(&command);
+          size_t bytes = command.payload.size();
+          for (size_t next = command_index + 1;
+               next < current_frame_.size() &&
+               up_run.size() < REXCVAR_GET(gta4_native_merge_up_max); ++next) {
+            const NativeCommand& other = current_frame_[next];
+            if (other.type != CommandType::kDrawPrimitiveUp || other.fire_trace ||
+                other.bulb_trace || other.phone_trace ||
+                other.pipeline_state != command.pipeline_state ||
+                other.shader_state != command.shader_state || other.textures != command.textures ||
+                other.captured_vertex_constants_hash != command.captured_vertex_constants_hash ||
+                other.captured_pixel_constants_hash != command.captured_pixel_constants_hash ||
+                other.render_phase != command.render_phase ||
+                std::memcmp(&other.texture_fetches, &command.texture_fetches,
+                            sizeof(command.texture_fetches)) != 0 ||
+                std::memcmp(&other.fixed_function_state, &command.fixed_function_state,
+                            sizeof(command.fixed_function_state)) != 0 ||
+                bytes + other.payload.size() > (size_t(1) << 20)) {
+              break;
+            }
+            DrawPrimitiveUpCommand draw{};
+            std::memcpy(&draw, other.bytes.data(), sizeof(draw));
+            // Patches are concatenated by bytes and indexed by vertex: both
+            // must describe exactly the same vertices.
+            if (draw.primitive_type != head.primitive_type || draw.stride != head.stride ||
+                !draw.vertex_count ||
+                other.payload.size() != size_t(draw.vertex_count) * draw.stride) {
+              break;
+            }
+            bytes += other.payload.size();
+            up_run.push_back(&other);
+          }
+        }
+      }
+      if (up_run.size() > 1 &&
+          RecordPrimitiveUpBatch(command_buffer, up_run, target.width, target.height, target,
+                                 resources)) {
+        command_recorded = true;
+        merged_up_until = command_index + up_run.size();
+      } else {
+        command_recorded = RecordPrimitiveUp(command_buffer, command, target.width, target.height,
+                                             target, resources);
+      }
       trace_deferred_light_draw(command_recorded);
       if (collect_frame_diagnostics) {
         command_recorded ? ++successful_draws : ++failed_draws;
