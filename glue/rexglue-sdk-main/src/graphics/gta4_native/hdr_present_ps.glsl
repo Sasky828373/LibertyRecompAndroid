@@ -24,12 +24,25 @@ float luma(vec3 color) {
   return dot(color, vec3(0.2126, 0.7152, 0.0722));
 }
 
-vec4 fetch_source(ivec2 coordinate) {
-  return texelFetch(source_image,
-                    clamp(coordinate, ivec2(0),
-                          present_constants.source_extent - ivec2(1)),
-                    0);
+// output_mode bit 64: the source is the float surface the title would have
+// blitted into its RGBA8 frontbuffer; every read repeats that conversion.
+vec4 frontbuffer_unorm8(vec4 value) {
+  return (present_constants.output_mode & 64u) != 0u
+             ? floor(clamp(value, vec4(0.0), vec4(1.0)) * 255.0 + 0.5) * (1.0 / 255.0)
+             : value;
 }
+
+vec4 fetch_source(ivec2 coordinate) {
+  return frontbuffer_unorm8(texelFetch(source_image,
+                                       clamp(coordinate, ivec2(0),
+                                             present_constants.source_extent - ivec2(1)),
+                                       0));
+}
+
+vec4 source_lod(vec2 uv) {
+  return frontbuffer_unorm8(textureLod(source_image, uv, 0.0));
+}
+#define textureLod(image, uv, lod) source_lod(uv)
 
 // A conservative, single-pass edge resolve for native-resolution output. It
 // blends only across a coherent luminance discontinuity, not along it. The

@@ -198,6 +198,12 @@ REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, false, "GTA IV/Graphics/Nati
 REXCVAR_DEFINE_BOOL(gta4_native_water_reflection_on_demand, true, "GTA IV/Graphics/Reflections",
                     "Render the water reflection only in frames that draw scene water, and only "
                     "every 8th frame while occlusion queries find all of that water hidden");
+REXCVAR_DEFINE_BOOL(gta4_native_resolve_swap, true, "GTA IV/Graphics/Native Renderer",
+                    "Resolves that copy a whole surface into a same-format texture and then clear "
+                    "the surface exchange the two images instead of copying");
+REXCVAR_DEFINE_BOOL(gta4_native_present_from_surface, true, "GTA IV/Graphics/Native Renderer",
+                    "Present the frame's final surface directly instead of first resolving it into "
+                    "the RGBA8 frontbuffer when nothing else reads that frontbuffer");
 REXCVAR_DEFINE_BOOL(gta4_native_lazy_resolves, true, "GTA IV/Graphics/Native Renderer",
                     "Skip resolves into textures that no draw, post-processing pass, present or "
                     "CPU readback has used for 120 frames; the first use in a later frame sees "
@@ -471,6 +477,8 @@ std::atomic<uint64_t> g_repeated_clears_skipped{0};
 std::atomic<uint64_t> g_water_reflections_skipped{0};
 std::atomic<uint64_t> g_lazy_resolves_skipped{0};
 std::atomic<uint64_t> g_draw_state_kept{0};
+std::atomic<uint64_t> g_resolve_swaps_planned{0}, g_resolve_swaps_fast{0};
+std::atomic<uint64_t> g_present_from_surface{0};
 std::mutex g_resolve_kinds_mutex;
 std::map<std::string, uint32_t> g_resolve_kinds;
 void NoteResolveKind(std::string key) {
@@ -6498,12 +6506,16 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
               }
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "skips/frame: invisible-draws=%.1f repeated-clears=%.1f "
-                                  "water-reflection=%.2f lazy-resolves=%.1f kept-state=%.1f",
+                                  "water-reflection=%.2f lazy-resolves=%.1f kept-state=%.1f "
+                                  "resolve-swaps=%.1f/%.1f present-from-surface=%.2f",
                                   g_invisible_draws_skipped.exchange(0) / 120.0,
                                   g_repeated_clears_skipped.exchange(0) / 120.0,
                                   g_water_reflections_skipped.exchange(0) / 120.0,
                                   g_lazy_resolves_skipped.exchange(0) / 120.0,
-                                  g_draw_state_kept.exchange(0) / 120.0);
+                                  g_draw_state_kept.exchange(0) / 120.0,
+                                  g_resolve_swaps_fast.exchange(0) / 120.0,
+                                  g_resolve_swaps_planned.exchange(0) / 120.0,
+                                  g_present_from_surface.exchange(0) / 120.0);
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "vertex-cache/frame: eligible draws=%.0f indices=%.0f rejected draws=%.0f indices=%.0f",
                                   g_vertex_cache_draws[1].exchange(0) / 120.0,
@@ -15509,6 +15521,127 @@ bool Gta4NativeGraphicsSystem::AllocateNativeSamplerDescriptor(NativeSampler& sa
   return true;
 }
 
+bool Gta4NativeGraphicsSystem::PlanResolveSwap(NativeCommand& command,
+                                               NativeTextureImage& texture) {
+  command.resolve_swap = UINT32_MAX;
+  if (!REXCVAR_GET(gta4_native_resolve_swap) ||
+      native_descriptor_backend_ != NativeDescriptorBackend::kIndexed || native_descriptor_paging_ ||
+      !native_stable_image_descriptor_table_ || native_descriptor_pages_.size() != 1 ||
+      command.bytes.size() < sizeof(ResolveCommand)) {
+    return false;
+  }
+  ResolveCommand resolve;
+  std::memcpy(&resolve, command.bytes.data(), sizeof(resolve));
+  const uint32_t flags = NormalizeResolveSampleFlags(resolve.flags, resolve.source.sample_type);
+  constexpr uint32_t kClearColor = 1u << 8;
+  if ((flags & 7u) == 4u || !(flags & kClearColor) || resolve.parameters_valid ||
+      NativeResolveExponent(flags) != 0 || resolve.destination_level ||
+      resolve.destination_slice_or_face) {
+    return false;
+  }
+  constexpr VkImageUsageFlags kSwappableUsage =
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  const auto identity = [](VkComponentSwizzle swizzle, VkComponentSwizzle self) {
+    return swizzle == VK_COMPONENT_SWIZZLE_IDENTITY || swizzle == self;
+  };
+  if (texture.aspect != VK_IMAGE_ASPECT_COLOR_BIT || texture.is_reflection ||
+      texture.mip_levels != 1 || texture.samples != VK_SAMPLE_COUNT_1_BIT || !texture.source ||
+      texture.source->packed_depth_source ||
+      texture.source->info.dimension != xenos::DataDimension::k2DOrStacked ||
+      texture.source->info.is_stacked || texture.view_type != VK_IMAGE_VIEW_TYPE_2D ||
+      texture.usage != kSwappableUsage || texture.packed_stencil_view ||
+      texture.descriptor_retirement_queued || !texture.resource.view ||
+      !native_stable_image_descriptor_table_->IsLive(texture.descriptor_slot) ||
+      !identity(texture.view_components.r, VK_COMPONENT_SWIZZLE_R) ||
+      !identity(texture.view_components.g, VK_COMPONENT_SWIZZLE_G) ||
+      !identity(texture.view_components.b, VK_COMPONENT_SWIZZLE_B) ||
+      !identity(texture.view_components.a, VK_COMPONENT_SWIZZLE_A)) {
+    return false;
+  }
+  GuestSurfaceView view{};
+  if (!DecodeGuestSurfaceView(resolve.source, false, view) ||
+      view.msaa_samples != xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  NativeSurfaceImage* surface = GetOrCreateSurfaceImage(
+      resolve.source, false, VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, false);
+  if (!surface || surface->is_reflection || surface->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+      surface->samples != VK_SAMPLE_COUNT_1_BIT || surface->format != texture.format ||
+      surface->width != texture.width || surface->height != texture.height ||
+      surface->logical_width != texture.logical_width ||
+      surface->logical_height != texture.logical_height || !surface->resource.view ||
+      pending_surface_release_ids_.contains(surface->lifetime_id)) {
+    return false;
+  }
+  if (resolve.source_rectangle_valid &&
+      (resolve.source_rectangle.left > 0 || resolve.source_rectangle.top > 0 ||
+       resolve.source_rectangle.right < int32_t(surface->logical_width) ||
+       resolve.source_rectangle.bottom < int32_t(surface->logical_height))) {
+    return false;
+  }
+  if (resolve.destination_point_valid &&
+      (resolve.destination_point.x || resolve.destination_point.y)) {
+    return false;
+  }
+  if (!native_stable_image_descriptor_table_->IsLive(surface->swap_descriptor_slot)) {
+    // A surface already planned this frame holds another image by now.
+    for (const PlannedResolveSwap& planned : planned_resolve_swaps_) {
+      if (planned.surface == surface) return false;
+    }
+    const NativeDescriptorAllocation allocation = native_stable_image_descriptor_table_->Allocate();
+    if (!allocation) return false;
+    const std::array<VkImageView, 4> views = {surface->resource.view, null_texture_2d_array_.view,
+                                              null_texture_3d_.view, null_texture_cube_.view};
+    if (!UpdateIndexedImageDescriptor(allocation.handle, views)) {
+      native_stable_image_descriptor_table_->AbortUnsubmitted(allocation.handle);
+      return false;
+    }
+    surface->swap_descriptor_slot = allocation.handle;
+  }
+  // Later draws of this frame are prepared against the post-swap slot.
+  std::swap(texture.descriptor_slot, surface->swap_descriptor_slot);
+  command.resolve_swap = uint32_t(planned_resolve_swaps_.size());
+  planned_resolve_swaps_.push_back({surface, &texture, &command, false});
+  g_resolve_swaps_planned.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+void Gta4NativeGraphicsSystem::ExecuteResolveSwap(PlannedResolveSwap& swap) {
+  if (swap.executed) return;
+  NativeSurfaceImage& surface = *swap.surface;
+  NativeTextureImage& texture = *swap.texture;
+  std::swap(surface.resource, texture.resource);
+  std::swap(surface.swap_mip_views, texture.mip_views);
+  std::swap(surface.layout, texture.layout);
+  texture.identical_resolve.reset();
+  // Both objects now own an image this submission writes or reads.
+  texture.last_used_frame = std::max(texture.last_used_frame, active_texture_frame_);
+  texture.last_used_submission = std::max(
+      texture.last_used_submission,
+      submission_tracker_ ? submission_tracker_->GetCurrentSubmission() : uint64_t(0));
+  StageNativeTextureFlightResources(texture);
+  MarkNativeSurfaceImageUsed(surface);
+  swap.executed = true;
+}
+
+void Gta4NativeGraphicsSystem::FinalizePlannedResolveSwaps() {
+  // Descriptor slots were exchanged at planning time; images must follow even
+  // when the frame skipped or failed the resolve.
+  // The commands may already be gone; PlanResolveSwap resets their indices.
+  for (PlannedResolveSwap& swap : planned_resolve_swaps_) ExecuteResolveSwap(swap);
+  planned_resolve_swaps_.clear();
+}
+
+void Gta4NativeGraphicsSystem::UndoPlannedResolveSwaps() {
+  for (auto swap = planned_resolve_swaps_.rbegin(); swap != planned_resolve_swaps_.rend(); ++swap) {
+    if (swap->executed) continue;
+    std::swap(swap->texture->descriptor_slot, swap->surface->swap_descriptor_slot);
+    if (swap->command) swap->command->resolve_swap = UINT32_MAX;
+  }
+  std::erase_if(planned_resolve_swaps_, [](const PlannedResolveSwap& swap) { return !swap.executed; });
+}
+
 void Gta4NativeGraphicsSystem::RetireNativeTextureDescriptor(NativeTextureImage& image) {
   if (image.descriptor_reclaimed || image.descriptor_retirement_queued) {
     return;
@@ -18007,9 +18140,13 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
 
   for (size_t command_index = 0; command_index < texture_commands.size(); ++command_index) {
     NativeCommand& command = *texture_commands[command_index];
-    if (command.resolve_destination &&
-        !prepared_image(command.resolve_destination)) {
+    NativeTextureImage* resolve_destination_image =
+        command.resolve_destination ? prepared_image(command.resolve_destination) : nullptr;
+    if (command.resolve_destination && !resolve_destination_image) {
       return false;
+    }
+    if (command.type == CommandType::kResolve && resolve_destination_image && !trace_reflections) {
+      PlanResolveSwap(command, *resolve_destination_image);
     }
     if (command.depth_handoff_source &&
         !prepared_image(command.depth_handoff_source)) {
@@ -18452,6 +18589,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
       // draw tuples once under the persistent cached backend; the second call
       // cannot transition back to indexed mode.
       FlushTextureUploads(command_buffer, upload_batch);
+      UndoPlannedResolveSwaps();
       return PrepareFrameTextures(command_buffer, prepare_present, submitted_frame,
                                   trace_reflections);
     }
@@ -19145,6 +19283,20 @@ void Gta4NativeGraphicsSystem::DestroyNativeSurfaceImage(NativeSurfaceImage& ima
   }
   if (image.depth_handoff_stencil_scratch_memory) {
     profile::CpuCall(profile::CpuOp::kDriverDestruction, [&] { return dfn.vkFreeMemory(device, image.depth_handoff_stencil_scratch_memory, nullptr); });
+  }
+  for (VkImageView view : image.swap_mip_views) {
+    if (view) dfn.vkDestroyImageView(device, view, nullptr);
+  }
+  if (native_stable_image_descriptor_table_ &&
+      native_stable_image_descriptor_table_->IsLive(image.swap_descriptor_slot)) {
+    // Surfaces are destroyed only after their last submission completed.
+    const uint64_t completed = completed_command_buffer_submission_;
+    if (native_stable_image_descriptor_table_->Retire(image.swap_descriptor_slot, completed) ==
+        NativeDescriptorStatus::kSuccess) {
+      native_stable_image_descriptor_table_->Reclaim(
+          image.swap_descriptor_slot, completed,
+          [this](NativeDescriptorSlotHandle handle) { return ClearIndexedTextureDescriptor(handle); });
+    }
   }
   if (image.sampled_view) {
     TraceNativeFlightMutation("destroy", NativeFlightResourceKind::kSurfaceSampledView,
@@ -25952,6 +26104,50 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
     return false;
   }
   destination = destination_entry->second.get();
+  if (command.resolve_swap < planned_resolve_swaps_.size() &&
+      !planned_resolve_swaps_[command.resolve_swap].executed &&
+      planned_resolve_swaps_[command.resolve_swap].texture == destination) {
+    PlannedResolveSwap& plan = planned_resolve_swaps_[command.resolve_swap];
+    NativeSurfaceImage& surface = *plan.surface;
+    const NativePlacementOwner* owner = FindPlacementOwner(resolve.source, false);
+    const bool content_ready = source == &surface && (!owner || owner->image == &surface) &&
+                               surface.ever_written &&
+                               surface.aspect_content.Has(VK_IMAGE_ASPECT_COLOR_BIT);
+    const VkImageLayout surface_layout = surface.layout;
+    ExecuteResolveSwap(plan);
+    if (content_ready) {
+      // The texture now owns the rendered image: no copy, only a transition.
+      auto* swap_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+      const auto& swap_dfn = swap_provider->vulkan_device()->functions();
+      const NativeImageLayoutSynchronization synchronization =
+          ImageLayoutSynchronization(surface_layout, VK_IMAGE_ASPECT_COLOR_BIT);
+      VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+      barrier.srcAccessMask = synchronization.access;
+      barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+      barrier.oldLayout = surface_layout;
+      barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.image = destination->resource.image;
+      barrier.subresourceRange =
+          ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
+      swap_dfn.vkCmdPipelineBarrier(
+          command_buffer, synchronization.stages,
+          VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
+          nullptr, 0, nullptr, 1, &barrier);
+      destination->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      destination->content.CommitResolve(submitted_frame,
+                                         owner ? owner->serial : surface.materialized_serial);
+      destination->aspect_content.CopyFrom(surface.aspect_content, VK_IMAGE_ASPECT_COLOR_BIT,
+                                           next_surface_write_serial_++);
+      g_resolve_swaps_fast.fetch_add(1, std::memory_order_relaxed);
+      content_source = &surface;
+      const bool cleared = RecordResolveClears(command_buffer, command, resolve, submitted_frame);
+      log_result(cleared ? "ok" : "fail", cleared ? "swap" : "resolve-clear");
+      return cleared;
+    }
+    // Otherwise the content lives elsewhere: resolve it into the swapped-in image.
+  }
   GuestSurfaceView requested_view{};
   if (!DecodeGuestSurfaceView(resolve.source, depth, requested_view)) {
     log_result("fail", "guest-source-view");
@@ -26880,7 +27076,8 @@ bool Gta4NativeGraphicsSystem::RecordPresent(
       const uint32_t aa_bits = temporal_resolved_ ? 0 : GetNativePresentationAABits();
       const uint32_t ssaa_bits = ssaa_applied ? 32u : 0u;
       constants.output_mode = (hdr_output ? 1u : 0u) | aa_bits | ssaa_bits | 4u |
-                              (REXCVAR_GET(gta4_native_output_dither) ? 8u : 0u);
+                              (REXCVAR_GET(gta4_native_output_dither) ? 8u : 0u) |
+                              (present_source_unorm8_ ? 64u : 0u);
       if (NativeRendererEventTraceEnabled()) {
       TraceNativeRendererEvent(
           "present-shader",
@@ -28569,6 +28766,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       return false;
     }
     NativeCommand diagnostic_resolve_command = current_frame_[water_reflection_resolve_index];
+    diagnostic_resolve_command.resolve_swap = UINT32_MAX;
     ResolveCommand diagnostic_resolve{};
     std::memcpy(&diagnostic_resolve, diagnostic_resolve_command.bytes.data(),
                 sizeof(diagnostic_resolve));
@@ -29107,18 +29305,32 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       if (texture->packed_depth_source)
         texture_input_frames_[texture->packed_depth_source->generation] = submitted_frame;
     };
-    mark_input(present_source);
+    // Presentation is not recorded here: A11 needs the frontbuffer's other
+    // readers, and A3 checks the present source separately.
     for (const NativeCommand& scan : current_frame_) {
       for (const auto& texture : scan.textures) mark_input(texture);
       mark_input(scan.postfx_half_scene);
       mark_input(scan.depth_handoff_source);
-      mark_input(scan.present_source);
     }
     if (texture_input_frames_.size() > 8192) {
       std::erase_if(texture_input_frames_, [&](const auto& entry) {
         return entry.second + 600 < submitted_frame;
       });
     }
+  }
+  present_surface_override_ = nullptr;
+  if (deferred_frontbuffer_resolve_) {
+    // A11 skipped the previous frame's frontbuffer resolve. Record it now,
+    // before this frame touches the surface, unless this frame resolves the
+    // frontbuffer again itself.
+    const uint64_t generation = deferred_frontbuffer_resolve_->resolve_destination->generation;
+    bool resolved_again = false;
+    for (const NativeCommand& scan : current_frame_) {
+      resolved_again |= scan.type == CommandType::kResolve && scan.resolve_destination &&
+                        scan.resolve_destination->generation == generation;
+    }
+    if (!resolved_again) RecordResolve(command_buffer, *deferred_frontbuffer_resolve_, submitted_frame);
+    deferred_frontbuffer_resolve_.reset();
   }
   size_t merged_up_until = 0;
   std::vector<const NativeCommand*> up_run;
@@ -29147,10 +29359,12 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       continue;
     }
     if (lazy_resolves && queued_command.type == CommandType::kResolve &&
-        queued_command.resolve_destination) {
-      const auto input = texture_input_frames_.find(queued_command.resolve_destination->generation);
-      const bool recently_used = input != texture_input_frames_.end() &&
-                                 input->second + 120 >= submitted_frame;
+        queued_command.resolve_destination && queued_command.resolve_swap == UINT32_MAX) {
+      const uint64_t generation = queued_command.resolve_destination->generation;
+      const auto input = texture_input_frames_.find(generation);
+      const bool recently_used =
+          (input != texture_input_frames_.end() && input->second + 120 >= submitted_frame) ||
+          (present_source && present_source->generation == generation);
       if (!recently_used) {
         ResolveCommand resolve;
         std::memcpy(&resolve, queued_command.bytes.data(), sizeof(resolve));
@@ -30020,6 +30234,59 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       if (rendering) {
         end_rendering(__LINE__);
         rendering = false;
+      }
+      if (resolve_matches_present && command_index + 1 == current_frame_.size() && !hdr_output &&
+          REXCVAR_GET(gta4_native_present_from_surface) && !diagnostic_frame && !fire_frame_ &&
+          !force_content_probe && !temporal_display_ready_ && !temporal_active_ &&
+          !IsNativeSmaaEnabled() && !IsNativeSsaaEnabled() && command.resolve_swap == UINT32_MAX) {
+        const uint32_t flags = NormalizeResolveSampleFlags(resolve.flags, resolve.source.sample_type);
+        const auto destination_entry = native_texture_images_.find(present_source->generation);
+        NativeTextureImage* frontbuffer = destination_entry != native_texture_images_.end()
+                                              ? destination_entry->second.get() : nullptr;
+        NativeSurfaceImage* surface =
+            GetOrCreateSurfaceImage(resolve.source, false, VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, false);
+        const NativePlacementOwner* owner = FindPlacementOwner(resolve.source, false);
+        GuestSurfaceView view{};
+        const auto other_use = texture_input_frames_.find(present_source->generation);
+        bool cpu_read = false;
+        {
+          std::lock_guard lock(cpu_read_textures_mutex_);
+          cpu_read = cpu_read_textures_.contains(resolve.destination_texture);
+        }
+        const bool eligible =
+            frontbuffer && surface && (!owner || owner->image == surface) && !cpu_read &&
+            (other_use == texture_input_frames_.end() || other_use->second + 120 < submitted_frame) &&
+            (flags & 7u) != 4u && !(flags & 0x300u) && !resolve.parameters_valid &&
+            NativeResolveExponent(flags) == 0 && !resolve.destination_level &&
+            !resolve.destination_slice_or_face && !surface->is_reflection &&
+            surface->aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+            surface->samples == VK_SAMPLE_COUNT_1_BIT && surface->ever_written &&
+            surface->aspect_content.Has(VK_IMAGE_ASPECT_COLOR_BIT) && surface->resource.view &&
+            surface->layout != VK_IMAGE_LAYOUT_UNDEFINED &&
+            frontbuffer->aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+            surface->width == frontbuffer->width && surface->height == frontbuffer->height &&
+            frontbuffer->width == frontbuffer->logical_width &&
+            frontbuffer->height == frontbuffer->logical_height &&
+            surface->logical_width == frontbuffer->logical_width &&
+            surface->logical_height == frontbuffer->logical_height &&
+            (!resolve.source_rectangle_valid ||
+             (resolve.source_rectangle.left <= 0 && resolve.source_rectangle.top <= 0 &&
+              resolve.source_rectangle.right >= int32_t(surface->logical_width) &&
+              resolve.source_rectangle.bottom >= int32_t(surface->logical_height))) &&
+            (!resolve.destination_point_valid ||
+             (!resolve.destination_point.x && !resolve.destination_point.y)) &&
+            DecodeGuestSurfaceView(resolve.source, false, view) &&
+            view.msaa_samples == xenos::MsaaSamples::k1X;
+        if (eligible) {
+          MarkNativeSurfaceImageUsed(*surface);
+          // Should a later frame present without resolving the frontbuffer,
+          // this resolve is recorded at that frame's start (see above).
+          deferred_frontbuffer_resolve_ = command;
+          present_surface_override_ = surface;
+          final_resolve_surface = surface;
+          g_present_from_surface.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
       }
       if (water_reflection_probe_frame && command_index == water_reflection_resolve_index) {
         record_water_reflection_probe(3, command_index, "water-color-before-title-resolve", true);
@@ -34489,11 +34756,30 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     } else {
       temporal_generated_frame_.has_generated_frame = false;
     }
+    NativeTextureImage surface_present;
+    NativeSurfaceImage* const present_surface = temporal_present ? nullptr : present_surface_override_;
+    present_surface_override_ = nullptr;
+    if (present_surface) {
+      surface_present.source = present_source;
+      surface_present.resource.image = present_surface->resource.image;
+      surface_present.resource.view = present_surface->resource.view;
+      surface_present.format = present_surface->format;
+      surface_present.layout = present_surface->layout;
+      surface_present.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+      surface_present.width = surface_present.logical_width = present_surface->width;
+      surface_present.height = surface_present.logical_height = present_surface->height;
+      present_source_unorm8_ = true;
+    }
     AcquireNativePresenterImage(command_buffer);
     const bool present_recorded = RecordPresent(
         command_buffer, presenter_image, presenter_view, width, height, present_source,
-        temporal_present ? nullptr : high_precision_present_source, hdr_output, hdr_headroom,
-        present_transfer_written, temporal_present);
+        temporal_present || present_surface ? nullptr : high_precision_present_source, hdr_output,
+        hdr_headroom, present_transfer_written,
+        temporal_present ? temporal_present : present_surface ? &surface_present : nullptr);
+    if (present_surface) {
+      present_surface->layout = surface_present.layout;
+      present_source_unorm8_ = false;
+    }
     if (temporal_present) temporal_scene_.display().layout = temporal_display_texture_.layout;
     if (present_recorded && temporal_generated_frame_.has_generated_frame && temporal_ui_exact_) {
       auto& pair = temporal_generated_frame_;
@@ -35244,6 +35530,8 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
             return false;
           }
         }
+        FinalizePlannedResolveSwaps();
+        const auto finalize_resolve_swaps = MakeScopeExit([this] { FinalizePlannedResolveSwaps(); });
         const bool textures_prepared = PrepareFrameTextures(command_buffer_, bool(present_source),
                                                             submitted_frame, trace_stages) &&
                                        RefreshPackedDepthAliases(command_buffer_, 0);

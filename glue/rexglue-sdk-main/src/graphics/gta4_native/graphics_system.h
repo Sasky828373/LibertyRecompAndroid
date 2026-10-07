@@ -463,6 +463,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t guest_null_texture_mask = 0;
     uint32_t failed_texture_mask = 0;
     bool bindings_prepared = false;
+    // Index into planned_resolve_swaps_ when PrepareFrameTextures planned this
+    // resolve as an image swap (A2); UINT32_MAX otherwise.
+    uint32_t resolve_swap = UINT32_MAX;
     // Render-worker-only result; captured guest state stays immutable.
     mutable bool split_postfx_applied = false;
     std::shared_ptr<const NativeTextureResource> postfx_half_scene;
@@ -1021,6 +1024,11 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t created_frame = 0;
     uint32_t last_used_frame = 0;
     uint64_t last_used_submission = 0;
+    // Resolve swaps (A2) trade this image with a texture's. The texture-side
+    // state that belongs to the image travels with it: its mip views and the
+    // stable descriptor slot that samples it.
+    std::vector<VkImageView> swap_mip_views;
+    NativeDescriptorSlotHandle swap_descriptor_slot{};
   };
 
   struct NativePlacementOwner {
@@ -1524,6 +1532,24 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   bool AllocateNativeTextureDescriptor(NativeTextureImage& image);
   bool AllocateNativeSamplerDescriptor(NativeSampler& sampler);
   void RetireNativeTextureDescriptor(NativeTextureImage& image);
+  // A2: a resolve that copies a whole surface into a same-format texture and
+  // then clears the surface exchanges the two images instead of copying.
+  struct PlannedResolveSwap {
+    NativeSurfaceImage* surface = nullptr;
+    NativeTextureImage* texture = nullptr;
+    NativeCommand* command = nullptr;
+    bool executed = false;
+  };
+  bool PlanResolveSwap(NativeCommand& command, NativeTextureImage& texture);
+  void ExecuteResolveSwap(PlannedResolveSwap& swap);
+  void FinalizePlannedResolveSwaps();
+  void UndoPlannedResolveSwaps();
+  std::vector<PlannedResolveSwap> planned_resolve_swaps_;
+  // A11: the frame's last resolve into the frontbuffer is skipped and the
+  // present samples this surface, repeating the RGBA8 conversion in its shader.
+  NativeSurfaceImage* present_surface_override_ = nullptr;
+  bool present_source_unorm8_ = false;
+  std::optional<NativeCommand> deferred_frontbuffer_resolve_;
   bool CreateResolveConversionObjects();
   bool CreateNullImage(VkImageType image_type, VkImageViewType view_type, uint32_t array_layers,
                        VkImageCreateFlags flags, NativeImageResource& resource);
