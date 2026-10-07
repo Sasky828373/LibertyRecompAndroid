@@ -368,6 +368,9 @@ elseif(ANDROID)
         "-Wl,-z,max-page-size=16384"
         "-Wl,--export-dynamic-symbol=SDL_main"
         "-Wl,--export-dynamic-symbol=JNI_OnLoad"
+        # Bind calls between the ~24k recompiled game functions directly
+        # instead of through this library's own PLT (nothing interposes them).
+        "-Wl,-Bsymbolic-functions"
     )
 else()
     add_library(gta4_recomp INTERFACE)
