@@ -164,8 +164,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     VkShaderModule late_module = VK_NULL_HANDLE;
     // 0-3: early, late, override early, override late; 4-7: the same with
     // EarlyFragmentTests (pixel shaders without depth writes only).
-    std::array<uint64_t, 8> module_code_hashes{};
+    std::array<uint64_t, 12> module_code_hashes{};
     std::array<VkShaderModule, 4> early_test_modules{};
+    // Color outputs demoted to private variables, for colorless pipelines.
+    std::array<VkShaderModule, 4> colorless_modules{};
     std::string filename;
     std::vector<NativeVertexInput> vertex_inputs;
     // Reads gl_VertexIndex/gl_InstanceIndex: its draws cannot be concatenated.
@@ -175,6 +177,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t constant_bytes = 0xFFFFFFFFu;
     // Loops bounded by the loop watchdog in the stock modules (diagnostics).
     uint32_t watchdog_loops = 0;
+    bool water_surface = false;  // scene water, the consumer of the water reflection
     // Vertex conversion depends only on the input interface, so converted and
     // persistent vertex data are shared by every shader with the same inputs.
     uint64_t input_signature_hash = 0;
@@ -1177,6 +1180,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     bool depth_bias_enable = false;
     bool primitive_restart_enable = false;
     bool early_fragment_tests = false;
+    bool colorless_fragment = false;
 
     bool operator==(const NativePipelineKey&) const = default;
   };
@@ -1927,6 +1931,16 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   uint64_t completed_command_buffer_submission_ = 0;
   bool native_renderer_recovery_failed_ = false;
   uint32_t active_frame_slot_ = 0;
+  // Occlusion of the scene water draws, per frame slot (A13 reflection on demand).
+  static constexpr uint32_t kWaterQueriesPerSlot = 64;
+  VkQueryPool water_query_pool_ = VK_NULL_HANDLE;
+  std::array<uint32_t, 2> water_query_counts_{};
+  uint32_t water_hidden_frames_ = 0;
+  // Last frame each texture generation was an input (A3 lazy resolves), and the
+  // guest textures the title ever read back on the CPU (never skipped).
+  std::unordered_map<uint64_t, uint32_t> texture_input_frames_;
+  std::mutex cpu_read_textures_mutex_;
+  std::unordered_set<uint32_t> cpu_read_textures_;
   NativeFrameContextRing frame_context_ring_;
   std::array<std::optional<NativeFrameContextRing::FrameToken>, NativeFrameContextRing::kSlotCount>
       frame_context_tokens_{};

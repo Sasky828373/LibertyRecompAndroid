@@ -15,6 +15,7 @@
 #include "native_vertex_cache.h"
 #include "native_spirv_relaxed.h"
 #include "native_spirv_early_tests.h"
+#include "native_spirv_colorless.h"
 #include "native_spirv_ubo_constants.h"
 #include "native_spirv_constant_range.h"
 #include "native_fixed_state_hash.h"
@@ -194,6 +195,26 @@ REXCVAR_DEFINE_BOOL(gta4_native_fast_legacy_mul, true, "GTA IV/Graphics/Native R
 REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, false, "GTA IV/Graphics/Native Renderer",
                     "Reorder the triangles of order-independent indexed triangle-list draws for "
                     "the GPU vertex cache (once per index range)");
+REXCVAR_DEFINE_BOOL(gta4_native_water_reflection_on_demand, true, "GTA IV/Graphics/Reflections",
+                    "Render the water reflection only in frames that draw scene water, and only "
+                    "every 8th frame while occlusion queries find all of that water hidden");
+REXCVAR_DEFINE_BOOL(gta4_native_lazy_resolves, true, "GTA IV/Graphics/Native Renderer",
+                    "Skip resolves into textures that no draw, post-processing pass, present or "
+                    "CPU readback has used for 120 frames; the first use in a later frame sees "
+                    "one stale frame");
+REXCVAR_DEFINE_BOOL(gta4_native_keep_draw_state, true, "GTA IV/Graphics/Native Renderer",
+                    "Keep the cached pipeline, descriptor and dynamic state across clears and "
+                    "phase markers, which bind nothing");
+REXCVAR_DEFINE_BOOL(gta4_native_skip_repeated_clears, true, "GTA IV/Graphics/Native Renderer",
+                    "Skip a clear when its attachments already hold that clear (same value, same "
+                    "or larger rectangle) and nothing wrote them since");
+REXCVAR_DEFINE_BOOL(gta4_native_skip_invisible_draws, true, "GTA IV/Graphics/Native Renderer",
+                    "Do not record draws that can change no pixel: no depth or stencil writes and "
+                    "every written color target either masked off or blended as ZERO*src+ONE*dst");
+REXCVAR_DEFINE_BOOL(gta4_native_colorless_fragment, true, "GTA IV/Graphics/Native Renderer",
+                    "In pipelines without color attachments, use pixel shaders whose color outputs "
+                    "are private variables so the color math (and vertex outputs only it reads) "
+                    "is dead code; discards and sample-mask writes are kept");
 REXCVAR_DEFINE_BOOL(gta4_native_early_fragment_tests, true, "GTA IV/Graphics/Native Renderer",
                     "Test depth before pixel shading for draws that write neither depth nor "
                     "stencil (identical image; hidden fragments of alpha-tested/killing shaders "
@@ -445,6 +466,11 @@ std::array<std::atomic<uint32_t>, 65536> g_resolve_sites{};
 std::atomic<uint64_t> g_resolve_reuse_candidates{0}, g_resolve_reuse_hits{0};
 // TEMP: vertex-cache reordering coverage: [0] rejected, [1] eligible.
 std::array<std::atomic<uint64_t>, 2> g_vertex_cache_draws{}, g_vertex_cache_indices{};
+std::atomic<uint64_t> g_invisible_draws_skipped{0};
+std::atomic<uint64_t> g_repeated_clears_skipped{0};
+std::atomic<uint64_t> g_water_reflections_skipped{0};
+std::atomic<uint64_t> g_lazy_resolves_skipped{0};
+std::atomic<uint64_t> g_draw_state_kept{0};
 std::mutex g_resolve_kinds_mutex;
 std::map<std::string, uint32_t> g_resolve_kinds;
 void NoteResolveKind(std::string key) {
@@ -3084,6 +3110,7 @@ size_t Gta4NativeGraphicsSystem::NativePipelineKeyHash::operator()(
   add(key.color_write_mask);
   add(key.sample_mask);
   add(key.early_fragment_tests);
+  add(key.colorless_fragment);
   add(key.depth_bias_enable);
   add(key.primitive_restart_enable);
   return size_t(hash);
@@ -6245,6 +6272,10 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
         if (command.phone_trace) TracePhoneNativeCommand("worker-sync", command);
         TextureLockCommand lock_command;
         std::memcpy(&lock_command, command.bytes.data(), sizeof(lock_command));
+        {
+          std::lock_guard lock(cpu_read_textures_mutex_);
+          cpu_read_textures_.insert(lock_command.texture);
+        }
         bool succeeded = true;
         const bool flushed_pending_frame = !current_frame_.empty();
         if (flushed_pending_frame) {
@@ -6465,6 +6496,14 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                   __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "resolve-kinds:%s",
                                       line.substr(offset, 900).c_str());
               }
+              __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                                  "skips/frame: invisible-draws=%.1f repeated-clears=%.1f "
+                                  "water-reflection=%.2f lazy-resolves=%.1f kept-state=%.1f",
+                                  g_invisible_draws_skipped.exchange(0) / 120.0,
+                                  g_repeated_clears_skipped.exchange(0) / 120.0,
+                                  g_water_reflections_skipped.exchange(0) / 120.0,
+                                  g_lazy_resolves_skipped.exchange(0) / 120.0,
+                                  g_draw_state_kept.exchange(0) / 120.0);
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "vertex-cache/frame: eligible draws=%.0f indices=%.0f rejected draws=%.0f indices=%.0f",
                                   g_vertex_cache_draws[1].exchange(0) / 120.0,
@@ -7660,6 +7699,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         ? 0 : XXH3_64bits(stock_late_spirv.data(), stock_late_spirv_size);
     resource->filename.assign(cache_entry->filename,
                               ::strnlen(cache_entry->filename, sizeof(cache_entry->filename)));
+    resource->water_surface = command.stage == ShaderStage::kPixel &&
+                              ClassifyTranslucentDiagnosticShader(resource->filename) == "water-surface";
     if (gpu_labels::Enabled()) {
       gpu_labels::NameShader(vulkan_device, stock_early_module,
           fmt::format("GTA4/{}/{:016X}/early", resource->filename, resource->hash));
@@ -7935,6 +7976,20 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
       make_early(stock_late_spirv, 1);
       make_early(early_test_override_early_spirv, 2);
       make_early(early_test_override_late_spirv, 3);
+      const auto make_colorless = [&](const std::vector<uint32_t>& spirv, uint32_t index) {
+        if (spirv.empty()) return;
+        auto colorless = StripSpirvColorOutputs(spirv);
+        if (!colorless) return;
+        resource->colorless_modules[index] = ui::vulkan::util::CreateShaderModule(
+            vulkan_device, colorless->data(), colorless->size() * sizeof(uint32_t));
+        if (resource->colorless_modules[index])
+          resource->module_code_hashes[8 + index] =
+              XXH3_64bits(colorless->data(), colorless->size() * sizeof(uint32_t));
+      };
+      make_colorless(stock_early_spirv, 0);
+      make_colorless(stock_late_spirv, 1);
+      make_colorless(early_test_override_early_spirv, 2);
+      make_colorless(early_test_override_late_spirv, 3);
     }
     shader = resource.get();
     shader_resources_.push_back(std::move(resource));
@@ -7973,6 +8028,9 @@ void Gta4NativeGraphicsSystem::DestroyShaderResources() {
       const VkDevice device = vulkan_device->device();
       for (const auto& shader : shader_resources_) {
         for (VkShaderModule module : shader->early_test_modules) {
+          if (module) dfn.vkDestroyShaderModule(device, module, nullptr);
+        }
+        for (VkShaderModule module : shader->colorless_modules) {
           if (module) dfn.vkDestroyShaderModule(device, module, nullptr);
         }
         if (shader->override_late_module) {
@@ -15853,11 +15911,13 @@ void Gta4NativeGraphicsSystem::ReplayNativePipelineRecipes() {
         incompatible = true;
         break;
       }
-      const std::array<VkShaderModule, 8> modules = {
+      const std::array<VkShaderModule, 12> modules = {
           shader.early_module, shader.late_module, shader.override_early_module,
           shader.override_late_module, shader.early_test_modules[0],
           shader.early_test_modules[1], shader.early_test_modules[2],
-          shader.early_test_modules[3]};
+          shader.early_test_modules[3], shader.colorless_modules[0],
+          shader.colorless_modules[1], shader.colorless_modules[2],
+          shader.colorless_modules[3]};
       recipe.modules[stage] = modules[identity.variant];
     }
     if (incompatible) {
@@ -19920,6 +19980,7 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreateDrawPipeline(
   context.primitive_restart_enable = primitive_restart_enable;
   context.host_fog = modern_shader_frame_.settings().enabled;
   context.early_fragment_tests = REXCVAR_GET(gta4_native_early_fragment_tests);
+  context.colorless_fragment = REXCVAR_GET(gta4_native_colorless_fragment);
 
   // Pipeline traces report every diagnostic draw, including cache hits. Keep
   // their original validation/logging path even when a prewarm receipt exists.
@@ -20335,6 +20396,13 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
         state.pixel_shader_resource &&
         state.pixel_shader_resource->early_test_modules[pixel_variant] &&
         key.depth_enable && !key.depth_write_enable && stencil_writes_nothing;
+    // No color attachment: only discards, depth and sample mask matter.
+    bool colorless = REXCVAR_GET(gta4_native_colorless_fragment) && state.pixel_shader_resource &&
+                     !target.temporal_shader && !key.temporal_auxiliary &&
+                     state.pixel_shader_resource->colorless_modules[pixel_variant];
+    for (VkFormat format : key.color_formats) colorless &= format == VK_FORMAT_UNDEFINED;
+    key.colorless_fragment = colorless;
+    if (colorless) key.early_fragment_tests = false;
   }
   AddNativeGpuProfileCounter(performance::Counter::kPipelineLookups);
   const auto existing_pipeline = native_pipelines_.find(key);
@@ -20753,10 +20821,14 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
     shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     shader_stages[1].module =
         use_late_module ? selected_pixel.late_module : selected_pixel.early_module;
+    const uint32_t pixel_module_variant =
+        (selected_pixel.override_selected ? 2u : 0u) + (use_late_module ? 1u : 0u);
     if (key.early_fragment_tests) {
-      const uint32_t variant = (selected_pixel.override_selected ? 2u : 0u) + (use_late_module ? 1u : 0u);
-      if (VkShaderModule early = state.pixel_shader_resource->early_test_modules[variant])
+      if (VkShaderModule early = state.pixel_shader_resource->early_test_modules[pixel_module_variant])
         shader_stages[1].module = early;
+    } else if (key.colorless_fragment) {
+      if (VkShaderModule colorless = state.pixel_shader_resource->colorless_modules[pixel_module_variant])
+        shader_stages[1].module = colorless;
     }
     shader_stages[1].pName = "shaderMain";
     if (selected_pixel.specialization_constants_mask) {
@@ -20800,11 +20872,11 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
           recipe->data.shaders[0].variant];
       if (state.pixel_shader_resource) {
         recipe->data.shaders[1].title_hash = key.pixel_shader_hash;
-        recipe->data.shaders[1].variant = (selected_pixel.override_selected
-            ? (use_late_module ? 3 : 2) : (use_late_module ? 1 : 0)) +
-            (key.early_fragment_tests &&
-             state.pixel_shader_resource->early_test_modules[(selected_pixel.override_selected ? 2 : 0) +
-                                                             (use_late_module ? 1 : 0)] ? 4 : 0);
+        const uint32_t base = (selected_pixel.override_selected ? 2 : 0) + (use_late_module ? 1 : 0);
+        recipe->data.shaders[1].variant =
+            base + (key.early_fragment_tests && state.pixel_shader_resource->early_test_modules[base] ? 4
+                    : key.colorless_fragment && state.pixel_shader_resource->colorless_modules[base] ? 8
+                                                                                                     : 0);
         recipe->data.shaders[1].code_hash = state.pixel_shader_resource->module_code_hashes[
             recipe->data.shaders[1].variant];
       }
@@ -27561,6 +27633,39 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
   bool recorded_draw = false;
   bool rendering = false;
   uint32_t lighting_pass_reuses = 0;
+  // Clears recorded this frame, per attachment aspect. A write serial is unique
+  // across surfaces, so an unchanged one means nothing touched the aspect since.
+  struct ClearMemo {
+    const NativeSurfaceImage* surface = nullptr;
+    VkImageAspectFlags aspect = 0;
+    SurfaceDescriptor descriptor{};
+    uint64_t writer_serial = 0;
+    uint64_t materialized_serial = 0;
+    int32_t left = 0, top = 0, right = 0, bottom = 0;
+    std::array<uint32_t, 4> color{};
+    uint64_t depth = 0;
+  };
+  std::vector<ClearMemo> clear_memos;
+  bool clear_skipped = false;
+  const auto clear_aspects = [](const ClearCommand& clear, const NativeRenderingTarget& clear_target,
+                                const NativeCommand& clear_command, auto&& visit) {
+    for (uint32_t index = 0; index < kRenderTargetCount; ++index) {
+      if ((clear.flags & (uint32_t(1) << index)) && clear_target.color_views[index] &&
+          clear_target.color_surfaces[index]) {
+        visit(*clear_target.color_surfaces[index], VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT),
+              clear_command.pipeline_state->render_targets[index],
+              clear_target.color_surfaces[index]->aspect_content.color.writer_serial);
+      }
+    }
+    if (NativeSurfaceImage* depth = clear_target.depth_surface) {
+      if (clear.flags & 0x10)
+        visit(*depth, VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT),
+              clear_command.pipeline_state->depth_stencil, depth->aspect_content.depth.writer_serial);
+      if ((clear.flags & 0x20) && (depth->aspect & VK_IMAGE_ASPECT_STENCIL_BIT))
+        visit(*depth, VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT),
+              clear_command.pipeline_state->depth_stencil, depth->aspect_content.stencil.writer_serial);
+    }
+  };
   NativeRenderingTarget active_target;
   if (!recording_resources_.Reset()) return false;
   NativeFrameResources& resources = recording_resources_;
@@ -28934,12 +29039,87 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
   }
   const uint32_t debug_skip_gpu_range = REXCVAR_GET(gta4_native_debug_skip_gpu_range);
   const uint32_t water_reflection_interval = REXCVAR_GET(gta4_native_water_reflection_interval);
-  const bool skip_water_reflection =
+  bool skip_water_reflection =
       water_reflection_interval > 1 && submitted_frame % water_reflection_interval != 0;
+  // A13: the water reflection only feeds the scene water. Skip it in frames
+  // without water draws; when the water is drawn but occlusion queries found
+  // it all hidden for two completed frames, refresh it only every 8th frame.
+  const bool water_on_demand = REXCVAR_GET(gta4_native_water_reflection_on_demand) &&
+                               !diagnostic_frame && !translucent_queries_active;
+  bool water_queries = false;
+  if (water_on_demand) {
+    auto* water_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+    const auto& water_dfn = water_provider->vulkan_device()->functions();
+    const VkDevice water_device = water_provider->vulkan_device()->device();
+    if (!water_query_pool_) {
+      VkQueryPoolCreateInfo create_info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+      create_info.queryType = VK_QUERY_TYPE_OCCLUSION;
+      create_info.queryCount = kWaterQueriesPerSlot * uint32_t(water_query_counts_.size());
+      if (water_dfn.vkCreateQueryPool(water_device, &create_info, nullptr, &water_query_pool_) !=
+          VK_SUCCESS) {
+        water_query_pool_ = VK_NULL_HANDLE;
+      }
+    }
+    const uint32_t slot = active_frame_slot_ % uint32_t(water_query_counts_.size());
+    const uint32_t base = slot * kWaterQueriesPerSlot;
+    if (water_query_pool_) {
+      // This slot's previous frame has completed before the slot is reused.
+      if (const uint32_t count = water_query_counts_[slot]) {
+        std::array<uint32_t, kWaterQueriesPerSlot> samples{};
+        const VkResult result = water_dfn.vkGetQueryPoolResults(
+            water_device, water_query_pool_, base, count, sizeof(samples), samples.data(),
+            sizeof(uint32_t), 0);
+        bool visible = result != VK_SUCCESS;
+        for (uint32_t i = 0; i < count && !visible; ++i) visible = samples[i] != 0;
+        water_hidden_frames_ = visible ? 0 : water_hidden_frames_ + 1;
+      } else {
+        water_hidden_frames_ = 0;  // no water measured: assume visible when it appears
+      }
+      water_dfn.vkCmdResetQueryPool(command_buffer, water_query_pool_, base, kWaterQueriesPerSlot);
+      water_query_counts_[slot] = 0;
+      water_queries = true;
+    }
+    bool frame_has_water = false;
+    for (const NativeCommand& scan : current_frame_) {
+      if ((scan.type == CommandType::kDrawPrimitive || scan.type == CommandType::kDrawPrimitiveUp ||
+           scan.type == CommandType::kDrawIndexedPrimitive) &&
+          scan.pipeline_state && scan.pipeline_state->pixel_shader_resource &&
+          scan.pipeline_state->pixel_shader_resource->water_surface) {
+        frame_has_water = true;
+        break;
+      }
+    }
+    if (!frame_has_water || (water_hidden_frames_ >= 2 && submitted_frame % 8 != 0)) {
+      skip_water_reflection = true;
+      g_water_reflections_skipped.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   const uint32_t environment_reflection_interval =
       REXCVAR_GET(gta4_native_environment_reflection_interval);
   const bool skip_environment_reflection =
       environment_reflection_interval > 1 && submitted_frame % environment_reflection_interval != 0;
+  const bool lazy_resolves = REXCVAR_GET(gta4_native_lazy_resolves) && !diagnostic_frame &&
+                             !fire_frame_ && !force_content_probe;
+  {
+    const auto mark_input = [&](const std::shared_ptr<const NativeTextureResource>& texture) {
+      if (!texture) return;
+      texture_input_frames_[texture->generation] = submitted_frame;
+      if (texture->packed_depth_source)
+        texture_input_frames_[texture->packed_depth_source->generation] = submitted_frame;
+    };
+    mark_input(present_source);
+    for (const NativeCommand& scan : current_frame_) {
+      for (const auto& texture : scan.textures) mark_input(texture);
+      mark_input(scan.postfx_half_scene);
+      mark_input(scan.depth_handoff_source);
+      mark_input(scan.present_source);
+    }
+    if (texture_input_frames_.size() > 8192) {
+      std::erase_if(texture_input_frames_, [&](const auto& entry) {
+        return entry.second + 600 < submitted_frame;
+      });
+    }
+  }
   size_t merged_up_until = 0;
   std::vector<const NativeCommand*> up_run;
   for (size_t command_index = 0; command_index < current_frame_.size(); ++command_index) {
@@ -28965,6 +29145,26 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         performance_range_for_command(queued_command) ==
             performance::GpuRange::kEnvironmentReflections) {
       continue;
+    }
+    if (lazy_resolves && queued_command.type == CommandType::kResolve &&
+        queued_command.resolve_destination) {
+      const auto input = texture_input_frames_.find(queued_command.resolve_destination->generation);
+      const bool recently_used = input != texture_input_frames_.end() &&
+                                 input->second + 120 >= submitted_frame;
+      if (!recently_used) {
+        ResolveCommand resolve;
+        std::memcpy(&resolve, queued_command.bytes.data(), sizeof(resolve));
+        // Resolves that also clear the source change it for later draws.
+        bool pinned = (resolve.flags & 0x300u) != 0 || !resolve.destination_texture;
+        if (!pinned) {
+          std::lock_guard lock(cpu_read_textures_mutex_);
+          pinned = cpu_read_textures_.contains(resolve.destination_texture);
+        }
+        if (!pinned) {
+          g_lazy_resolves_skipped.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
     }
     const auto* profile_state = queued_command.pipeline_state.get();
     const profile::CpuContextScope detail_command_context({uint32_t(command_index), uint32_t(queued_command.render_phase),
@@ -29144,8 +29344,15 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     const bool descriptor_draw = command.type == CommandType::kDrawPrimitive ||
                                  command.type == CommandType::kDrawPrimitiveUp ||
                                  command.type == CommandType::kDrawIndexedPrimitive;
-    if (!descriptor_draw) {
+    // Clears (vkCmdClearAttachments keeps the bound state) and phase markers
+    // bind nothing; every other command may bind its own pipelines.
+    const bool keeps_draw_state =
+        REXCVAR_GET(gta4_native_keep_draw_state) &&
+        (command.type == CommandType::kClear || command.type == CommandType::kRenderPhaseMarker);
+    if (!descriptor_draw && !keeps_draw_state) {
       native_draw_state_cache_.Reset(); ubo_bound_layout_ = VK_NULL_HANDLE;
+    } else if (keeps_draw_state) {
+      g_draw_state_kept.fetch_add(1, std::memory_order_relaxed);
     }
     const bool profile_gpu_command =
         IsNativeGpuProfileFrameActive() && IsProfiledNativeGpuCommand(command.type);
@@ -31160,6 +31367,28 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       }
       const uint64_t pixel_hash = command.pipeline_state->pixel_shader_resource->hash;
       bool skip = false;
+      if (REXCVAR_GET(gta4_native_skip_invisible_draws)) {
+        const NativeFixedFunctionState& f = command.fixed_function_state;
+        const bool depth_writes = f.depth_enable && f.depth_write_enable;
+        const bool stencil_writes =
+            f.stencil_enable && (f.stencil_write_mask & 0xFFu) &&
+            (f.stencil_fail || f.stencil_depth_fail || f.stencil_pass ||
+             (f.two_sided_stencil &&
+              (f.ccw_stencil_fail || f.ccw_stencil_depth_fail || f.ccw_stencil_pass)));
+        bool color_writes = false;
+        for (uint32_t target = 0; target < kRenderTargetCount && !color_writes; ++target) {
+          if (!NativeColorWriteMaskForTarget(f.color_write_mask, target)) continue;
+          const NativeBlendControlState blend = DecodeNativeBlendControl(f.blend_controls[target]);
+          const bool keeps_destination = blend.source_color == 0 && blend.destination_color == 1 &&
+                                         blend.color_operation == 0 && blend.source_alpha == 0 &&
+                                         blend.destination_alpha == 1 && blend.alpha_operation == 0;
+          color_writes = !keeps_destination;
+        }
+        if (!depth_writes && !stencil_writes && !color_writes) {
+          g_invisible_draws_skipped.fetch_add(1, std::memory_order_relaxed);
+          skip = true;
+        }
+      }
       for (const auto& [value, mask] : skipped_pixel_shaders) skip |= (pixel_hash & mask) == value;
       if (skip) continue;
     }
@@ -32864,6 +33093,18 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     }
 
     translucent_query_index = begin_translucent_query(command, "original");
+    uint32_t water_query_index = UINT32_MAX;
+    if (water_queries && draw_command && rendering && translucent_query_index == UINT32_MAX &&
+        command.pipeline_state && command.pipeline_state->pixel_shader_resource &&
+        command.pipeline_state->pixel_shader_resource->water_surface) {
+      const uint32_t slot = active_frame_slot_ % uint32_t(water_query_counts_.size());
+      if (water_query_counts_[slot] < kWaterQueriesPerSlot) {
+        water_query_index = slot * kWaterQueriesPerSlot + water_query_counts_[slot]++;
+        dfn.vkCmdBeginQuery(command_buffer, water_query_pool_, water_query_index, 0);
+      } else {
+        water_hidden_frames_ = 0;  // more water than queries: treat as visible
+      }
+    }
 
     auto trace_deferred_light_draw = [&](bool recorded) {
       if (!artificial_light_draw || !command.pipeline_state) {
@@ -33547,7 +33788,35 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
             unsigned(rendering));
         std::fflush(stderr);
       }
-      command_recorded = RecordClear(command_buffer, command, target);
+      clear_skipped = false;
+      if (REXCVAR_GET(gta4_native_skip_repeated_clears) && !diagnostic_frame && !fire_frame_) {
+        bool any = false, all_match = true;
+        clear_aspects(clear, target, command, [&](const NativeSurfaceImage& surface,
+                                                  VkImageAspectFlags aspect,
+                                                  const SurfaceDescriptor& descriptor,
+                                                  uint64_t writer_serial) {
+          any = true;
+          const auto memo = std::find_if(clear_memos.begin(), clear_memos.end(), [&](const ClearMemo& m) {
+            return m.surface == &surface && m.aspect == aspect;
+          });
+          all_match &= memo != clear_memos.end() && memo->writer_serial == writer_serial &&
+                       memo->materialized_serial == surface.materialized_serial &&
+                       !std::memcmp(&memo->descriptor, &descriptor, sizeof(descriptor)) &&
+                       memo->left <= clear.left && memo->top <= clear.top &&
+                       memo->right >= clear.right && memo->bottom >= clear.bottom &&
+                       (aspect == VK_IMAGE_ASPECT_COLOR_BIT
+                            ? !std::memcmp(memo->color.data(), clear.color_bits, sizeof(clear.color_bits))
+                        : aspect == VK_IMAGE_ASPECT_DEPTH_BIT ? memo->depth == clear.depth_bits
+                                                              : memo->depth == clear.stencil);
+        });
+        clear_skipped = any && all_match;
+      }
+      if (clear_skipped) {
+        g_repeated_clears_skipped.fetch_add(1, std::memory_order_relaxed);
+        command_recorded = true;
+      } else {
+        command_recorded = RecordClear(command_buffer, command, target);
+      }
       if (collect_frame_diagnostics) {
         command_recorded ? ++successful_clears : ++failed_clears;
       }
@@ -33565,6 +33834,9 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     }
     EndFireQuery(command_buffer, fire_query);
     end_translucent_query(translucent_query_index, command_recorded);
+    if (water_query_index != UINT32_MAX) {
+      dfn.vkCmdEndQuery(command_buffer, water_query_pool_, water_query_index);
+    }
     if (command_recorded && is_draw && temporal_frame_prepared_ &&
         (command.temporal_scene_binding || (temporal_display_ready_ &&
          target.color_surfaces[0] == temporal_composite_source_))) {
@@ -33904,7 +34176,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
                             (draw_writes_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) |
                                 (draw_writes_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u));
       }
-      if (command.type == CommandType::kClear) {
+      if (command.type == CommandType::kClear && !clear_skipped) {
         ClearCommand clear{};
         std::memcpy(&clear, command.bytes.data(), sizeof(clear));
         for (uint32_t index = 0; index < kRenderTargetCount; ++index) {
@@ -33921,6 +34193,25 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
                               NativePlacementOwner::WriteKind::kExplicitClear,
                               SelectNativeClearAttachmentUsage(clear.flags).depth_stencil_aspects);
         }
+        clear_aspects(clear, target, command, [&](const NativeSurfaceImage& surface,
+                                                  VkImageAspectFlags aspect,
+                                                  const SurfaceDescriptor& descriptor,
+                                                  uint64_t writer_serial) {
+          std::erase_if(clear_memos, [&](const ClearMemo& m) {
+            return m.surface == &surface && m.aspect == aspect;
+          });
+          ClearMemo memo;
+          memo.surface = &surface;
+          memo.aspect = aspect;
+          memo.descriptor = descriptor;
+          memo.writer_serial = writer_serial;
+          memo.materialized_serial = surface.materialized_serial;
+          memo.left = clear.left, memo.top = clear.top, memo.right = clear.right,
+          memo.bottom = clear.bottom;
+          std::copy(std::begin(clear.color_bits), std::end(clear.color_bits), memo.color.begin());
+          memo.depth = aspect == VK_IMAGE_ASPECT_STENCIL_BIT ? clear.stencil : clear.depth_bits;
+          clear_memos.push_back(memo);
+        });
       }
       // Store the state after this recorded setup, including its actual stencil
       // write serial. Each same-occurrence contribution can legitimately update
@@ -35534,6 +35825,13 @@ void Gta4NativeGraphicsSystem::DestroyNativeRendererObjects() {
   DestroyBulbFullProbes();
   DestroyFireProbes();
   DestroyTranslucentQueryPool();
+  if (water_query_pool_ && provider_) {
+    auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+    if (const ui::vulkan::VulkanDevice* vulkan_device = vulkan_provider->vulkan_device())
+      vulkan_device->functions().vkDestroyQueryPool(vulkan_device->device(), water_query_pool_, nullptr);
+  }
+  water_query_pool_ = VK_NULL_HANDLE;
+  water_query_counts_ = {};
   DestroyNativeGpuProfiler();
   pipeline_layout_ = VK_NULL_HANDLE;
   cached_pipeline_layout_ = VK_NULL_HANDLE;
