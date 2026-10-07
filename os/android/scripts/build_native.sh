@@ -38,6 +38,10 @@ if [ ! -f "$BUILD_DIR/build.ninja" ] || ! grep -q -- "-fno-emulated-tls" "$BUILD
     -DGTA4_NATIVE_DXC_LIBRARY_PATH="$(cygpath -m "$REPO/out/host-tools/dxc/bin/x64")"
 fi
 
+# Calls between unhooked recompiled functions bypass the weak sub_X aliases so
+# the compiler can inline them (idempotent; a new codegen loses the rewrite).
+DIRECT_CALLS="$REPO/glue/rexglue-sdk-main/gta4-recomp/tools/direct_calls.py"
+python "$(cygpath -m "$DIRECT_CALLS")" apply
 echo "== building with $JOBS jobs"
 cmake --build "$BUILD_DIR" --target LibertyRecomp -- -j"$JOBS" || { echo "!! native build failed"; exit 1; }
 
@@ -59,6 +63,12 @@ done
 cp "$NDK_SYSROOT_LIB/libc++_shared.so" "$JNILIBS/"
 
 echo "== checks"
+# A hook added after the hooked list was taken must not be bypassed.
+NM_OUT="$(mktemp)"
+"$NDK_BIN/llvm-nm" --defined-only "$BUILD_DIR/glue/gta4-recomp/libmain.so" > "$NM_OUT"
+python "$(cygpath -m "$DIRECT_CALLS")" check "$(cygpath -m "$NM_OUT")" || {
+  echo "!! run: direct_calls.py hooks <llvm-nm libmain.so> && direct_calls.py apply, then rebuild"; exit 1; }
+rm -f "$NM_OUT"
 "$NDK_BIN/llvm-nm" -D --defined-only "$JNILIBS/libmain.so" | grep -E ' SDL_main$' >/dev/null || {
   echo "!! SDL_main is not exported from libmain.so"; exit 1; }
 # Every DT_NEEDED entry must be either staged here or a system library.

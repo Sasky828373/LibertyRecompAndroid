@@ -380,6 +380,22 @@ elseif(ANDROID)
         target_link_options(LibertyRecomp PRIVATE -flto=thin "-Wl,--thinlto-jobs=8"
             "-Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/thinlto-cache")
     endif()
+    # Profile-guided optimization: "generate" builds the recording libmain
+    # (counters written to files/pgo every minute); a path to a merged
+    # .profdata builds the optimized one. Empty: off.
+    set(LIBERTY_ANDROID_PGO "" CACHE STRING "Android libmain PGO: generate | <file.profdata>")
+    target_sources(LibertyRecomp PRIVATE src/android/android_pgo_dump.cpp
+        src/android/android_frame_wait_hook.cpp)
+    if(LIBERTY_ANDROID_PGO STREQUAL "generate")
+        target_compile_options(LibertyRecomp PRIVATE -fprofile-generate)
+        target_link_options(LibertyRecomp PRIVATE -fprofile-generate)
+        target_compile_definitions(LibertyRecomp PRIVATE LIBERTY_PGO_GENERATE=1)
+    elseif(LIBERTY_ANDROID_PGO)
+        target_compile_options(LibertyRecomp PRIVATE "-fprofile-use=${LIBERTY_ANDROID_PGO}"
+            -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date
+            -Wno-backend-plugin)
+        target_link_options(LibertyRecomp PRIVATE "-fprofile-use=${LIBERTY_ANDROID_PGO}")
+    endif()
 else()
     add_library(gta4_recomp INTERFACE)
     target_include_directories(gta4_recomp INTERFACE
