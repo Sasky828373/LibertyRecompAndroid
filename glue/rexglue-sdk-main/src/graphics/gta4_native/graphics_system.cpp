@@ -206,6 +206,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_lazy_constant_hash, true, "GTA IV/Graphics/Nativ
 REXCVAR_DEFINE_BOOL(gta4_native_direct_constant_apply, true, "GTA IV/Graphics/Native Renderer",
                     "Draws write constant changes straight into the worker's state and snapshot it, "
                     "without building a copied delta first");
+REXCVAR_DEFINE_BOOL(gta4_native_stamped_protection, true, "GTA IV/Graphics/Native Renderer",
+                    "Add each texture to the assembled frame's protection set once per frame, "
+                    "not once per draw");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -5980,7 +5983,29 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
   // assembly is published to the recorder only at Present.
   auto retain_assembled = [this](NativeCommandPool<NativeCommand>::Owner& owner, bool protect) {
     if (pipelined_recording_) {
-      if (protect) {
+      if (protect && REXCVAR_GET(gta4_native_stamped_protection)) {
+        // Nearly every draw repeats textures already in the set: find the new
+        // ones without the lock, and take it only when there are any.
+        std::array<uint64_t, 2 * (std::tuple_size_v<decltype(owner->textures)> + 4)> fresh;
+        size_t fresh_count = 0;
+        const uint32_t epoch = assembly_protection_epoch_;
+        const auto add = [&](const std::shared_ptr<const NativeTextureResource>& resource) {
+          if (!resource || resource->assembly_protection_epoch == epoch) return;
+          resource->assembly_protection_epoch = epoch;
+          if (resource->generation) fresh[fresh_count++] = resource->generation;
+          if (resource->packed_depth_source && resource->packed_depth_source->generation)
+            fresh[fresh_count++] = resource->packed_depth_source->generation;
+        };
+        add(owner->resolve_destination);
+        add(owner->depth_handoff_source);
+        add(owner->present_source);
+        add(owner->postfx_half_scene);
+        for (const auto& texture : owner->textures) add(texture);
+        if (fresh_count) {
+          std::lock_guard lock(worker_protection_mutex_);
+          assembly_texture_protection_.insert(fresh.begin(), fresh.begin() + fresh_count);
+        }
+      } else if (protect) {
         std::lock_guard lock(worker_protection_mutex_);
         AddProtectedTextureGenerations(*owner, assembly_texture_protection_);
       }
@@ -6891,6 +6916,8 @@ void Gta4NativeGraphicsSystem::SwapAssemblyFrame() {
   current_frame_.swap(assembly_frame_);
   std::lock_guard lock(worker_protection_mutex_);
   frame_texture_protection_.swap(assembly_texture_protection_);
+  // The set now holding assembly may not contain what earlier stamps claim.
+  if (++assembly_protection_epoch_ == 0) assembly_protection_epoch_ = 1;
 }
 
 void Gta4NativeGraphicsSystem::RunReleaseEffects(std::vector<NativeReleaseEffect>& effects) {

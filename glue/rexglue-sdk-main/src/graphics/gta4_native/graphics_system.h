@@ -371,6 +371,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     std::shared_ptr<const NativeTextureResource> packed_depth_source;
     bool vector_font_replacement = false;
     uint32_t vector_font_id = 0;
+    // Render worker only: the assembly epoch in which this resource's
+    // generations were last added to assembly_texture_protection_.
+    mutable uint32_t assembly_protection_epoch = 0;
   };
 
   struct SynchronousCommand {
@@ -1906,6 +1909,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   // Worker-side protection visible to the recorder's eviction passes. Guarded
   // by worker_protection_mutex_ together with the worker batch and cursor.
   std::unordered_set<uint64_t> assembly_texture_protection_;
+  // Bumped whenever assembly_texture_protection_ is replaced, so a resource
+  // stamped with the current epoch is known to be in the set already.
+  uint32_t assembly_protection_epoch_ = 1;
   std::vector<NativeReleaseEffect> assembly_release_effects_;
   std::vector<NativeReleaseEffect> recording_release_effects_;
   mutable std::mutex worker_protection_mutex_;
