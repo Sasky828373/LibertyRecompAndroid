@@ -34,7 +34,7 @@ plays.
 
 ## 3. Install the game from the launcher (0.5.7 and newer)
 
-![Installing from the launcher](images/launcher_install.png)
+![Installing from the launcher](images/launcher_install_v2.png)
 
 1. Under **Base game**, press **Choose file...** and pick your disc image (`.iso`). The first time,
    the app asks for **All files access**. Android opens the setting; turn it on and come back. With
@@ -47,7 +47,7 @@ plays.
 4. Optionally choose **The Lost and Damned** and **The Ballad of Gay Tony**.
 5. Press **Install**. The progress is shown in the panel and on the left.
 
-![Installation progress](images/launcher_progress.png)
+![Installation progress](images/launcher_progress_v2.png)
 
 Keep the app open until it finishes. On the Retroid Pocket 5 the whole installation took under a
 minute. Slower storage or an SD card can take several minutes. When it is done, Play turns white:

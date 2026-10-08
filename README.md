@@ -154,7 +154,7 @@ console and disc.
    The file names do not matter, as long as the disc image ends in `.iso`.
 3. Press **Install**, wait for it to finish, then press **Play**.
 
-![Installing from the launcher](docs/android/images/launcher_install.png)
+![Installing from the launcher](docs/android/images/launcher_install_v2.png)
 
 The full walkthrough, including the `install/` folder and older versions, is in
 [INSTALL.md](docs/android/INSTALL.md).
