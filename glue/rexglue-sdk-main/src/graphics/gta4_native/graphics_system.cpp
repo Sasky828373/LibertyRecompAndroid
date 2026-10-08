@@ -215,6 +215,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_buffer_validation_per_frame, true, "GTA IV/Graph
 REXCVAR_DEFINE_BOOL(gta4_native_assembly_constant_bound, true, "GTA IV/Graphics/Native Renderer",
                     "Size the frame's constant arena from counts kept while the worker assembles "
                     "the frame, instead of walking every command before recording");
+REXCVAR_DEFINE_BOOL(gta4_native_prepared_binding_cache, true, "GTA IV/Graphics/Native Renderer",
+                    "Reuse texture bindings prepared for any recent draw with identical inputs, "
+                    "not only the immediately preceding draw");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -18360,6 +18363,22 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
   };
   std::array<SamplerMemo, kShaderTextureCount> sampler_memo{};
   const NativeCommand* previous_prepared_draw = nullptr;
+  // Recent prepared draws by texture inputs. Working-set slots are append-only
+  // within a frame and published once at the end, so any earlier draw of this
+  // batch is as valid a source as the previous one. Cleared wherever
+  // previous_prepared_draw is.
+  std::array<const NativeCommand*, 16> prepared_draw_cache{};
+  const bool use_prepared_draw_cache = REXCVAR_GET(gta4_native_prepared_binding_cache);
+  const auto prepared_draw_slot = [](const NativeCommand& draw) {
+    uint64_t hash = uint64_t(draw.used_texture_mask) * 0x9E3779B97F4A7C15ull;
+    for (uint32_t mask = draw.used_texture_mask; mask; mask &= mask - 1) {
+      const uint32_t stage = uint32_t(std::countr_zero(mask));
+      if (stage >= draw.textures.size()) break;
+      hash = (hash ^ uint64_t(reinterpret_cast<uintptr_t>(draw.textures[stage].get()))) *
+             0xBF58476D1CE4E5B9ull;
+    }
+    return size_t(hash >> 60);
+  };
   const bool reuse_prepared_bindings = !trace_reflections && !FireTraceConfig().enabled &&
       !EmissionTraceConfig().pipeline_full_readback && !PhoneTraceConfig().enabled &&
       REXCVAR_GET(gta4_native_light_color_delta_probe) != "room" &&
@@ -18484,6 +18503,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     if (command.type == CommandType::kResolve && resolve_destination_image && !trace_reflections &&
         PlanResolveSwap(command, *resolve_destination_image, texture_commands, command_index)) {
       previous_prepared_draw = nullptr;
+      prepared_draw_cache.fill(nullptr);
     }
     if (command.depth_handoff_source &&
         !prepared_image(command.depth_handoff_source)) {
@@ -18495,13 +18515,25 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     if (!is_draw) {
       continue;
     }
-    if (reuse_prepared_bindings && !command.temporal_scene_binding && !TvCommandRole(command) && previous_prepared_draw &&
-        !previous_prepared_draw->temporal_scene_binding &&
-        native_descriptor_backend_ == NativeDescriptorBackend::kIndexed && native_descriptor_paging_ &&
-        NativePreparedTextureInputsEqual(*previous_prepared_draw, command)) {
-      CopyNativePreparedTextureBindings(*previous_prepared_draw, command);
-      AddNativeGpuProfileCounter(performance::Counter::kTextureBindingReuses);
-      continue;
+    const size_t prepared_slot = use_prepared_draw_cache ? prepared_draw_slot(command) : 0;
+    if (reuse_prepared_bindings && !command.temporal_scene_binding && !TvCommandRole(command) &&
+        native_descriptor_backend_ == NativeDescriptorBackend::kIndexed && native_descriptor_paging_) {
+      const NativeCommand* source = nullptr;
+      if (previous_prepared_draw && !previous_prepared_draw->temporal_scene_binding &&
+          NativePreparedTextureInputsEqual(*previous_prepared_draw, command)) {
+        source = previous_prepared_draw;
+      } else if (const NativeCommand* cached = use_prepared_draw_cache
+                                                   ? prepared_draw_cache[prepared_slot] : nullptr;
+                 cached && cached != previous_prepared_draw && !cached->temporal_scene_binding &&
+                 NativePreparedTextureInputsEqual(*cached, command)) {
+        source = cached;
+      }
+      if (source) {
+        CopyNativePreparedTextureBindings(*source, command);
+        AddNativeGpuProfileCounter(performance::Counter::kTextureBindingReuses);
+        previous_prepared_draw = source;
+        continue;
+      }
     }
     const NativeShader* alpha_card_pixel_shader =
         command.pipeline_state ? command.pipeline_state->pixel_shader_resource : nullptr;
@@ -18923,6 +18955,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     if (native_descriptor_backend_ == NativeDescriptorBackend::kIndexed && native_descriptor_paging_) {
       if (!AssignIndexedWorkingSet(command, descriptor_key)) return false;
       previous_prepared_draw = &command;
+      if (use_prepared_draw_cache) prepared_draw_cache[prepared_slot] = &command;
     } else {
       cached_draws.emplace_back(&command, std::move(descriptor_key));
     }
