@@ -1395,6 +1395,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   // Why the next PrepareSurfaceContent may materialize (statistics only):
   // 0 draw scope, 1 clear scope, 2 resolve clear, 3 other.
   uint32_t materialize_trigger_ = 3;
+  // Index count RecordIndexedPrimitive uses instead of the command's own when
+  // consecutive equivalent draws are recorded as one (0: none).
+  uint32_t indexed_merge_count_override_ = 0;
   void BindNativeVertexBuffer(VkCommandBuffer command_buffer, uint32_t binding, VkBuffer buffer,
                               VkDeviceSize offset);
   bool InitializeShaderCache();

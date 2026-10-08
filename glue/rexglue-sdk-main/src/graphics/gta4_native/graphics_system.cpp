@@ -246,6 +246,9 @@ REXCVAR_DEFINE_UINT32(gta4_native_debug_gpu_attribution, 0, "GTA IV/Graphics/Nat
                       "Measurement only, breaks the image: 1 = scene draws get an empty scissor "
                       "(vertex and state work only), 2 = scene draws bind state but are not issued")
     .range(0, 2);
+REXCVAR_DEFINE_BOOL(gta4_native_merge_indexed_draws, true, "GTA IV/Graphics/Native Renderer",
+                    "Record consecutive indexed triangle-list draws with identical state and "
+                    "adjacent index ranges as one draw");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -536,6 +539,7 @@ std::atomic<uint64_t> g_lazy_resolves_skipped{0};
 // the ones skipped because a full clear replaces the content anyway.
 std::array<std::atomic<uint64_t>, 4> g_materializations{};
 std::atomic<uint64_t> g_materializations_skipped{0};
+std::atomic<uint64_t> g_indexed_draws_merged{0};
 std::atomic<uint64_t> g_draw_state_kept{0};
 std::atomic<uint64_t> g_resolve_swaps_planned{0}, g_resolve_swaps_fast{0};
 std::atomic<uint64_t> g_present_from_surface{0};
@@ -6646,7 +6650,8 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                                   "skips/frame: invisible-draws=%.1f repeated-clears=%.1f "
                                   "water-reflection=%.2f lazy-resolves=%.1f kept-state=%.1f "
                                   "resolve-swaps=%.1f/%.1f present-from-surface=%.2f "
-                                  "materialize draw/clear/rclear/other=%.1f/%.1f/%.1f/%.1f skipped=%.1f",
+                                  "materialize draw/clear/rclear/other=%.1f/%.1f/%.1f/%.1f skipped=%.1f "
+                                  "indexed-merged=%.1f",
                                   g_invisible_draws_skipped.exchange(0) / 120.0,
                                   g_repeated_clears_skipped.exchange(0) / 120.0,
                                   g_water_reflections_skipped.exchange(0) / 120.0,
@@ -6659,7 +6664,8 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                                   g_materializations[1].exchange(0) / 120.0,
                                   g_materializations[2].exchange(0) / 120.0,
                                   g_materializations[3].exchange(0) / 120.0,
-                                  g_materializations_skipped.exchange(0) / 120.0);
+                                  g_materializations_skipped.exchange(0) / 120.0,
+                                  g_indexed_draws_merged.exchange(0) / 120.0);
               {
                 std::string a2, a11;
                 for (uint32_t i = 0; i < g_resolve_swap_rejects.size(); ++i) {
@@ -23213,6 +23219,7 @@ bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_bu
   }
   DrawIndexedPrimitiveCommand draw{};
   std::memcpy(&draw, command.bytes.data(), sizeof(draw));
+  if (indexed_merge_count_override_) draw.index_count = indexed_merge_count_override_;
   if (!draw.index_count) {
     return fail("zero-index-count");
   }
@@ -34716,8 +34723,74 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         command_recorded ? ++successful_draws : ++failed_draws;
       }
     } else if (command.type == CommandType::kDrawIndexedPrimitive) {
+      // Consecutive triangle-list draws of one mesh with identical state whose
+      // index ranges continue each other are the same work as one draw over
+      // the joined range: record them as one.
+      size_t merged_count = 1;
+      uint32_t merged_indices = 0;
+      if (REXCVAR_GET(gta4_native_merge_indexed_draws) && &command == &queued_command &&
+          !diagnostic_frame && !legacy_diagnostics && !command.fire_trace && !command.bulb_trace &&
+          !command.phone_trace && !command.tv_trace && !command.temporal_scene_binding &&
+          !command.temporal_instance && command.pipeline_state && command.shader_state &&
+          command.index_buffer && fire_query == UINT32_MAX) {
+        DrawIndexedPrimitiveCommand head{};
+        std::memcpy(&head, command.bytes.data(), sizeof(head));
+        if (head.primitive_type == uint32_t(xenos::PrimitiveType::kTriangleList) &&
+            head.index_count) {
+          merged_indices = head.index_count;
+          uint32_t next_start = head.start_index + head.index_count;
+          for (size_t next = command_index + 1; next < current_frame_.size() && merged_count < 64;
+               ++next) {
+            const NativeCommand& other = current_frame_[next];
+            if (other.type != CommandType::kDrawIndexedPrimitive || other.fire_trace ||
+                other.bulb_trace || other.phone_trace || other.tv_trace ||
+                other.temporal_scene_binding || other.temporal_instance ||
+                other.pipeline_state != command.pipeline_state ||
+                other.shader_state != command.shader_state ||
+                other.index_buffer != command.index_buffer ||
+                other.vertex_buffers != command.vertex_buffers ||
+                other.textures != command.textures ||
+                other.render_phase != command.render_phase ||
+                other.used_texture_mask != command.used_texture_mask ||
+                other.descriptor_page != command.descriptor_page ||
+                other.texture_descriptor_indices != command.texture_descriptor_indices ||
+                other.sampler_descriptor_indices != command.sampler_descriptor_indices ||
+                other.captured_vertex_constants_hash != command.captured_vertex_constants_hash ||
+                other.captured_pixel_constants_hash != command.captured_pixel_constants_hash ||
+                std::memcmp(&other.lighting, &command.lighting, sizeof(command.lighting)) != 0 ||
+                std::memcmp(&other.texture_fetches, &command.texture_fetches,
+                            sizeof(command.texture_fetches)) != 0 ||
+                std::memcmp(&other.fixed_function_state, &command.fixed_function_state,
+                            sizeof(command.fixed_function_state)) != 0) {
+              break;
+            }
+            DrawIndexedPrimitiveCommand draw{};
+            std::memcpy(&draw, other.bytes.data(), sizeof(draw));
+            if (draw.primitive_type != head.primitive_type || draw.base_vertex != head.base_vertex ||
+                draw.start_index != next_start || !draw.index_count ||
+                merged_indices > UINT32_MAX - draw.index_count) {
+              break;
+            }
+            merged_indices += draw.index_count;
+            next_start += draw.index_count;
+            ++merged_count;
+          }
+        }
+      }
+      if (merged_count > 1) indexed_merge_count_override_ = merged_indices;
       command_recorded = RecordIndexedPrimitive(command_buffer, command, target.width,
                                                 target.height, target, resources);
+      indexed_merge_count_override_ = 0;
+      if (merged_count > 1) {
+        if (command_recorded) {
+          merged_up_until = command_index + merged_count;
+          g_indexed_draws_merged.fetch_add(merged_count - 1, std::memory_order_relaxed);
+        } else {
+          // Fall back to the first draw alone; the rest record normally.
+          command_recorded = RecordIndexedPrimitive(command_buffer, command, target.width,
+                                                    target.height, target, resources);
+        }
+      }
       trace_deferred_light_draw(command_recorded);
       if (collect_frame_diagnostics) {
         command_recorded ? ++successful_draws : ++failed_draws;
