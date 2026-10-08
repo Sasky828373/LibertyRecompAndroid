@@ -1827,6 +1827,20 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   NativeFlatSet<uintptr_t, CapacityPointerHash> capacity_vertex_versions_;
   NativeFlatSet<uintptr_t, CapacityPointerHash> capacity_pixel_versions_;
   std::vector<NativeCommand*> capacity_constant_commands_;
+  // Upper bound of the frame's constant arena use, accumulated by the render
+  // worker as it assembles draws (pipelined recording), so the recorder need
+  // not walk every command before recording. A version change between
+  // consecutive draws counts a new bank: versions never recur once replaced
+  // on one device, and interleaved devices only overcount.
+  struct NativeConstantBound {
+    VkDeviceSize bytes = 0;
+    size_t draws = 0;
+    const void* last_vertex = nullptr;
+    const void* last_pixel = nullptr;
+    bool valid = false;
+  };
+  NativeConstantBound assembly_constant_bound_;  // Render worker.
+  NativeConstantBound frame_constant_bound_;     // current_frame_'s, set at swap.
   uint64_t upload_on_demand_growths_ = 0;
   uint64_t upload_growths_at_last_plan_ = 0;
   uint32_t upload_frames_since_plan_ = 0;

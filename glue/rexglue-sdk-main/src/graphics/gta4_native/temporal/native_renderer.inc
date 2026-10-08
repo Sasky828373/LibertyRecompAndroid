@@ -95,14 +95,18 @@ bool Gta4NativeGraphicsSystem::PrepareTemporalFrame() {
   temporal_composite_source_ = nullptr;
   temporal_display_present_generation_ = 0;
   temporal_frame_prepared_ = temporal_active_ = temporal_resolved_ = temporal_encoded_ = false;
-  for (auto& command : current_frame_) {
-    command.temporal_scene_binding = nullptr;
-    command.temporal_scene_stage = UINT32_MAX;
-    command.temporal_prefilter.reset();
-    command.temporal_composite_mode = 0;
-  }
+  // One pass, and no stores into commands still at their defaults (every
+  // command of a frame without temporal output): dirtying each command's
+  // first line cost a cache-line transfer per draw.
   std::optional<TemporalCommand> scene;
-  for (const auto& command : current_frame_) {
+  for (auto& command : current_frame_) {
+    if (command.temporal_scene_binding || command.temporal_scene_stage != UINT32_MAX ||
+        command.temporal_prefilter || command.temporal_composite_mode) {
+      command.temporal_scene_binding = nullptr;
+      command.temporal_scene_stage = UINT32_MAX;
+      command.temporal_prefilter.reset();
+      command.temporal_composite_mode = 0;
+    }
     if (command.type != CommandType::kTemporalUpdate) continue;
     TemporalCommand candidate{};
     std::memcpy(&candidate, command.bytes.data(), sizeof(candidate));

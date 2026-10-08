@@ -212,6 +212,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_stamped_protection, true, "GTA IV/Graphics/Nativ
 REXCVAR_DEFINE_BOOL(gta4_native_buffer_validation_per_frame, true, "GTA IV/Graphics/Native Renderer",
                     "Check a clean vertex/index buffer's shadow copy against guest memory once per "
                     "frame, not on every draw that uses it");
+REXCVAR_DEFINE_BOOL(gta4_native_assembly_constant_bound, true, "GTA IV/Graphics/Native Renderer",
+                    "Size the frame's constant arena from counts kept while the worker assembles "
+                    "the frame, instead of walking every command before recording");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -6021,6 +6024,26 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
         std::lock_guard lock(worker_protection_mutex_);
         AddProtectedTextureGenerations(*owner, assembly_texture_protection_);
       }
+      {
+        const NativeCommand& assembled = *owner;
+        NativeConstantBound& bound = assembly_constant_bound_;
+        if ((assembled.type == CommandType::kDrawPrimitive ||
+             assembled.type == CommandType::kDrawPrimitiveUp ||
+             assembled.type == CommandType::kDrawIndexedPrimitive) &&
+            assembled.shader_state && assembled.shader_state->vertex_constants &&
+            assembled.shader_state->pixel_constants) {
+          ++bound.draws;
+          const void* vertex = assembled.shader_state->vertex_constants.get();
+          const void* pixel = assembled.shader_state->pixel_constants.get();
+          // Each allocation may be padded up to the arena alignment.
+          const VkDeviceSize padding = NativeConstantArenaAlignment();
+          if (vertex != bound.last_vertex) bound.bytes += kVertexConstantsSize + padding;
+          if (pixel != bound.last_pixel) bound.bytes += kPixelConstantsSize + padding;
+          bound.bytes += sizeof(NativeSharedConstants) + padding;
+          bound.last_vertex = vertex;
+          bound.last_pixel = pixel;
+        }
+      }
       assembly_frame_.push_back(std::move(owner));
     } else {
       if (protect) AddProtectedTextureGenerations(*owner, frame_texture_protection_);
@@ -6926,6 +6949,9 @@ void Gta4NativeGraphicsSystem::SwapAssemblyFrame() {
   // Only while the recorder is idle: current_frame_ and its protection belong
   // to the recorder otherwise.
   current_frame_.swap(assembly_frame_);
+  frame_constant_bound_ = assembly_constant_bound_;
+  frame_constant_bound_.valid = true;
+  assembly_constant_bound_ = {};
   std::lock_guard lock(worker_protection_mutex_);
   frame_texture_protection_.swap(assembly_texture_protection_);
   // The set now holding assembly may not contain what earlier stamps claim.
@@ -8668,10 +8694,21 @@ bool Gta4NativeGraphicsSystem::EnsureFrameConstantArenaCapacity() {
   size_t draw_count = 0;
   auto& texture_commands = capacity_constant_commands_;
   texture_commands.clear();
-  texture_commands.reserve(current_frame_.size());
-  for (auto& command : current_frame_) {
-    texture_commands.push_back(&command);
-    if (command.temporal_prefilter) texture_commands.push_back(command.temporal_prefilter.get());
+  // Temporal output adds prefilter draws on the recorder; the assembled bound
+  // does not know them, so those frames take the full walk.
+  const bool use_assembled_bound = pipelined_recording_ && frame_constant_bound_.valid &&
+                                   !temporal_frame_prepared_ &&
+                                   REXCVAR_GET(gta4_native_assembly_constant_bound);
+  if (use_assembled_bound) {
+    draw_count = frame_constant_bound_.draws;
+    if (frame_constant_bound_.bytes > maximum_capacity) overflow = true;
+    else required_capacity = frame_constant_bound_.bytes;
+  } else {
+    texture_commands.reserve(current_frame_.size());
+    for (auto& command : current_frame_) {
+      texture_commands.push_back(&command);
+      if (command.temporal_prefilter) texture_commands.push_back(command.temporal_prefilter.get());
+    }
   }
   for (const NativeCommand* command_pointer : texture_commands) {
     const NativeCommand& command = *command_pointer;
