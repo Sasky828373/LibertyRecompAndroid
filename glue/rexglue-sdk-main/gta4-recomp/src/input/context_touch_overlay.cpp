@@ -8,6 +8,7 @@
 #include <rex/ui/image_decode.h>
 
 #include "input/context_touch_settings.h"
+#include "input/gamepad_touch_overlay.h"
 
 namespace gta4::input {
 
@@ -61,6 +62,12 @@ bool ContextTouchOverlay::ResolveIcon(void* context, std::string_view id, Contex
 
 void ContextTouchOverlay::OnDraw(ImGuiIO& io) {
   (void)FlushContextTouchSettings();
+  if (GamepadTouchLayoutSelected()) {
+    repaint_needed_ = UpdateAndDrawGamepadTouchOverlay(
+        ImGui::GetForegroundDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), io.DisplaySize.x,
+        io.DisplaySize.y);
+    return;
+  }
   const auto snapshot = GetContextTouchDrawableOverlaySnapshot();
   repaint_needed_ = snapshot.visible && snapshot.layout.mode != ContextTouchMode::kFrontend &&
                     snapshot.layout.mode != ContextTouchMode::kMap;

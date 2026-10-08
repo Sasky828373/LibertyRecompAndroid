@@ -129,9 +129,8 @@ to the running game, not to the launcher.
 - **The first minutes are slower.** Shaders are compiled the first time they are needed, so you
   will see some hitches. They are cached in `shader_cache/` and stay smooth on later runs.
 - **Controls.** An XInput (Xbox-layout) gamepad is strongly recommended: the built-in controls
-  of a handheld, or an Xbox controller over Bluetooth or USB. The on-screen touch controls appear
-  only when no controller is connected, and they are untested on Android (see
-  [Controls](../../README.md#controls)).
+  of a handheld, or an Xbox controller over Bluetooth or USB. Without a controller, an on-screen
+  Xbox gamepad appears instead (see [Controls](../../README.md#controls)).
 
 ## Upgrading to a newer version
 

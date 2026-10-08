@@ -28,12 +28,13 @@
 #include "input/context_touch_activity.h"
 #include "input/context_touch_fade.h"
 #include "input/context_touch_settings.h"
+#include "input/gamepad_touch_overlay.h"
 
 REXCVAR_DECLARE(bool, gta4_touch_trace);
 
 namespace gta4::input {
 bool ContextTouchHudLayoutActive() noexcept {
-  return GetContextTouchDrawableOverlaySnapshot().visible ||
+  return GamepadTouchOverlayVisible() || GetContextTouchDrawableOverlaySnapshot().visible ||
          GetContextTouchOverlaySnapshot().visible || IsContextTouchEditorActive();
 }
 
@@ -1282,6 +1283,7 @@ void OnControlReplay(PPCContext&, uint8_t* base, uint32_t control, uint32_t, uin
 
 bool NativePadProvider(uint32_t user, rex::input::X_INPUT_GAMEPAD* output) noexcept {
   if (!output) return false;
+  if (GamepadTouchLayoutSelected()) return ReadGamepadTouchOverlay(user, output);
   const bool owned = GTA4_TouchTitleInputOwned();
   const bool active = rex::input::TouchControlsActive();
   std::lock_guard lock(g_runtime.mutex);

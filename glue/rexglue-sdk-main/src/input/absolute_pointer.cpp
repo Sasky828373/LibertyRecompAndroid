@@ -18,6 +18,12 @@
 
 REXCVAR_DEFINE_STRING(touch_controls, "auto", "Input/Touch", "Touch controls: auto, on, or off")
     .allowed({"auto", "on", "off"});
+// Handhelds report their built-in buttons as a keyboard and a mouse (the
+// Retroid Pocket's "Virtual Mouse", gpio-keys with a mouse source), which in
+// auto mode would hide the touch controls even with no controller attached.
+REXCVAR_DEFINE_BOOL(touch_controls_controller_only, REX_PLATFORM_ANDROID != 0, "Input/Touch",
+                    "Auto mode: only a game controller hides the touch controls; keyboards and "
+                    "mice are ignored");
 
 namespace rex::input {
 
@@ -281,6 +287,7 @@ bool AbsolutePointerService::TouchControlsVisible(TouchControlsMode mode) const 
   if (android_keyboard_presence_valid_) keyboard = android_physical_keyboard_present_;
   if (android_mouse_presence_valid_) mouse = android_physical_mouse_present_;
 #endif
+  if (REXCVAR_GET(touch_controls_controller_only)) keyboard = mouse = false;
   return ShouldEnableTouchControls(mode, !game_controllers_.empty(), keyboard, focused_,
                                    mouse);
 }
@@ -667,8 +674,10 @@ bool AbsolutePointerService::TouchControlsActive(TouchControlsMode mode) noexcep
   const size_t mouse_count = physical_mice_.size();
 #endif
   const size_t controller_count = game_controllers_.size();
-  const bool active =
-      ShouldEnableTouchControls(mode, controller_count != 0, keyboard_count != 0, focused_, mouse_count != 0);
+  const bool controller_only = REXCVAR_GET(touch_controls_controller_only);
+  const bool active = ShouldEnableTouchControls(mode, controller_count != 0,
+                                                !controller_only && keyboard_count != 0, focused_,
+                                                !controller_only && mouse_count != 0);
   if (policy_log_initialized_ && logged_touch_active_ != active && !active_pointers_.empty()) {
     // A policy transition must not allow a gesture that began while disabled
     // to reappear as an ownerless Move after controls are enabled (or leave a

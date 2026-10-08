@@ -57,7 +57,8 @@ Known problems:
   light volumes are missing as a result.
 - The episodes (The Lost and Damned, The Ballad of Gay Tony) and online multiplayer have not been
   tested on Android.
-- The on-screen touch controls have not been tested on Android (see [Controls](#controls)).
+- The on-screen gamepad is new (0.5.7.2) and has only been tried on the Retroid Pocket 5 so far
+  (see [Controls](#controls)).
 
 ## Device requirements
 
@@ -108,14 +109,26 @@ one. Other controllers that Android recognizes (DualShock, DualSense, Switch Pro
 work through SDL. Their buttons are mapped by position, though, and they have seen much less
 testing.
 
-**On-screen touch controls: present, but untested on Android.** Upstream Liberty Recompiled has a
-context-sensitive touch overlay whose buttons change between on foot, driving, the phone and so on.
-In its default `auto` mode, the overlay appears only when **no** gamepad, keyboard or mouse is
-connected. Every handheld this port was developed on has a built-in gamepad, so the overlay has
-never been shown or tuned on Android. On a phone without a controller it should appear on its own.
-Expect rough edges, and treat it as a fallback rather than a way to play the game. Control it with
-`--touch_controls=auto|on|off` in `args.txt` (see [ADVANCED.md](docs/android/ADVANCED.md)) or with
-the touch controls option in the game's settings menu.
+**On-screen gamepad (0.5.7.2 and newer).** Without a controller, the game shows a translucent
+Xbox 360 controller on the screen. It disappears as soon as a gamepad is connected, and comes back
+when it is disconnected.
+
+![The on-screen gamepad](docs/android/images/touch_gamepad.png)
+
+- **Left stick:** touch anywhere on the left half of the screen (outside the buttons). The stick
+  centres where your thumb lands.
+- **Right stick (camera):** touch anywhere on the right half of the screen. It works like a
+  controller's right stick.
+- **Buttons:** A/B/X/Y lower right, D-pad next to the left stick, LT/LB above the left stick, RT/RB
+  on the right, L3/R3 next to the bumpers, Back/Start at the top. Several fingers work at once.
+- **Menus** are driven with the same buttons, as on a controller.
+
+Settings in `args.txt` (see [ADVANCED.md](docs/android/ADVANCED.md#other-useful-settings)):
+
+- `--touch_controls=auto|on|off`. `auto` shows the overlay whenever no gamepad is connected, `on`
+  always shows it, `off` never does.
+- `--gta4_touch_layout=context` brings back upstream's context-sensitive touch layout instead of
+  the gamepad.
 
 ## Game files required
 
