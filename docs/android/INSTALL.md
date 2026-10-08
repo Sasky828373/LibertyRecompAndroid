@@ -108,4 +108,6 @@ saves.
 | The installer shows **Not selected** | The files are not directly inside `files/install/`, or the disc image does not end in `.iso`. |
 | The installer rejects the title update | It must be TU8 for the **USA** release (0.0.8.5). The PAL update (0.0.8.6) is not accepted. |
 | Black screen or a crash after changing settings | Delete `args.txt` (defaults come back) and `live_cvars.txt` if you used it. |
-| Something else | Collect a log as described in [ADVANCED.md](ADVANCED.md#logs). |
+| Something else | Collect a log as described in [ADVANCED.md](ADVANCED.md#logs) and open an issue on the [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues) page. |
+
+Questions, bugs and feedback all go to [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues). Mention your device, the Android version and the port version.

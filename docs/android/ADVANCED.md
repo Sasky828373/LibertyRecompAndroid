@@ -214,7 +214,8 @@ need **both** of these lines in `args.txt`:
 > Add or remove these two lines together.
 
 Crashes are logged by Android's `DEBUG` tag with a native backtrace. The runtime also writes its
-own log files to `files/Liberty Recompiled/logs/`. Include both when you report a problem, along with the
+own log files to `files/Liberty Recompiled/logs/`. Include both when you report a problem on the
+[Issues](https://github.com/vaduur/LibertyRecompAndroid/issues) page, along with the
 device model, the Android version and your `args.txt`.
 
 ## Measuring performance
