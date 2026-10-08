@@ -35,8 +35,8 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_NDK=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
           test -d "$ANDROID_HOME/ndk/29.0.14206865" || { echo "NDK r29 missing"; exit 1; }
-      - name: Cache native build and host tools
-        uses: actions/cache@v4
+      - name: Restore native build cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             out/build/android-arm64
@@ -56,6 +56,16 @@ jobs:
         run: |
           rm -f os/android/app/build/outputs/apk/debug/app-debug.apk
           bash os/android/scripts/build_apk.sh
+      - name: Save native build cache even on failure
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            out/build/android-arm64
+            out/build/android-driver-proxy
+            out/host-tools
+            glue/rexglue-sdk-main/out/linux-arm64
+          key: gta4-android-native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'os/android/native/CMakeLists.txt', 'os/android/scripts/*.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
