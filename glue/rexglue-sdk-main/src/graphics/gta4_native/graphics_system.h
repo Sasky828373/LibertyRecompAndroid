@@ -1837,6 +1837,11 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     size_t draws = 0;
     const void* last_vertex = nullptr;
     const void* last_pixel = nullptr;
+    // PrepareFrameTextures' descriptor pool sizing inputs.
+    uint32_t all_draws = 0;  // Including draws without constant state.
+    uint32_t resolves = 0;
+    uint32_t depth_handoffs = 0;
+    std::vector<uint64_t> packed_alias_generations;  // Distinct.
     bool valid = false;
   };
   NativeConstantBound assembly_constant_bound_;  // Render worker.

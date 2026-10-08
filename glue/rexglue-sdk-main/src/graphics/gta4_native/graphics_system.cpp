@@ -6027,6 +6027,18 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
       {
         const NativeCommand& assembled = *owner;
         NativeConstantBound& bound = assembly_constant_bound_;
+        if (assembled.type == CommandType::kDrawPrimitive ||
+            assembled.type == CommandType::kDrawPrimitiveUp ||
+            assembled.type == CommandType::kDrawIndexedPrimitive) ++bound.all_draws;
+        else if (assembled.type == CommandType::kResolve) ++bound.resolves;
+        else if (assembled.type == CommandType::kDepthSurfaceHandoff) ++bound.depth_handoffs;
+        for (const auto& texture : assembled.textures) {
+          if (texture && texture->packed_depth_source &&
+              std::find(bound.packed_alias_generations.begin(), bound.packed_alias_generations.end(),
+                        texture->generation) == bound.packed_alias_generations.end()) {
+            bound.packed_alias_generations.push_back(texture->generation);
+          }
+        }
         if ((assembled.type == CommandType::kDrawPrimitive ||
              assembled.type == CommandType::kDrawPrimitiveUp ||
              assembled.type == CommandType::kDrawIndexedPrimitive) &&
@@ -6949,7 +6961,7 @@ void Gta4NativeGraphicsSystem::SwapAssemblyFrame() {
   // Only while the recorder is idle: current_frame_ and its protection belong
   // to the recorder otherwise.
   current_frame_.swap(assembly_frame_);
-  frame_constant_bound_ = assembly_constant_bound_;
+  frame_constant_bound_ = std::move(assembly_constant_bound_);
   frame_constant_bound_.valid = true;
   assembly_constant_bound_ = {};
   std::lock_guard lock(worker_protection_mutex_);
@@ -18367,25 +18379,39 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
   std::unordered_set<uint64_t> packed_alias_generations;
   std::vector<NativeCommand*> texture_commands;
   texture_commands.reserve(current_frame_.size());
-  for (auto& command : current_frame_) {
-    texture_commands.push_back(&command);
-    if (command.temporal_prefilter) texture_commands.push_back(command.temporal_prefilter.get());
-  }
-  for (const NativeCommand* command_pointer : texture_commands) {
-    const NativeCommand& command = *command_pointer;
-    for (const auto& texture : command.textures) {
-      if (texture && texture->packed_depth_source) {
-        packed_alias_generations.insert(texture->generation);
-      }
+  // The worker counted these while assembling; temporal prefilter draws are
+  // added later on this thread, so frames with temporal output still walk.
+  const bool use_assembled_counts = pipelined_recording_ && frame_constant_bound_.valid &&
+                                    !temporal_frame_prepared_ &&
+                                    REXCVAR_GET(gta4_native_assembly_constant_bound);
+  if (use_assembled_counts) {
+    for (auto& command : current_frame_) texture_commands.push_back(&command);
+    draw_count = frame_constant_bound_.all_draws;
+    resolve_count = frame_constant_bound_.resolves;
+    depth_handoff_count = frame_constant_bound_.depth_handoffs;
+    packed_alias_generations.insert(frame_constant_bound_.packed_alias_generations.begin(),
+                                    frame_constant_bound_.packed_alias_generations.end());
+  } else {
+    for (auto& command : current_frame_) {
+      texture_commands.push_back(&command);
+      if (command.temporal_prefilter) texture_commands.push_back(command.temporal_prefilter.get());
     }
-    if (command.type == CommandType::kDrawPrimitive ||
-        command.type == CommandType::kDrawPrimitiveUp ||
-        command.type == CommandType::kDrawIndexedPrimitive) {
-      ++draw_count;
-    } else if (command.type == CommandType::kResolve) {
-      ++resolve_count;
-    } else if (command.type == CommandType::kDepthSurfaceHandoff) {
-      ++depth_handoff_count;
+    for (const NativeCommand* command_pointer : texture_commands) {
+      const NativeCommand& command = *command_pointer;
+      for (const auto& texture : command.textures) {
+        if (texture && texture->packed_depth_source) {
+          packed_alias_generations.insert(texture->generation);
+        }
+      }
+      if (command.type == CommandType::kDrawPrimitive ||
+          command.type == CommandType::kDrawPrimitiveUp ||
+          command.type == CommandType::kDrawIndexedPrimitive) {
+        ++draw_count;
+      } else if (command.type == CommandType::kResolve) {
+        ++resolve_count;
+      } else if (command.type == CommandType::kDepthSurfaceHandoff) {
+        ++depth_handoff_count;
+      }
     }
   }
   uint32_t combined_descriptor_count = resolve_count + depth_handoff_count;
