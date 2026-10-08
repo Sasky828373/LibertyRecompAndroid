@@ -21,8 +21,10 @@ The MD5 and SHA-1 hashes of the tested files are listed in the
 
 ## 2. Launch once to create the app folder
 
-Start the app once. It creates its data folder and shows the installer. Close the app for now.
-The **Select File / Select Folder** buttons do not work on Android (see the note below).
+Start the app once. It creates its data folder. On 0.5.6.3 and newer it opens on the
+[launcher](#the-launcher-0563-and-newer), which shows where the files go. Older versions go
+straight to the installer. Close the app for now. The installer's **Select File / Select Folder**
+buttons do not work on Android (see the note below).
 
 The app keeps everything in its own external data folder, so it needs no storage permission:
 
@@ -59,8 +61,9 @@ Ways to copy:
 
 ## 4. Launch and install
 
-Start the app again. It finds the files in `install/`, fills in **Base game** and
-**Title update v8**, checks the disc and starts the installation by itself. Installation takes
+Start the app again, and press **Play** on the launcher (0.5.6.3 and newer). It finds the files
+in `install/`, fills in **Base game** and **Title update v8**, checks the disc and starts the
+installation by itself. Installation takes
 several minutes. Leave the screen on and the app in the foreground until it finishes.
 
 This is the installer as it looks before any source is selected:
@@ -77,6 +80,27 @@ The game files are installed to the folder shown at the bottom
 > add `--install_game_source=/full/path/to/game.iso` and `--install_update_source=/full/path/to/update`
 > to `args.txt`. The app needs read access to that location, and `Android/data` of this app always
 > works.
+
+## The launcher (0.5.6.3 and newer)
+
+![The launcher](images/launcher.png)
+
+The app always opens on this screen:
+
+- **Status.** Whether the game is installed. If it is not, the screen says whether the disc image
+  and the title update were found in `install/`. If the last start failed, the reason is shown.
+- **Play** starts the game (the **Start** button on a gamepad does the same). It always starts a
+  fresh game process with the driver selected on the right, so a driver change always applies.
+  If you leave the game with the Home button, the app icon takes you back to the running game,
+  not to the launcher.
+- **Vulkan driver.** Choose the bundled Turnip (default), the device's own driver, or a driver you
+  imported. **Import driver (.zip)** opens the system file picker. Pick an AdrenoTools/Turnip
+  driver zip (a `.so` and usually a `meta.json`), and it is unpacked, added to the list and
+  selected. **Remove** deletes an imported driver. The choice is saved in `driver.txt` (see
+  [ADVANCED.md](ADVANCED.md#driver-selection-drivertxt)).
+
+Gamepad: the D-pad moves between the controls, **A** selects, **B** closes the app and **Start**
+plays.
 
 ## 5. After the installation
 

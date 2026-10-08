@@ -42,7 +42,8 @@ STRIP=1 bash os/android/scripts/build_native.sh
 rm -f os/android/app/build/outputs/apk/debug/app-debug.apk
 bash os/android/scripts/build_apk.sh
 
-# 5. Install on the connected device and launch it
+# 5. Install on the connected device and start the game
+#    (through the launcher with "--ez play true", which presses Play at once)
 bash os/android/scripts/install.sh
 ```
 

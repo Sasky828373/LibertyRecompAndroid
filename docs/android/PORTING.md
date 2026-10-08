@@ -51,6 +51,13 @@ at 2.84 GHz, 3× A77, 4× A55), an Adreno 650, 8 GB of RAM and Android 13.
     whenever the APK changes;
   - it reads `args.txt` (created from `assets/default_args.txt` on the first launch), `env.txt`,
     `driver.txt` and `--android_surface=WxH`.
+- **Launcher** (`LauncherActivity`, 0.5.6.3). A plain Android screen in the main process shows
+  the game status, offers the Vulkan driver choice (bundled Turnip, system or imported zips, saved
+  to `driver.txt`) and starts the game. The driver must be chosen before any native code loads,
+  and the driver proxy is set up once per process, so the game activity runs in its own process
+  (`:game`). Play ends a game process left over from an earlier session before starting a new one.
+  A launcher opened from the app icon over a running game closes at once, so the icon returns to
+  the game.
 - **Installer.** The SDL file picker returns `content://` URIs, which the installer cannot open.
   The activity therefore takes the disc image and the title update from `files/install/` and
   passes them as `--install_game_source` / `--install_update_source`. The install dialog gained
@@ -236,6 +243,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.6 | Shadow fix (console range and map size), indexed draw merging, second crash guard, native 720p defaults |
 | 0.5.6.1 | First public release: documentation, no debug shader dumps in the data folder |
 | 0.5.6.2 | System-driver fallback when Turnip cannot drive the GPU, an error dialog instead of a silent exit, `last_launch.txt` report, settings files tolerate a byte-order mark |
+| 0.5.6.3 | Launcher screen with Play and a Vulkan driver picker that imports driver zips; the game runs in its own process so the chosen driver always applies |
 
 ## 7. What is left
 

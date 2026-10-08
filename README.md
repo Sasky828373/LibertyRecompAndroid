@@ -135,6 +135,8 @@ console and disc.
 ## Quick start
 
 1. Install `LibertyRecompAndroid-*.apk` from the [Releases](../../releases) page, launch it once, then close it.
+   Since 0.5.6.3 the app opens on a launcher screen with the game status, the Vulkan driver choice
+   and a **Play** button (see [INSTALL.md](docs/android/INSTALL.md#the-launcher-0563-and-newer)).
 2. Copy your disc image (`*.iso`) and the Title Update 8 file into
    `Android/data/com.libertyrecomp/files/install/`. A PC over USB is the easiest way.
    The tested files ([details](#game-files-required)):
@@ -142,7 +144,8 @@ console and disc.
    - TU8: `TU_1A581VI_000000K000000.0000000000205`, MD5 `f041b5f6721d7ee578560bac21668826`
 
    The file names do not matter, as long as the disc image ends in `.iso`.
-3. Launch the app again. The installer picks up both files and installs the game by itself.
+3. Launch the app again (and press **Play** on 0.5.6.3 and newer). The installer picks up both
+   files and installs the game by itself.
 
 This is the installer screen on the first launch:
 

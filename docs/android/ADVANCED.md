@@ -157,7 +157,9 @@ The game needs Vulkan 1.2. The APK bundles a Mesa Turnip build (StevenMXZ 26.3.0
 Adreno 6xx/7xx) and loads it through libadrenotools. Without root, this replaces the system driver
 for this app only.
 
-`driver.txt` holds a single line:
+Since 0.5.6.3 the driver is chosen on the [launcher](INSTALL.md#the-launcher-0563-and-newer)
+screen, which also imports driver zips. The launcher writes your choice to `driver.txt`, and the
+file can still be edited by hand. It holds a single line:
 
 | Content | Driver |
 |---|---|
@@ -166,8 +168,9 @@ for this app only.
 | `custom:NAME` | A driver package you provide in `files/drivers/NAME/`. |
 
 A custom driver package is a folder with the driver library (`.so`) and, optionally, the
-`meta.json` of an AdrenoTools/Turnip release zip. Unpack the zip into `files/drivers/NAME/` and put
-`custom:NAME` in `driver.txt`. If `meta.json` names a `libraryName`, that library is used.
+`meta.json` of an AdrenoTools/Turnip release zip. **Import driver (.zip)** on the launcher does the
+unpacking. By hand, unpack the zip into `files/drivers/NAME/` and put `custom:NAME` in
+`driver.txt`. If `meta.json` names a `libraryName`, that library is used.
 Otherwise the folder must contain exactly one `.so`.
 
 If the bundled Turnip or a custom driver fails to load, the app falls back to the system driver

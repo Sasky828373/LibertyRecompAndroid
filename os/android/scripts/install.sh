@@ -18,5 +18,5 @@ adbs install -r -g "$(winpath "$APK")"
 if [ "$LAUNCH" = "1" ]; then
   adbs shell am force-stop "$PKG"
   adbs logcat -c
-  adbs shell am start -n "$ACTIVITY"
+  adbs shell am start -n "$ACTIVITY" --ez play true
 fi

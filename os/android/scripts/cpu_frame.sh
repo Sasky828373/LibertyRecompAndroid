@@ -5,7 +5,7 @@
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 SECS="${1:-10}"
-PID=$(adbs shell pidof "$PKG" | tr -d '\r')
+PID=$(adbs shell pidof "$GAME_PROC" | tr -d '\r')
 [ -n "$PID" ] || { echo "game not running"; exit 1; }
 LAYER=$(adbs shell dumpsys SurfaceFlinger --list | tr -d '\r' | grep -E "^SurfaceView\[$PKG/.*\(BLAST\)" | head -1)
 snap() {

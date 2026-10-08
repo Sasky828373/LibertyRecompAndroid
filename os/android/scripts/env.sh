@@ -40,7 +40,10 @@ export JNILIBS="$APP_DIR/app/src/main/jniLibs/arm64-v8a"
 export ASSETS="$APP_DIR/app/src/main/assets"
 
 export PKG="${PKG:-com.libertyrecomp}"
-export ACTIVITY="${ACTIVITY:-$PKG/.LibertyActivity}"
+# The launcher; "--ez play true" makes it start the game at once.
+export ACTIVITY="${ACTIVITY:-$PKG/.LauncherActivity}"
+# The game runs in its own process.
+export GAME_PROC="$PKG:game"
 export FILES="/sdcard/Android/data/$PKG/files"
 export GAME_DIR="$FILES/LibertyRecomp/game"
 

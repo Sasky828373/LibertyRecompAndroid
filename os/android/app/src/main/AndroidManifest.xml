@@ -30,11 +30,30 @@
         <!-- Lets `adb shell simpleperf` sample this process. -->
         <profileable android:shell="true" />
 
+        <!-- The first screen: game status, Vulkan driver choice, Play. The
+             driver must be chosen before the game loads native code, so it
+             is a plain Android screen in the main process. -->
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="true"
+            android:theme="@style/LauncherTheme"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- singleTask: relaunching over a live session would abandon the
-             SurfaceView the running SDL thread still holds. -->
+             SurfaceView the running SDL thread still holds. The game runs in
+             its own process so every Play starts it with the chosen driver
+             (the driver proxy is set up once per process). -->
         <activity
             android:name=".LibertyActivity"
-            android:exported="true"
+            android:exported="false"
+            android:process=":game"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"
             android:resizeableActivity="false"
@@ -54,11 +73,6 @@
             <meta-data
                 android:name="SDL_ENV.SDL_JOYSTICK_HIDAPI"
                 android:value="0" />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-            </intent-filter>
         </activity>
     </application>
 </manifest>
