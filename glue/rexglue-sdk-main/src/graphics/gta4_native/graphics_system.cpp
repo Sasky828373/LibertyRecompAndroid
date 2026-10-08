@@ -249,6 +249,13 @@ REXCVAR_DEFINE_UINT32(gta4_native_debug_gpu_attribution, 0, "GTA IV/Graphics/Nat
 REXCVAR_DEFINE_BOOL(gta4_native_merge_indexed_draws, true, "GTA IV/Graphics/Native Renderer",
                     "Record consecutive indexed triangle-list draws with identical state and "
                     "adjacent index ranges as one draw");
+REXCVAR_DEFINE_DOUBLE(gta4_native_depth_bias_constant_scale, 1.0, "GTA IV/Graphics/Native Renderer",
+                      "Multiplier on the converted constant depth bias (diagnostics)");
+REXCVAR_DEFINE_DOUBLE(gta4_native_depth_bias_slope_scale, 1.0, "GTA IV/Graphics/Native Renderer",
+                      "Multiplier on the converted slope-scaled depth bias (diagnostics)");
+REXCVAR_DEFINE_UINT32(gta4_native_debug_force_depth_clamp, 0, "GTA IV/Graphics/Native Renderer",
+                      "Diagnostics: force depth clamp on draws without color targets (1) or all draws (2)")
+    .range(0, 2);
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -6775,6 +6782,10 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                                                   stencil_volume_state)
                   ? 1u
                   : 0u;
+          const uint32_t forced_clamp = REXCVAR_GET(gta4_native_debug_force_depth_clamp);
+          if (forced_clamp == 2 || (forced_clamp == 1 && !active_color_target_mask)) {
+            fixed.depth_clamp_enable = 1u;
+          }
         }
         if (command.type == CommandType::kDrawPrimitive ||
             command.type == CommandType::kDrawPrimitiveUp ||
@@ -6922,10 +6933,12 @@ void Gta4NativeGraphicsSystem::ApplyFpsGuardLevel(uint32_t level) {
   };
   static constexpr Step kSteps[] = {
       // The water reflection stays per frame: a stale one is visible at once.
-      {"1", "1", "1.0"},   // full quality
-      {"1", "1", "0.5"},   // half shadow distance
-      {"1", "1", "0.35"},  // shorter shadows
-      {"1", "2", "0.35"},  // + environment reflection every other frame
+      // Shorter shadow ranges break vehicle and ped shadows, so the guard no
+      // longer touches them; only the environment reflection rate remains.
+      {"1", "1", "1.0"},  // full quality
+      {"1", "2", "1.0"},  // environment reflection every other frame
+      {"1", "2", "1.0"},
+      {"1", "2", "1.0"},
   };
   const Step& step = kSteps[std::min<uint32_t>(level, 3)];
   rex::cvar::SetFlagByName("gta4_native_water_reflection_interval", step.water);
@@ -22452,10 +22465,12 @@ bool Gta4NativeGraphicsSystem::BindCommonDrawState(
     }
   }
   const float depth_bias_constant =
-      std::bit_cast<float>(fixed.depth_bias_bits) * draw_util::kD3D10PolygonOffsetFactorFloat24;
+      std::bit_cast<float>(fixed.depth_bias_bits) * draw_util::kD3D10PolygonOffsetFactorFloat24 *
+      float(REXCVAR_GET(gta4_native_depth_bias_constant_scale));
   const float depth_bias_slope = std::bit_cast<float>(fixed.slope_scaled_depth_bias_bits) *
                                  xenos::kPolygonOffsetScaleSubpixelUnit *
-                                 NativeResolutionDepthBiasScale(viewport_scale_x, viewport_scale_y);
+                                 NativeResolutionDepthBiasScale(viewport_scale_x, viewport_scale_y) *
+                                 float(REXCVAR_GET(gta4_native_depth_bias_slope_scale));
   if (native_draw_state_cache_.UpdateDepthBias(
           {std::bit_cast<uint32_t>(depth_bias_constant), std::bit_cast<uint32_t>(0.0f),
            std::bit_cast<uint32_t>(depth_bias_slope)})) {

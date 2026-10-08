@@ -6,7 +6,7 @@
 --gta4_dynamic_draw_distance=true
 --gta4_dynamic_draw_distance_min=0.75
 --gta4_shadow_map_base_size=256
---gta4_shadow_distance_scale=0.5
+--gta4_shadow_distance_scale=1.0
 --gta4_reflection_resolution=original
 --gta4_reflection_capture_distance=near
 --gta4_frame_limit=30
@@ -22,5 +22,5 @@
 --gta4_output_height_cap=1080
 # 30 FPS with VSync: 30 divides the 60 Hz panel evenly.
 --gta4_present_mode=vsync
-# The 30 FPS guard shortens shadows near the budget; off by default.
+# The 30 FPS guard (environment reflection rate only now) is off by default.
 --gta4_fps_guard=0

@@ -2698,8 +2698,11 @@ SupersampledExtent GetNativePrimaryPhysicalExtent(uint32_t logical_width, uint32
 }
 
 void ApplyShadowDistanceScale(uint8_t* base) {
-  const double configured_scale =
-      REXCVAR_GET(gta4_shadow_distance_scale) * REXCVAR_GET(gta4_shadow_distance_guard_factor);
+  // Below the stock range the shadow volume no longer contains tall nearby
+  // casters: vehicle and ped shadows sink into the ground, leaving a sliver
+  // under the body. Only longer ranges are allowed.
+  const double configured_scale = std::max(
+      1.0, REXCVAR_GET(gta4_shadow_distance_scale) * REXCVAR_GET(gta4_shadow_distance_guard_factor));
   static std::mutex shadow_range_mutex;
   static bool originals_captured = false;
   static std::array<float, kNativeShadowContextCount> original_ranges{};
@@ -5286,6 +5289,93 @@ extern "C" void sub_82A3B540(PPCContext& ctx, uint8_t* base) {
   StoreU32(base, device + 10440, packed_bottom_right);
 }
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define SHADOW_TRACE(...)   __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "%s", fmt::format(__VA_ARGS__).c_str())
+#else
+#define SHADOW_TRACE(...) REXLOG_WARN(__VA_ARGS__)
+#endif
+// Diagnostics: how the six render targets made by the shadow initializer
+// (sub_82270A08) are bound, cleared, resolved and sampled, for N frames.
+REXCVAR_DEFINE_UINT32(gta4_trace_shadow_targets, 0, "GTA IV/Diagnostics",
+                      "Log binds, clears, resolves and samples of the shadow render targets "
+                      "for this many frames (change the value to trace again)")
+    .range(0, 8);
+
+namespace {
+// Globals written by sub_82270A08 with each created render target (8Bx8B
+// color, 4BxB color, 5Bx5B depth, 5Bx5B color, BxB depth, BxB color).
+constexpr std::array<uint32_t, 6> kShadowTargetGlobals = {0x82C58D48, 0x82C58D44, 0x82C58D5C,
+                                                          0x82C58D60, 0x82C58D58, 0x82C58D54};
+constexpr std::array<const char*, 6> kShadowTargetNames = {"8Bx8B", "4BxB", "5B-depth",
+                                                           "5B-color", "B-depth", "B-color"};
+uint32_t g_shadow_trace_value = 0;
+uint32_t g_shadow_trace_start = 0;
+
+int ShadowTargetIndex(uint8_t* base, uint32_t handle, bool texture) {
+  if (!handle) return -1;
+  for (size_t i = 0; i < kShadowTargetGlobals.size(); ++i) {
+    const uint32_t wrapper = LoadU32(base, kShadowTargetGlobals[i]);
+    if (!wrapper) continue;
+    const uint32_t object = LoadU32(base, wrapper + (texture ? 72 : 64));
+    if (object == handle) return int(i);
+  }
+  return -1;
+}
+
+std::string ShadowTargetFetch(uint8_t* base, uint32_t texture) {
+  if (!texture) return "-";
+  return fmt::format("{:08X},{:08X},{:08X},{:08X},{:08X},{:08X}", LoadU32(base, texture + 28),
+                     LoadU32(base, texture + 32), LoadU32(base, texture + 36),
+                     LoadU32(base, texture + 40), LoadU32(base, texture + 44),
+                     LoadU32(base, texture + 48));
+}
+
+bool ShadowTraceActive(uint8_t* base) {
+  const uint32_t frames = REXCVAR_GET(gta4_trace_shadow_targets);
+  static std::atomic<uint32_t> heartbeat{0};
+  if ((heartbeat.fetch_add(1, std::memory_order_relaxed) & 0x3FFF) == 0) {
+    SHADOW_TRACE("shadow-trace: heartbeat value={} frame={}", frames,
+                 GetNativeLightSubmittedFrame(base));
+  }
+  if (!frames) {
+    g_shadow_trace_value = 0;
+    return false;
+  }
+  const uint32_t frame = GetNativeLightSubmittedFrame(base);
+  if (g_shadow_trace_value != frames) {
+    g_shadow_trace_value = frames;
+    g_shadow_trace_start = frame;
+    for (size_t i = 0; i < kShadowTargetGlobals.size(); ++i) {
+      const uint32_t wrapper = LoadU32(base, kShadowTargetGlobals[i]);
+      const uint32_t surface = wrapper ? LoadU32(base, wrapper + 64) : 0;
+      const uint32_t texture = wrapper ? LoadU32(base, wrapper + 72) : 0;
+      const SurfaceDescriptor d = CaptureSurfaceDescriptor(base, surface);
+      SHADOW_TRACE(
+          "shadow-trace: target={} {} wrapper={:08X} surface={:08X} flags={:08X} base={:08X} "
+          "address={:08X} format={:08X} size={}x{} samples={} texture={:08X} fetch={}",
+          i, kShadowTargetNames[i], wrapper, surface, d.flags, d.base, d.address, d.format,
+          d.width, d.height, d.sample_type, texture, ShadowTargetFetch(base, texture));
+    }
+  }
+  return frame - g_shadow_trace_start < frames;
+}
+
+int ShadowBoundTarget(uint8_t* base, uint32_t device, uint32_t* slot = nullptr) {
+  for (uint32_t index = 0; index < 4; ++index) {
+    const int target =
+        ShadowTargetIndex(base, LoadU32(base, device + (kRenderTargetBase + index) * 4), false);
+    if (target >= 0) {
+      if (slot) *slot = index;
+      return target;
+    }
+  }
+  const int depth = ShadowTargetIndex(base, LoadU32(base, device + kDepthStencilOffset), false);
+  if (depth >= 0 && slot) *slot = 4;
+  return depth;
+}
+}  // namespace
+
 extern "C" void sub_82A3BF50(PPCContext& ctx, uint8_t* base) {
   if (!IsNativeMode()) {
     __imp__sub_82A3BF50(ctx, base);
@@ -5299,6 +5389,16 @@ extern "C" void sub_82A3BF50(PPCContext& ctx, uint8_t* base) {
   command.device = device;
   command.index = index;
   command.surface = CaptureSurfaceDescriptor(base, surface);
+  if (ShadowTraceActive(base)) {
+    const int target = ShadowTargetIndex(base, surface, false);
+    if (target >= 0 || index == 0) {
+      SHADOW_TRACE("shadow-trace: frame={} bind-rt index={} surface={:08X} target={} base={:08X} "
+                  "size={}x{} format={:08X} caller={:08X}",
+                  GetNativeLightSubmittedFrame(base), index, surface, target, command.surface.base,
+                  command.surface.width, command.surface.height, command.surface.format,
+                  uint32_t(ctx.lr));
+    }
+  }
   SubmitNativeCommand(command);
 }
 
@@ -5355,6 +5455,13 @@ extern "C" void sub_82A3C2B8(PPCContext& ctx, uint8_t* base) {
   command.surface = CaptureSurfaceDescriptor(base, surface);
   command.trace_wrapper = surface;
   command.trace_caller = uint32_t(ctx.lr);
+  if (ShadowTraceActive(base)) {
+    SHADOW_TRACE("shadow-trace: frame={} bind-depth surface={:08X} target={} base={:08X} "
+                "size={}x{} caller={:08X}",
+                GetNativeLightSubmittedFrame(base), surface, ShadowTargetIndex(base, surface, false),
+                command.surface.base, command.surface.width, command.surface.height,
+                uint32_t(ctx.lr));
+  }
   SubmitNativeCommand(command);
 }
 
@@ -5650,6 +5757,15 @@ extern "C" void sub_82A44B78(PPCContext& ctx, uint8_t* base) {
   command.stage = stage;
   command.texture = texture;
   command.vector_font_id = g_vector_font_id;
+  if (ShadowTraceActive(base)) {
+    const int target = ShadowTargetIndex(base, texture, true);
+    if (target >= 0) {
+      SHADOW_TRACE("shadow-trace: frame={} sample stage={} texture={:08X} target={} fetch={} "
+                  "rt0={:08X}",
+                  GetNativeLightSubmittedFrame(base), stage, texture, target,
+                  ShadowTargetFetch(base, texture), LoadU32(base, device + kRenderTargetBase * 4));
+    }
+  }
   GTA4_FontSelectionTraceBinding(g_vector_font_id, g_vector_font_owner, texture, stage);
   SubmitNativeCommand(command);
 }
@@ -5952,6 +6068,25 @@ void SubmitNativeResolve(uint8_t* base, uint32_t device, uint32_t flags,
     command.color_format = LoadU32(base, parameters);
     command.color_exp_bias = int32_t(LoadU32(base, parameters + 4));
     command.depth_format = LoadU32(base, parameters + 8);
+  }
+  if (ShadowTraceActive(base)) {
+    const int source_target = ShadowTargetIndex(base, source_surface, false);
+    const int destination_target = ShadowTargetIndex(base, destination_texture, true);
+    if (source_target >= 0 || destination_target >= 0) {
+      SHADOW_TRACE(
+          "shadow-trace: frame={} resolve flags={:08X} source={:08X} source-target={} "
+          "source-base={:08X} source-size={}x{} rect={}:{},{},{},{} destination={:08X} "
+          "destination-target={} point={}:{},{} level={} slice={} fetch={} params={} caller={:08X}",
+          GetNativeLightSubmittedFrame(base), flags, source_surface, source_target,
+          command.source.base, command.source.width, command.source.height,
+          unsigned(command.source_rectangle_valid), command.source_rectangle.left,
+          command.source_rectangle.top, command.source_rectangle.right,
+          command.source_rectangle.bottom, destination_texture, destination_target,
+          unsigned(command.destination_point_valid), command.destination_point.x,
+          command.destination_point.y, destination_level, destination_slice_or_face,
+          ShadowTargetFetch(base, destination_texture), unsigned(command.parameters_valid),
+          trace_caller);
+    }
   }
   temporal_host::Draw(base,command.device);
   SubmitNativeCommand(command);
@@ -7169,6 +7304,15 @@ extern "C" void sub_82A457B0(PPCContext& ctx, uint8_t* base) {
   command.top = top;
   command.right = right;
   command.bottom = bottom;
+  if (ShadowTraceActive(base)) {
+    uint32_t slot = 0;
+    const int target = ShadowBoundTarget(base, device, &slot);
+    if (target >= 0) {
+      SHADOW_TRACE("shadow-trace: frame={} clear flags={:08X} rect={},{},{},{} bound-target={} "
+                  "slot={}",
+                  GetNativeLightSubmittedFrame(base), flags, left, top, right, bottom, target, slot);
+    }
+  }
   if (color) {
     for (uint32_t index = 0; index < 4; ++index) {
       command.color_bits[index] = LoadU32(base, color + index * sizeof(uint32_t));
