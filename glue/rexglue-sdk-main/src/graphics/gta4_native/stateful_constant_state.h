@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "dirty_state_delta.h"
+#include "native_snapshot_resource.h"
 
 namespace rex::graphics::gta4_native {
 
@@ -147,6 +148,20 @@ struct ConstantStateVersion {
   mutable size_t materialized_bytes = 0;
 };
 
+// Versions and snapshot control blocks are allocated for nearly every draw
+// that changes constants and released on retirement threads. Only the render
+// worker (the owner of every AuthoritativeConstantState) allocates from this
+// resource. Never destroyed: versions may outlive any static teardown order.
+inline NativeSnapshotResource& ConstantVersionResource() {
+  static auto* resource = new NativeSnapshotResource();
+  return *resource;
+}
+
+inline std::shared_ptr<ConstantStateVersion> MakeConstantStateVersion() {
+  return std::allocate_shared<ConstantStateVersion>(
+      std::pmr::polymorphic_allocator<ConstantStateVersion>(&ConstantVersionResource()));
+}
+
 enum class ConstantApplyStatus : uint8_t {
   kApplied,
   kInvalidDelta,
@@ -190,13 +205,16 @@ class ConstantSnapshotPool {
       buffer = new std::vector<uint8_t>(source.size());
       std::memcpy(buffer->data(), source.data(), copy_bytes);
     }
-    return std::shared_ptr<const std::vector<uint8_t>>(buffer, [](const std::vector<uint8_t>* bytes) {
-      auto* owned = const_cast<std::vector<uint8_t>*>(bytes);
-      std::lock_guard lock(mutex());
-      auto& list = free_list(owned->size());
-      if (list.size() < 8192) list.push_back(owned);
-      else delete owned;
-    });
+    return std::shared_ptr<const std::vector<uint8_t>>(
+        buffer,
+        [](const std::vector<uint8_t>* bytes) {
+          auto* owned = const_cast<std::vector<uint8_t>*>(bytes);
+          std::lock_guard lock(mutex());
+          auto& list = free_list(owned->size());
+          if (list.size() < 8192) list.push_back(owned);
+          else delete owned;
+        },
+        std::pmr::polymorphic_allocator<std::byte>(&ConstantVersionResource()));
   }
 
  private:
@@ -283,7 +301,7 @@ class AuthoritativeConstantState {
       if (!changed) return {ConstantApplyStatus::kApplied, false, current_};
       IncrementStateVersion(version_);
       initialized_ = true;
-      auto next = std::make_shared<ConstantStateVersion>();
+      auto next = MakeConstantStateVersion();
       next->token = version_;
       next->content_hash = hash_callback(std::span<const uint8_t>(canonical_));
       next->byte_size = canonical_.size();
@@ -322,7 +340,7 @@ class AuthoritativeConstantState {
     IncrementStateVersion(version_);
     initialized_ = true;
 
-    auto next = std::make_shared<ConstantStateVersion>();
+    auto next = MakeConstantStateVersion();
     next->token = version_;
     next->content_hash = hash_callback(std::span<const uint8_t>(canonical_));
     next->byte_size = canonical_.size();
