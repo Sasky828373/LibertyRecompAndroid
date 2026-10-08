@@ -457,8 +457,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
       auto vertex_payload = keep(shader_constant_delta.vertex_constants.payload);
       auto pixel_ranges = keep(shader_constant_delta.pixel_constants.ranges);
       auto pixel_payload = keep(shader_constant_delta.pixel_constants.payload);
+      auto kept_pending_state = keep(pending_state);
       std::destroy_at(this);
       std::construct_at(this);
+      pending_state = std::move(kept_pending_state);
       shader_constant_delta.vertex_constants.ranges = std::move(vertex_ranges);
       shader_constant_delta.vertex_constants.payload = std::move(vertex_payload);
       shader_constant_delta.pixel_constants.ranges = std::move(pixel_ranges);
@@ -546,6 +548,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     mutable bool protected_generations_overflow = false;
     // Filled before the queue lock is taken (CollectTextureProtection).
     mutable bool protected_generations_collected = false;
+    // Raw title state commands (Set* bytes, each with its header) submitted
+    // since the previous queued command. The worker applies them, in order,
+    // before this command, exactly as if each had been queued on its own.
+    std::vector<uint8_t> pending_state;
   };
 
   struct NativeUploadBuffer {
@@ -1380,6 +1386,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void TraceModernShaderDraw(const NativeCommand& command, const NativeRenderingTarget& target);
   void TraceModernShaderFailure(const NativeCommand& command, std::string_view point, std::string_view reason);
   void ApplyStateCommand(const NativeCommand& command);
+  void ApplyStateCommandBytes(CommandType type, const uint8_t* bytes);
+  void ApplyPendingStateCommands(const std::vector<uint8_t>& pending);
+  bool CoalesceStateCommand(const void* command, size_t command_size);
+  void RegisterVectorFontTexture(uint32_t texture, uint32_t vector_font_id);
   bool ApplyShaderConstantDelta(NativeCommand& command, uint32_t device);
   bool SnapshotDrawConstants(const NativeCommand& command, uint32_t device);
   void BindNativeVertexBuffer(VkCommandBuffer command_buffer, uint32_t binding, VkBuffer buffer,
@@ -2046,6 +2056,8 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   NativeVirtualResourceRegistry virtual_resource_registry_;
   uint64_t next_texture_generation_ = 1;
   std::mutex command_capture_mutex_;
+  // State commands absorbed since the last queued command (command_capture_mutex_).
+  std::vector<uint8_t> producer_pending_state_;
   std::mutex device_snapshot_mutex_;
   std::unordered_map<uint32_t, std::shared_ptr<const std::vector<uint8_t>>> last_device_snapshots_;
   std::unordered_set<uint32_t> initialized_constant_capture_devices_;

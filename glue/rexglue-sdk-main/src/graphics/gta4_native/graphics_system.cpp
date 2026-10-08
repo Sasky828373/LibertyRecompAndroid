@@ -236,6 +236,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_recycle_commands, true, "GTA IV/Graphics/Native 
                     "instead of destroying them and constructing new ones on the title thread");
 REXCVAR_DEFINE_BOOL(gta4_native_dedupe_vertex_bindings, true, "GTA IV/Graphics/Native Renderer",
                     "Skip vkCmdBindVertexBuffers when the binding already holds that buffer and offset");
+REXCVAR_DEFINE_BOOL(gta4_native_coalesce_state_commands, true, "GTA IV/Graphics/Native Renderer",
+                    "Carry title state commands (textures, streams, shaders, targets) to the worker "
+                    "inside the next queued command instead of queueing each as its own command");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -3710,6 +3713,11 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
   const uint64_t capture_begin = profile_transport ? profile::CpuTick() : 0;
   std::unique_lock capture_lock(command_capture_mutex_);
   const uint64_t capture_acquired = profile_transport ? profile::CpuTick() : 0;
+  if (!phone_envelope && !tv_envelope && !fire_envelope && !profile_transport &&
+      REXCVAR_GET(gta4_native_coalesce_state_commands) &&
+      CoalesceStateCommand(title_command, title_command_size)) {
+    return true;
+  }
   auto native_command_owner = native_command_pool_.Make();
   NativeCommand& native_command = *native_command_owner;
   if (!ValidateAndCopyCommand(title_command, title_command_size, native_command)) {
@@ -3757,6 +3765,9 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
   // Chasing every texture slot's resource happens here, before render_mutex_
   // (which the worker also needs) is taken; the queue then retains from the
   // dense generation array.
+  // State absorbed since the previous queued command travels with this one.
+  if (!producer_pending_state_.empty()) native_command.pending_state.swap(producer_pending_state_);
+  producer_pending_state_.clear();
   CollectTextureProtection(native_command);
   QueueTextureProtection(native_command, true);
   if (stageable && !phone_envelope && !tv_envelope && !fire_envelope && !profile_transport &&
@@ -3972,6 +3983,8 @@ bool Gta4NativeGraphicsSystem::ExecuteTitleCommand(uint32_t title_id, uint32_t a
   std::unique_lock capture_lock(command_capture_mutex_);
   auto native_command_owner = native_command_pool_.Make();
   NativeCommand& native_command = *native_command_owner;
+  if (!producer_pending_state_.empty()) native_command.pending_state.swap(producer_pending_state_);
+  producer_pending_state_.clear();
   native_command.type = CommandType::kTextureLock;
   native_command.bytes.resize(sizeof(lock_command));
   std::memcpy(native_command.bytes.data(), &lock_command, sizeof(lock_command));
@@ -4193,15 +4206,7 @@ bool Gta4NativeGraphicsSystem::ValidateAndCopyCommand(const void* command, size_
       return reject(header.type, "texture-stage-range");
     }
     if (set_texture.texture && set_texture.vector_font_id) {
-      std::lock_guard lock(texture_resource_mutex_);
-      const auto previous = vector_font_ids_.find(set_texture.texture);
-      if (previous == vector_font_ids_.end() || previous->second != set_texture.vector_font_id) {
-        vector_font_ids_[set_texture.texture] = set_texture.vector_font_id;
-        dirty_texture_handles_.insert(set_texture.texture);
-        ForgetTextureCapture(set_texture.texture);
-        REXLOG_INFO("gta4-native-fonts: registered font{} owner texture {:08X}",
-                    set_texture.vector_font_id, set_texture.texture);
-      }
+      RegisterVectorFontTexture(set_texture.texture, set_texture.vector_font_id);
     }
   } else if (header.type == CommandType::kSetRenderTarget) {
     const auto& set_target = *static_cast<const SetRenderTargetCommand*>(command);
@@ -6200,6 +6205,9 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
       tv_lifecycle_plane_handles_.clear();
     }
 
+    // State commands the producer folded into this one, in submission order.
+    if (!command.pending_state.empty()) ApplyPendingStateCommands(command.pending_state);
+
     switch (command.type) {
       case CommandType::kDeviceCreated: {
         DeviceCommand device;
@@ -7069,7 +7077,91 @@ Gta4NativeGraphicsSystem::SnapshotPipeline(const NativeCommand& command, bool dr
 }
 
 void Gta4NativeGraphicsSystem::ApplyStateCommand(const NativeCommand& command) {
-  switch (command.type) {
+  ApplyStateCommandBytes(command.type, command.bytes.data());
+}
+
+void Gta4NativeGraphicsSystem::ApplyPendingStateCommands(const std::vector<uint8_t>& pending) {
+  for (size_t offset = 0; offset + sizeof(CommandHeader) <= pending.size();) {
+    CommandHeader header;
+    std::memcpy(&header, pending.data() + offset, sizeof(header));
+    if (header.size < sizeof(CommandHeader) || header.size > pending.size() - offset) break;
+    ApplyStateCommandBytes(header.type, pending.data() + offset);
+    offset += header.size;
+  }
+}
+
+void Gta4NativeGraphicsSystem::RegisterVectorFontTexture(uint32_t texture, uint32_t vector_font_id) {
+  std::lock_guard lock(texture_resource_mutex_);
+  const auto previous = vector_font_ids_.find(texture);
+  if (previous == vector_font_ids_.end() || previous->second != vector_font_id) {
+    vector_font_ids_[texture] = vector_font_id;
+    dirty_texture_handles_.insert(texture);
+    ForgetTextureCapture(texture);
+    REXLOG_INFO("gta4-native-fonts: registered font{} owner texture {:08X}", vector_font_id,
+                texture);
+  }
+}
+
+// Absorbs a valid state command into the producer's pending state: the same
+// checks and producer-side effects as ValidateAndCopyCommand, without a
+// 3 KB command, a queue slot, protection bookkeeping or a worker dispatch.
+// Anything else (or anything invalid) returns false and takes the full path,
+// which also rejects and logs it as before. Caller holds command_capture_mutex_.
+bool Gta4NativeGraphicsSystem::CoalesceStateCommand(const void* command, size_t command_size) {
+  if (command_size < sizeof(CommandHeader)) return false;
+  CommandHeader header;
+  std::memcpy(&header, command, sizeof(header));
+  switch (header.type) {
+    case CommandType::kSetPixelShader:
+    case CommandType::kSetVertexShader:
+    case CommandType::kSetVertexDeclaration:
+    case CommandType::kSetTexture:
+    case CommandType::kSetDepthStencil:
+    case CommandType::kSetRenderTarget:
+    case CommandType::kSetVertexStream:
+    case CommandType::kSetIndexBuffer:
+      break;
+    default:
+      return false;
+  }
+  const size_t expected_size = CommandSize(header.type);
+  if (!expected_size || command_size != expected_size || header.size != expected_size ||
+      !CommandDevice(header.type, command)) {
+    return false;
+  }
+  switch (header.type) {
+    case CommandType::kSetTexture: {
+      const auto& set_texture = *static_cast<const SetTextureCommand*>(command);
+      if (set_texture.stage >= kTextureStageCount || set_texture.vector_font_id > 3) return false;
+      if (set_texture.texture && set_texture.vector_font_id) {
+        RegisterVectorFontTexture(set_texture.texture, set_texture.vector_font_id);
+      }
+      break;
+    }
+    case CommandType::kSetRenderTarget:
+      if (static_cast<const SetRenderTargetCommand*>(command)->index >= kRenderTargetCount) return false;
+      break;
+    case CommandType::kSetVertexStream:
+      if (static_cast<const SetVertexStreamCommand*>(command)->stream >= kVertexStreamCount) return false;
+      break;
+    case CommandType::kSetPixelShader:
+    case CommandType::kSetVertexShader: {
+      const auto& shader = *static_cast<const SetShaderCommand*>(command);
+      ProducerDeviceShaderState& state = producer_device_shader_states_[shader.device];
+      if (header.type == CommandType::kSetPixelShader) state.pixel_shader = shader.shader;
+      else state.vertex_shader = shader.shader;
+      break;
+    }
+    default:
+      break;
+  }
+  const auto* bytes = static_cast<const uint8_t*>(command);
+  producer_pending_state_.insert(producer_pending_state_.end(), bytes, bytes + command_size);
+  return true;
+}
+
+void Gta4NativeGraphicsSystem::ApplyStateCommandBytes(CommandType type, const uint8_t* bytes) {
+  switch (type) {
     case CommandType::kSetRenderState: {
       // The title has already committed render-state values to its packed
       // device fields. Draw capture decodes those authoritative fields, so no
@@ -7081,14 +7173,14 @@ void Gta4NativeGraphicsSystem::ApplyStateCommand(const NativeCommand& command) {
     case CommandType::kSetPixelShader:
     case CommandType::kSetVertexShader: {
       SetShaderCommand shader;
-      std::memcpy(&shader, command.bytes.data(), sizeof(shader));
-      const auto stage=command.type==CommandType::kSetPixelShader ? ShaderStage::kPixel : ShaderStage::kVertex;
+      std::memcpy(&shader, bytes, sizeof(shader));
+      const auto stage=type==CommandType::kSetPixelShader ? ShaderStage::kPixel : ShaderStage::kVertex;
       const auto* resolved=FindRegisteredShader(shader.shader,stage);
       if ((stage==ShaderStage::kPixel && pipeline_state_.pixel_shader==shader.shader &&
            pipeline_state_.pixel_shader_resource==resolved) ||
           (stage==ShaderStage::kVertex && pipeline_state_.vertex_shader==shader.shader &&
            pipeline_state_.vertex_shader_resource==resolved)) return;
-      if (command.type == CommandType::kSetPixelShader) {
+      if (type == CommandType::kSetPixelShader) {
         pipeline_state_.pixel_shader = shader.shader;
         pipeline_state_.pixel_shader_resource =
             FindRegisteredShader(shader.shader, ShaderStage::kPixel);
@@ -7101,7 +7193,7 @@ void Gta4NativeGraphicsSystem::ApplyStateCommand(const NativeCommand& command) {
     }
     case CommandType::kSetVertexDeclaration: {
       SetVertexDeclarationCommand declaration;
-      std::memcpy(&declaration, command.bytes.data(), sizeof(declaration));
+      std::memcpy(&declaration, bytes, sizeof(declaration));
       pipeline_state_.vertex_declaration = declaration.declaration;
       auto declaration_resource = vertex_declarations_.find(declaration.declaration);
       pipeline_state_.vertex_declaration_resource =
@@ -7111,14 +7203,14 @@ void Gta4NativeGraphicsSystem::ApplyStateCommand(const NativeCommand& command) {
     }
     case CommandType::kSetTexture: {
       SetTextureCommand texture;
-      std::memcpy(&texture, command.bytes.data(), sizeof(texture));
+      std::memcpy(&texture, bytes, sizeof(texture));
       if (pipeline_state_.textures[texture.stage] == texture.texture) return;
       pipeline_state_.textures[texture.stage] = texture.texture;
       break;
     }
     case CommandType::kSetDepthStencil: {
       SetDepthStencilCommand depth;
-      std::memcpy(&depth, command.bytes.data(), sizeof(depth));
+      std::memcpy(&depth, bytes, sizeof(depth));
       if (NativeSurfaceStateEqual(pipeline_state_.depth_stencil,depth.surface) &&
           pipeline_state_.depth_stencil_trace_wrapper==depth.trace_wrapper &&
           pipeline_state_.depth_stencil_trace_caller==depth.trace_caller) return;
@@ -7129,14 +7221,14 @@ void Gta4NativeGraphicsSystem::ApplyStateCommand(const NativeCommand& command) {
     }
     case CommandType::kSetRenderTarget: {
       SetRenderTargetCommand target;
-      std::memcpy(&target, command.bytes.data(), sizeof(target));
+      std::memcpy(&target, bytes, sizeof(target));
       if (NativeSurfaceStateEqual(pipeline_state_.render_targets[target.index],target.surface)) return;
       pipeline_state_.render_targets[target.index] = target.surface;
       break;
     }
     case CommandType::kSetVertexStream: {
       SetVertexStreamCommand stream;
-      std::memcpy(&stream, command.bytes.data(), sizeof(stream));
+      std::memcpy(&stream, bytes, sizeof(stream));
       auto& next_stream = pipeline_state_.vertex_streams[stream.stream];
       if(next_stream.buffer==stream.buffer && next_stream.offset==stream.offset &&
          next_stream.stride==stream.stride && next_stream.stride_words==stream.stride_words) return;
@@ -7148,7 +7240,7 @@ void Gta4NativeGraphicsSystem::ApplyStateCommand(const NativeCommand& command) {
     }
     case CommandType::kSetIndexBuffer: {
       SetIndexBufferCommand index;
-      std::memcpy(&index, command.bytes.data(), sizeof(index));
+      std::memcpy(&index, bytes, sizeof(index));
       if(pipeline_state_.index_buffer==index.buffer)return;
       pipeline_state_.index_buffer = index.buffer;
       break;
