@@ -242,6 +242,10 @@ REXCVAR_DEFINE_BOOL(gta4_native_coalesce_state_commands, true, "GTA IV/Graphics/
 REXCVAR_DEFINE_BOOL(gta4_native_clear_skips_materialization, true, "GTA IV/Graphics/Native Renderer",
                     "Do not copy a surface's aliased EDRAM content into it when a clear covering "
                     "the whole surface is about to overwrite it");
+REXCVAR_DEFINE_UINT32(gta4_native_debug_gpu_attribution, 0, "GTA IV/Graphics/Native Renderer",
+                      "Measurement only, breaks the image: 1 = scene draws get an empty scissor "
+                      "(vertex and state work only), 2 = scene draws bind state but are not issued")
+    .range(0, 2);
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -22400,7 +22404,7 @@ bool Gta4NativeGraphicsSystem::BindCommonDrawState(
   const int32_t bottom = ScaleCoordinateCeil(logical_bottom, logical_height, height);
   scissor.offset = {left, top};
   scissor.extent = {uint32_t(right - left), uint32_t(bottom - top)};
-  if (viewport_selection.empty) {
+  if (viewport_selection.empty || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) {
     scissor = {};
   }
   if (native_draw_state_cache_.UpdateScissor(
@@ -22659,7 +22663,7 @@ bool Gta4NativeGraphicsSystem::RecordPrimitiveUpBatch(
   BindNativeVertexBuffer(command_buffer, 0, vertices.buffer, vertices.offset);
   dfn.vkCmdBindIndexBuffer(command_buffer, indices.buffer, indices.offset, VK_INDEX_TYPE_UINT32);
   ObserveNativeGpuProfileDraw(first, pipeline, target.samples, 0, uint32_t(index_count));
-  dfn.vkCmdDrawIndexed(command_buffer, uint32_t(index_count), 1, 0, 0, 0);
+  if (REXCVAR_GET(gta4_native_debug_gpu_attribution) != 2) dfn.vkCmdDrawIndexed(command_buffer, uint32_t(index_count), 1, 0, 0, 0);
   TraceModernShaderDraw(first, target);
   return true;
 }
@@ -22986,13 +22990,13 @@ bool Gta4NativeGraphicsSystem::RecordPrimitiveUp(VkCommandBuffer command_buffer,
     const uint32_t rectangle_count = host_vertex_count / 4;
     for (uint32_t rectangle = 0; rectangle < rectangle_count; ++rectangle) {
       ObserveNativeGpuProfileDraw(command, pipeline, target.samples, 4, 0);
-      profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, 4, 1, rectangle * 4, 0); });
+      profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { if (!REXCVAR_GET(gta4_native_debug_gpu_attribution) || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) dfn.vkCmdDraw(command_buffer, 4, 1, rectangle * 4, 0); });
     }
   } else if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kQuadList)) {
     profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindIndexBuffer(command_buffer, quad_list_indices.buffer, quad_list_indices.offset,
                              VK_INDEX_TYPE_UINT32); });
     ObserveNativeGpuProfileDraw(command, pipeline, target.samples, 0, quad_list_index_count);
-    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDrawIndexed(command_buffer, quad_list_index_count, 1, 0, 0, 0); });
+    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { if (!REXCVAR_GET(gta4_native_debug_gpu_attribution) || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) dfn.vkCmdDrawIndexed(command_buffer, quad_list_index_count, 1, 0, 0, 0); });
   } else if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kTriangleFan)) {
     if (host_vertex_count < 3) return true;
     const uint64_t count = uint64_t(host_vertex_count - 2) * 3;
@@ -23003,10 +23007,10 @@ bool Gta4NativeGraphicsSystem::RecordPrimitiveUp(VkCommandBuffer command_buffer,
                                   host_vertex_count)) return fail("triangle-fan-upload");
     dfn.vkCmdBindIndexBuffer(command_buffer, indices.buffer, indices.offset, VK_INDEX_TYPE_UINT32);
     ObserveNativeGpuProfileDraw(command, pipeline, target.samples, 0, uint32_t(count));
-    dfn.vkCmdDrawIndexed(command_buffer, uint32_t(count), 1, 0, 0, 0);
+    if (REXCVAR_GET(gta4_native_debug_gpu_attribution) != 2) dfn.vkCmdDrawIndexed(command_buffer, uint32_t(count), 1, 0, 0, 0);
   } else {
     ObserveNativeGpuProfileDraw(command, pipeline, target.samples, host_vertex_count, 0);
-    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, host_vertex_count, 1, 0, 0); });
+    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { if (!REXCVAR_GET(gta4_native_debug_gpu_attribution) || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) dfn.vkCmdDraw(command_buffer, host_vertex_count, 1, 0, 0); });
   }
   TraceModernShaderDraw(command, target);
   return true;
@@ -23146,7 +23150,7 @@ bool Gta4NativeGraphicsSystem::RecordPrimitive(VkCommandBuffer command_buffer,
     profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindIndexBuffer(command_buffer, indices_allocation.buffer, indices_allocation.offset,
                              VK_INDEX_TYPE_UINT32); });
     ObserveNativeGpuProfileDraw(command, pipeline, target.samples, 0, index_count);
-    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDrawIndexed(command_buffer, index_count, 1, 0, int32_t(draw.start_vertex), 0); });
+    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { if (!REXCVAR_GET(gta4_native_debug_gpu_attribution) || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) dfn.vkCmdDrawIndexed(command_buffer, index_count, 1, 0, int32_t(draw.start_vertex), 0); });
   } else if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kTriangleFan)) {
     if (draw.vertex_count < 3) return true;
     const uint64_t count = uint64_t(draw.vertex_count - 2) * 3;
@@ -23157,10 +23161,10 @@ bool Gta4NativeGraphicsSystem::RecordPrimitive(VkCommandBuffer command_buffer,
                                   draw.vertex_count, draw.start_vertex)) return fail("triangle-fan-upload");
     dfn.vkCmdBindIndexBuffer(command_buffer, indices.buffer, indices.offset, VK_INDEX_TYPE_UINT32);
     ObserveNativeGpuProfileDraw(command, pipeline, target.samples, 0, uint32_t(count));
-    dfn.vkCmdDrawIndexed(command_buffer, uint32_t(count), 1, 0, 0, 0);
+    if (REXCVAR_GET(gta4_native_debug_gpu_attribution) != 2) dfn.vkCmdDrawIndexed(command_buffer, uint32_t(count), 1, 0, 0, 0);
   } else {
     ObserveNativeGpuProfileDraw(command, pipeline, target.samples, draw.vertex_count, 0);
-    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, draw.vertex_count, 1, draw.start_vertex, 0); });
+    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { if (!REXCVAR_GET(gta4_native_debug_gpu_attribution) || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) dfn.vkCmdDraw(command_buffer, draw.vertex_count, 1, draw.start_vertex, 0); });
   }
   TraceModernShaderDraw(command, target);
   return true;
@@ -23781,7 +23785,7 @@ bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_bu
     }
   }
   ObserveNativeGpuProfileDraw(command, pipeline, target.samples, 0, host_index_count);
-  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDrawIndexed(command_buffer, host_index_count, 1, host_start_index, draw.base_vertex, 0); });
+  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { if (!REXCVAR_GET(gta4_native_debug_gpu_attribution) || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) dfn.vkCmdDrawIndexed(command_buffer, host_index_count, 1, host_start_index, draw.base_vertex, 0); });
   TraceModernShaderDraw(command, target);
   return true;
 }
