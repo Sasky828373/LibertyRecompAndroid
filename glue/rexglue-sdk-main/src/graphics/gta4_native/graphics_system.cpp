@@ -211,7 +211,7 @@ REXCVAR_DEFINE_BOOL(gta4_native_resolve_swap, false, "GTA IV/Graphics/Native Ren
 REXCVAR_DEFINE_BOOL(gta4_native_present_from_surface, true, "GTA IV/Graphics/Native Renderer",
                     "Present the frame's final surface directly instead of first resolving it into "
                     "the RGBA8 frontbuffer when nothing else reads that frontbuffer");
-REXCVAR_DEFINE_BOOL(gta4_native_lazy_resolves, true, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_BOOL(gta4_native_lazy_resolves, false, "GTA IV/Graphics/Native Renderer",
                     "Skip resolves into textures that no draw, post-processing pass, present or "
                     "CPU readback has used for 120 frames; the first use in a later frame sees "
                     "one stale frame");
@@ -29552,10 +29552,24 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     };
     // Presentation is not recorded here: A11 needs the frontbuffer's other
     // readers, and A3 checks the present source separately.
-    for (const NativeCommand& scan : current_frame_) {
-      for (const auto& texture : scan.textures) mark_input(texture);
-      mark_input(scan.postfx_half_scene);
-      mark_input(scan.depth_handoff_source);
+    if (lazy_resolves) {
+      for (const NativeCommand& scan : current_frame_) {
+        for (const auto& texture : scan.textures) mark_input(texture);
+        mark_input(scan.postfx_half_scene);
+        mark_input(scan.depth_handoff_source);
+      }
+    } else if (present_source && REXCVAR_GET(gta4_native_present_from_surface)) {
+      // A11 alone needs only whether anything reads the frontbuffer: compare
+      // resource pointers (one object per generation), no map writes.
+      const NativeTextureResource* frontbuffer = present_source.get();
+      bool read = false;
+      for (const NativeCommand& scan : current_frame_) {
+        for (const auto& texture : scan.textures) read |= texture.get() == frontbuffer;
+        read |= scan.postfx_half_scene.get() == frontbuffer ||
+                scan.depth_handoff_source.get() == frontbuffer;
+        if (read) break;
+      }
+      if (read) texture_input_frames_[present_source->generation] = submitted_frame;
     }
     if (texture_input_frames_.size() > 8192) {
       std::erase_if(texture_input_frames_, [&](const auto& entry) {
