@@ -1192,6 +1192,9 @@ bool GTA4App::OnWindowCloseRequested() {
 }
 
 void GTA4App::OnShutdown() {
+#if REX_PLATFORM_ANDROID
+  __android_log_print(ANDROID_LOG_WARN, "LibertyShutdown", "OnShutdown begin");
+#endif
   gta4::streaming::FinishTrace();
   if (entitlement_service_) {
     entitlement_service_->SetConnectionRestoredHandler({});
@@ -1205,8 +1208,17 @@ void GTA4App::OnShutdown() {
   SetTitleInputCaptured(false);
   GTA4_SetTouchTitleInputOwned(false);
   if (text_chat_dialog_) {
+#if REX_PLATFORM_ANDROID
+    __android_log_print(ANDROID_LOG_WARN, "LibertyShutdown", "text_chat_dialog Stop begin");
+#endif
     text_chat_dialog_->Stop();
+#if REX_PLATFORM_ANDROID
+    __android_log_print(ANDROID_LOG_WARN, "LibertyShutdown", "text_chat_dialog reset begin");
+#endif
     text_chat_dialog_.reset();
+#if REX_PLATFORM_ANDROID
+    __android_log_print(ANDROID_LOG_WARN, "LibertyShutdown", "text_chat_dialog reset completed");
+#endif
   }
   gta4::input::PublishUserMusicPlayer(nullptr);
   if (user_music_player_) {
