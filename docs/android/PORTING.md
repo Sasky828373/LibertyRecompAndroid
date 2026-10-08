@@ -244,6 +244,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.6.1 | First public release: documentation, no debug shader dumps in the data folder |
 | 0.5.6.2 | System-driver fallback when Turnip cannot drive the GPU, an error dialog instead of a silent exit, `last_launch.txt` report, settings files tolerate a byte-order mark |
 | 0.5.6.3 | Launcher screen with Play and a Vulkan driver picker that imports driver zips; the game runs in its own process so the chosen driver always applies |
+| 0.5.6.4 | Custom and bundled Turnip drivers are accepted on Android 10 to 12, whose platform Vulkan loader reports only version 1.1 |
 
 ## 7. What is left
 

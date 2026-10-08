@@ -125,6 +125,15 @@ std::string DeviceIdentity(const VkPhysicalDeviceProperties& basic,
 // the stock Adreno driver can never report Mesa. A custom QUALCOMM driver
 // reports exactly what the stock one reports, so the ID proves nothing, and
 // the only honest evidence is that the identity CHANGED.
+// The apiVersion to ask an instance for. The platform loader of Android 10 to
+// 12 reports Vulkan 1.1 even when the driver behind it (Turnip on an Adreno
+// 6xx) offers 1.3; a 1.1 loader accepts a higher apiVersion, and the device
+// decides which 1.2 functionality exists. So 1.2 is requested from any 1.1+
+// loader, which is what the game's own instance does as well.
+uint32_t ProbeApiVersion(uint32_t loader_api) {
+  return loader_api >= VK_API_VERSION_1_1 ? VK_API_VERSION_1_2 : VK_API_VERSION_1_0;
+}
+
 bool ProbeSystemIdentity(std::string& identity) {
   void* handle = dlopen("/system/lib64/libvulkan.so", RTLD_NOW | RTLD_LOCAL);
   if (!handle) return false;
@@ -137,7 +146,7 @@ bool ProbeSystemIdentity(std::string& identity) {
   if (!create) { dlclose(handle); return false; }
   uint32_t api = VK_API_VERSION_1_0;
   if (enumerate_version && enumerate_version(&api) != VK_SUCCESS) api = VK_API_VERSION_1_0;
-  api = std::min(api, static_cast<uint32_t>(VK_API_VERSION_1_2));
+  api = ProbeApiVersion(api);
 
   VkApplicationInfo app{};
   app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -168,7 +177,7 @@ bool ProbeSystemIdentity(std::string& identity) {
       properties(devices[0], &basic);
       VkPhysicalDeviceDriverProperties driver{};
       driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
-      if (api >= VK_API_VERSION_1_2 && basic.apiVersion >= VK_API_VERSION_1_2 && properties2) {
+      if (api >= VK_API_VERSION_1_1 && basic.apiVersion >= VK_API_VERSION_1_2 && properties2) {
         VkPhysicalDeviceProperties2 extended{};
         extended.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
         extended.pNext = &driver;
@@ -196,8 +205,8 @@ bool VerifyInstance(VkInstance instance, uint32_t requested_api,
     error = "Selected loader is missing physical-device query functions";
     return false;
   }
-  if (g_custom && (requested_api < VK_API_VERSION_1_2 || !properties2)) {
-    error = "Turnip validation requires a Vulkan 1.2 instance and driver-properties query";
+  if (g_custom && (requested_api < VK_API_VERSION_1_1 || !properties2)) {
+    error = "Custom driver validation requires a Vulkan 1.1 instance and the properties2 query";
     return false;
   }
   uint32_t count = 0;
@@ -219,7 +228,7 @@ bool VerifyInstance(VkInstance instance, uint32_t requested_api,
     properties(devices[i], &basic);
     VkPhysicalDeviceDriverProperties driver{};
     driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
-    if (requested_api >= VK_API_VERSION_1_2 && basic.apiVersion >= VK_API_VERSION_1_2 && properties2) {
+    if (requested_api >= VK_API_VERSION_1_1 && basic.apiVersion >= VK_API_VERSION_1_2 && properties2) {
       VkPhysicalDeviceProperties2 extended{};
       extended.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
       extended.pNext = &driver;
@@ -280,11 +289,11 @@ bool Probe(std::string& devices, std::string& error) {
     error = "Selected Vulkan loader could not provide instance creation/version";
     return false;
   }
-  api = std::min(api, static_cast<uint32_t>(VK_API_VERSION_1_2));
-  if (g_custom && api < VK_API_VERSION_1_2) {
-    error = "Selected custom loader does not support Vulkan 1.2 identity validation";
+  if (g_custom && api < VK_API_VERSION_1_1) {
+    error = "The Vulkan loader of this Android version is older than Vulkan 1.1";
     return false;
   }
+  api = ProbeApiVersion(api);
   VkApplicationInfo app{};
   app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   app.pApplicationName = "Liberty Driver Validation";
