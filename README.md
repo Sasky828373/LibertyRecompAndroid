@@ -131,6 +131,11 @@ console and disc.
 1. Install `LibertyRecompAndroid-*.apk` from the [Releases](../../releases) page, launch it once, then close it.
 2. Copy your disc image (`*.iso`) and the Title Update 8 file into
    `Android/data/com.libertyrecomp/files/install/`. A PC over USB is the easiest way.
+   The tested files ([details](#game-files-required)):
+   - disc: `Grand Theft Auto IV (USA) (En,Fr,De,Es,It).iso`, MD5 `f0a046aed1520a913b2125f0a69ee7d0`
+   - TU8: `TU_1A581VI_000000K000000.0000000000205`, MD5 `f041b5f6721d7ee578560bac21668826`
+
+   The file names do not matter, as long as the disc image ends in `.iso`.
 3. Launch the app again. The installer picks up both files and installs the game by itself.
 
 This is the installer screen on the first launch:
