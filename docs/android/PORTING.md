@@ -254,6 +254,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.6.3 | Launcher screen with Play and a Vulkan driver picker that imports driver zips; the game runs in its own process so the chosen driver always applies |
 | 0.5.6.4 | Custom and bundled Turnip drivers are accepted on Android 10 to 12, whose platform Vulkan loader reports only version 1.1 |
 | 0.5.7 | The launcher installs the game, the title update and the episodes, with files picked anywhere on the device |
+| 0.5.7.1 | Launcher layout fixed on 20:9 and 21:9 screens; logo and Play button in the new typeface |
 
 ## 7. What is left
 

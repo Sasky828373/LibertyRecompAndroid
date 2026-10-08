@@ -87,7 +87,7 @@ public class LauncherActivity extends Activity {
     private File mDataRoot;
     private RadioGroup mDrivers;
     private TextView mDriverNote;
-    private Button mPlay;
+    private android.widget.ImageButton mPlay;
     private Button mRemove;
     private final List<String> mDriverModes = new ArrayList<>();
     private final Handler mMain = new Handler(Looper.getMainLooper());
@@ -162,6 +162,10 @@ public class LauncherActivity extends Activity {
         banner.setImageResource(R.drawable.launcher_banner);
         banner.setAdjustViewBounds(true);
         banner.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        // On wide panels (20:9, 21:9) the column is wider, the banner grows
+        // taller and pushes the rest off screen: keep it to a quarter of the
+        // height; adjustViewBounds keeps the aspect ratio.
+        banner.setMaxHeight(getResources().getDisplayMetrics().heightPixels / 4);
         left.addView(banner, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -175,10 +179,19 @@ public class LauncherActivity extends Activity {
 
         mLastLaunch = text("", 13, R.color.picker_error);
         mLastLaunch.setGravity(Gravity.CENTER);
+        mLastLaunch.setMaxLines(4);
+        mLastLaunch.setEllipsize(android.text.TextUtils.TruncateAt.END);
         left.addView(mLastLaunch, matchWrap(dp(8)));
 
-        mPlay = button("PLAY", true);
-        mPlay.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+        // "Play" in the logo's typeface, drawn into play_label.png (the font
+        // itself is not redistributable, so it does not ship in the APK).
+        mPlay = new android.widget.ImageButton(this);
+        mPlay.setImageResource(R.drawable.play_label);
+        mPlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mPlay.setPadding(dp(14), dp(18), dp(14), dp(18));
+        mPlay.setBackground(focusBackground(0xFFE6E6E6));
+        mPlay.setContentDescription("Play");
+        mPlay.setFocusable(true);
         mPlay.setOnClickListener(v -> play());
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(dp(260), dp(72));
         playParams.topMargin = dp(18);
@@ -190,6 +203,8 @@ public class LauncherActivity extends Activity {
 
         ScrollView leftScroll = new ScrollView(this);
         leftScroll.addView(left);
+        // Focusing Play scrolls the column down to it; start at the banner.
+        leftScroll.post(() -> leftScroll.scrollTo(0, 0));
         root.addView(leftScroll, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 1.15f));
 
@@ -250,9 +265,11 @@ public class LauncherActivity extends Activity {
             version = info.versionName;
         } catch (Exception ignored) {
         }
-        String soc = Build.VERSION.SDK_INT >= 31 ? Build.SOC_MODEL : Build.HARDWARE;
+        // The chip model is only known from Android 12 on.
+        String soc = Build.VERSION.SDK_INT >= 31 ? Build.SOC_MODEL : null;
         String gpu = readFirstLine(new File("/sys/class/kgsl/kgsl-3d0/gpu_model"));
-        return "v" + version + "  ·  " + Build.MODEL + "  ·  " + soc
+        return "v" + version + "  ·  " + Build.MODEL
+                + (soc != null && !soc.isEmpty() && !"unknown".equals(soc) ? "  ·  " + soc : "")
                 + (gpu != null ? "  ·  " + gpu : "");
     }
 
@@ -948,7 +965,7 @@ public class LauncherActivity extends Activity {
     private void setBusy(boolean busy, String text) {
         mBusy = busy;
         mPlay.setEnabled(!busy);
-        mPlay.setText(busy && text != null ? text : "PLAY");
+        mPlay.setAlpha(busy || (mInstallerReady && !mInstalled) ? 0.5f : 1f);
     }
 
     private void toast(String message) {
