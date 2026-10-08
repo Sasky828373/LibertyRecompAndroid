@@ -20,7 +20,7 @@ this proxy as `libvulkan.so` in nativeLibraryDir; `DriverBridge` loads it with
 `RTLD_NOLOAD`.
 
 With Turnip selected, libadrenotools loads the bundled Mesa Turnip build
-(`app/src/main/assets/drivers/turnip-t30.zip`, MrPurple T30, Mesa 26.3) from
+(`app/src/main/assets/drivers/turnip-r6.zip`, StevenMXZ Turnip 26.3.0-R6, a6xx/a7xx) from
 app-private storage, and every instance is checked to really be the custom
 driver. With System selected, calls go to `/system/lib64/libvulkan.so`.
 

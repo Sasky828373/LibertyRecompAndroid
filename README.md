@@ -2,143 +2,113 @@
     <img src="docs/images/banner_repo.png" alt="Liberty Recompiled" width="800"/>
 </p>
 
----
+# LibertyRecompAndroid
+
+An Android port of [Liberty Recompiled](https://github.com/OZORDI/LibertyRecomp), the static
+recompilation of the Xbox 360 version of Grand Theft Auto IV. It runs the recompiled game natively
+on arm64 Android phones and handhelds with a Snapdragon (Adreno) GPU, using Vulkan through a bundled
+Mesa Turnip driver. There is no emulator in between.
+
+<p align="center">
+    <img src="docs/android/images/ingame.jpg" alt="GTA IV running on a Retroid Pocket 5" width="800"/>
+</p>
 
 > [!CAUTION]
-> This recompilation is in early development and is NOT meant for public use. This is a work-in-progress fork based on the MarathonRecomp framework.
+> This is an experimental, unofficial port of a project that is itself in early development.
+> Expect crashes and rough edges. It has been developed and tested on **one device**, a
+> Retroid Pocket 5 (Snapdragon 865 / Adreno 650).
 
-Liberty Recompiled is an unofficial PC port of the Xbox 360 version of Grand Theft Auto IV created through the process of static recompilation. The port aims to offer Windows, Linux, and macOS support.
+**This project does not include any game assets.** You need your own legally obtained copy of the
+Xbox 360 game and its title update. Nothing here helps you get them.
 
-**This project does not include any game assets. You must provide the files from your own legally acquired copy of the game to install or build Liberty Recompiled.**
+## Status
 
-The runtime is powered by a fork of the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) ([our fork](https://github.com/sonicnext-dev/rexglue-sdk)), which handles PowerPC → C++ recompilation and Xenos shader translation. The development of static recompilation tooling in this space was directly inspired by [N64: Recompiled](https://github.com/N64Recomp/N64Recomp), which was used to create [Zelda 64: Recompiled](https://github.com/Zelda64Recomp/Zelda64Recomp).
+On the Retroid Pocket 5 with the default settings:
 
-## Table of Contents
+- The game installs, boots and plays: the intro, the early story missions, free roam and driving
+  have been played. Saves persist across launches.
+- The game renders at the console's native 720p with FXAA. The display scales the image to the panel.
+- Frame rate is capped at 30 FPS with VSync. Most places hold a steady 30. The heaviest far views
+  (bridges, the skyline at night) drop to about 25–29 FPS.
+- Shadows, draw distance and the shadow map size match the console. Traffic and pedestrian density
+  are reduced to 40% of the PC defaults to save CPU time.
+- Audio works, including the radio, cutscenes and Bink videos.
 
-- [Project Status](#project-status)
-- [Installation](#installation)
-- [Mod Support](#mod-support)
-- [Building](#building)
-- [Documentation](#documentation)
+Known problems:
 
-## Project Status
+- Occasional crashes to the home screen still happen. Save often.
+- The installer's **Select File / Select Folder** buttons do not work on Android: the system file
+  picker returns `content://` links the installer cannot read. Copy the files into the app's
+  `install` folder instead (see [INSTALL.md](docs/android/INSTALL.md)).
+- One deferred light-volume shader is skipped, because it hangs the GPU under Turnip. A few
+  light volumes are missing as a result.
+- The episodes (The Lost and Damned, The Ballad of Gay Tony) and online multiplayer have not been
+  tested on Android.
+- Upstream's touch controls (`--touch_controls`) have not been tested on Android. Play with a
+  gamepad.
 
-This project is in **early development**. Current progress:
+## Device requirements
 
-### Completed
-- [x] ReXGlue SDK integration for PowerPC → C++ translation and shader conversion
-- [x] Cross-platform build system (Windows, Linux, macOS)
-- [x] Installer wizard with ISO/folder/XContent support
-- [x] Shader extraction pipeline (RAGE FXC → Xbox 360 → platform-native)
-- [x] Platform-specific install directory support
-- [x] FusionFix-compatible mod overlay system
+| | Requirement |
+|---|---|
+| **GPU** | **Qualcomm Adreno 6xx or 7xx** (Snapdragon). Tested on the Adreno 650 only. |
+| **SoC** | Snapdragon 865 class or faster recommended (SD 865/870/888, 8 Gen 1/2/3, 8s Gen 3, …). |
+| **CPU** | arm64 with ARMv8.2-A (the build uses LSE atomics). ARMv8.0 chips such as the Snapdragon 835 crash on start. |
+| **Android** | Android 10 (API 29) or newer, 64-bit. |
+| **RAM** | 8 GB recommended. 6 GB is untested. |
+| **Storage** | About 7 GB for the installed game, plus room for the disc image while installing (about 15 GB free in total). |
+| **Controller** | Required. The built-in controls of a handheld, or a Bluetooth or USB gamepad. |
 
-### In Progress
-- [ ] RAGE engine structure reverse engineering
-- [ ] GPU/rendering pipeline implementation
-- [ ] Game-specific patches and fixes
+**Not supported:**
 
-### Completed (Previously TODO)
-- [x] Audio system implementation (XMA decoder, SDL2 driver)
-- [x] Save data handling (full save system with GTA IV format support)
-- [x] Input remapping for GTA IV controls (SDL HID driver, GTA4 input patches)
-- [x] Network/multiplayer stubs (NetDll_XNetStartup, XLive stubs)
-- [x] Online multiplayer via GameNetworkingSockets (P2P with NAT traversal, no VPN required)
-- [x] File system and RPF archive handling (VFS)
+- **ARM Mali / Immortalis GPUs.** This covers most Exynos chips before the 2200, MediaTek
+  Dimensity/Helio and Google Tensor.
+- **Samsung Xclipse GPUs** (Exynos 2200 and newer).
+- **PowerVR GPUs** and anything else that is not an Adreno.
 
-## Installation
+Why only Adreno: the renderer needs Vulkan 1.2 and was tuned on Turnip. Turnip is Mesa's open-source
+Vulkan driver, and it exists only for Adreno GPUs. The stock Qualcomm driver on older devices
+(including the Adreno 650) exposes only Vulkan 1.1. On other GPUs the bundled driver cannot load,
+and nobody has run the renderer on their vendor drivers.
 
-### Platform Install Directories
+**Adreno 8xx** (Snapdragon 8 Elite) is not supported by the bundled Turnip build. It *might* work
+with the system driver or a newer Turnip build (see [ADVANCED.md](docs/android/ADVANCED.md#driver-selection-drivertxt)),
+but this is untested. Low-end Adreno 6xx parts (610/618/619) should start, but expect them to be
+far too slow.
 
-| Platform | Install Directory |
-|----------|-------------------|
-| Windows | `%LOCALAPPDATA%\LibertyRecomp\` |
-| Linux | `~/.local/share/LibertyRecomp/` |
-| macOS | `~/Library/Application Support/LibertyRecomp/` |
+## Game files required
 
-### Game Files Required
+- The **Xbox 360 GTA IV disc** as an `.iso` image. Only the **USA (NTSC-U)** release has been
+  verified.
+- **Title Update 8** for that release (version **0.0.8.5**), either as the STFS package or as a raw
+  `default.xexp`. The PAL title update (0.0.8.6) is rejected.
 
-You need a legal copy of GTA IV for Xbox 360. Supported formats:
-- Xbox 360 disc images (`.iso`)
-- Extracted game folders
-- XContent packages
-
-See [Dumping Guide](/docs/DUMPING-en.md) for detailed extraction instructions.
-
-### Launch Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `--install` | Force reinstallation (useful if game files were modified) |
-| `--install-dlc` | Force DLC installation only |
-| `--install-check` | Verify file integrity |
-
-## Mod Support
-
-Liberty Recompiled includes **FusionFix-compatible mod loading**. Mods can override game files by placing them in overlay folders.
-
-### Quick Start
-
-1. Create an `update/` folder next to the LibertyRecomp executable
-2. Place mod files inside, mirroring the game's folder structure
-3. Launch the game - mod files automatically override base files
-
-```
-LibertyRecomp/
-├── game/           # Extracted game files
-└── update/         # Place mods here
-    └── common/
-        └── data/
-            └── handling.dat  # Overrides base handling.dat
-```
-
-### Supported Overlay Locations
-
-| Priority | Location | Description |
-|----------|----------|-------------|
-| 100 | `mods/update/` | Highest priority |
-| 50 | `update/` | Standard FusionFix location |
-| 40 | `GTAIV.EFLC.FusionFix/update/` | Alternative location |
-
-See [MOD_SUPPORT.md](/docs/MOD_SUPPORT.md) for detailed documentation.
-
-## Building
-
-Install the [platform prerequisites](docs/BUILDING.md#1-install-prerequisites), then:
-
-```bash
-git clone https://github.com/OZORDI/LibertyRecomp.git
-cd LibertyRecomp
-python3 tools/setup_repo.py
-```
-
-Setup fetches all pinned dependencies and applies the required source patches.
-On Windows use `py -3` instead of `python3`. After pulling an update:
-
-```bash
-git -c submodule.recurse=false pull --ff-only
-python3 tools/setup_repo.py
-```
-
-See [Building Liberty Recompiled](docs/BUILDING.md) for build presets, CMake 4 support,
-prerequisites, and recovery from incomplete/manual dependency downloads.
+See the upstream [dumping guide](docs/DUMPING-en.md) for how to get these files from your own
+console and disc.
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Building Guide](/docs/BUILDING.md) | Build instructions for all platforms |
-| [Dumping Guide](/docs/DUMPING-en.md) | How to extract game files from Xbox 360 |
-| [Mod Support](/docs/MOD_SUPPORT.md) | FusionFix-compatible mod loading |
-| [Installation Architecture](/docs/INSTALLATION_ARCHITECTURE.md) | Platform paths and install flow |
-| [Online Multiplayer Guide](/docs/ONLINE_MULTIPLAYER.md) | Setup guide for online play |
+| Document | Contents |
+|---|---|
+| [Installation and first launch](docs/android/INSTALL.md) | Installing the APK, copying the game files, the first-run installer, upgrading |
+| [Advanced configuration](docs/android/ADVANCED.md) | `args.txt` settings, live tuning, driver selection, logs, performance presets |
+| [What was done for Android](docs/android/PORTING.md) | Technical write-up of the port: build, platform layer, driver, renderer and stability work |
+| [Building from source](docs/android/BUILDING.md) | Building the APK yourself |
+| [Upstream README](README_UPSTREAM.md) | The original Liberty Recompiled README (desktop builds, mods, online) |
 
-## Performance Comparison
+## Credits
 
-Performance comparison of GTA IV running on macOS using different methods:
+- [Liberty Recompiled](https://github.com/OZORDI/LibertyRecomp) by OZORDI and contributors, and the
+  [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) it is built on. Almost all of the hard work
+  of recompiling GTA IV is theirs. This fork adds the Android platform layer and the Android
+  performance work.
+- [Mesa Turnip](https://docs.mesa3d.org/drivers/freedreno.html), the open-source Adreno Vulkan driver.
+  The bundled build is StevenMXZ's Turnip 26.3.0-R6.
+- [libadrenotools](https://github.com/bylaws/libadrenotools) by bylaws, which loads a custom driver
+  into an app.
+- The Vulkan driver proxy comes from [skate3-android](https://github.com/andrewnakas/skate3-android)
+  and [skate3-pocket](https://github.com/AlanConstantino/skate3-pocket).
+- [SDL3](https://github.com/libsdl-org/SDL) for the Android activity, input and audio.
 
-| Method | Screenshot |
-|--------|------------|
-| **Crossover (Wine)** | ![Crossover Performance](docs/images/perf_crossover.png) |
-| **Xenia (Xbox 360 Emulator)** | ![Xenia Performance](docs/images/perf_xenia.png) |
-| **RPCS3 (PS3 Emulator)** | ![RPCS3 Performance](docs/images/perf_rpcs3.png) |
+Grand Theft Auto IV is a trademark of Take-Two Interactive Software. This project is not affiliated
+with or endorsed by Rockstar Games or Take-Two Interactive.
