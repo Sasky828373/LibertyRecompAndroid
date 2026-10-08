@@ -25,6 +25,12 @@ BTW, Any feedback is very appreciated, [Issues](https://github.com/vaduur/Libert
 > Expect crashes and rough edges. It has been developed and tested on **one device**, a
 > Retroid Pocket 5 (Snapdragon 865 / Adreno 650).
 
+> [!NOTE]
+> New features land in **[pre-releases](https://github.com/vaduur/LibertyRecompAndroid/releases)**
+> first, while they are being tested. The release marked *Latest* is the stable one. Pre-releases
+> are listed above it and marked *Pre-release*. Feedback on them is welcome in
+> [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues).
+
 **This project does not include any game assets.** You need your own legally obtained copy of the
 Xbox 360 game and its title update. Nothing here helps you get them.
 
