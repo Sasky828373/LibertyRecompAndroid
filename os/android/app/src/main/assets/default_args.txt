@@ -22,3 +22,5 @@
 --gta4_output_height_cap=1080
 # 30 FPS with VSync: 30 divides the 60 Hz panel evenly.
 --gta4_present_mode=vsync
+# The 30 FPS guard shortens shadows near the budget; off by default.
+--gta4_fps_guard=0

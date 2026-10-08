@@ -6939,10 +6939,13 @@ void Gta4NativeGraphicsSystem::UpdateFpsGuard(double interval_ms, uint64_t now, 
   const auto seconds_since = [&](uint64_t tick) {
     return tick ? double(now - tick) / double(frequency) : 0.0;
   };
+  // Recovery counts ~29 fps as on budget: a GPU-bound scene that settles just
+  // under 30 (one 50 ms frame every few seconds) otherwise never recovers
+  // and keeps shadows short indefinitely.
   if (interval_ms > 36.0) {
     if (!fps_guard_slow_since_tick_) fps_guard_slow_since_tick_ = now;
     fps_guard_fast_since_tick_ = 0;
-  } else if (interval_ms <= 33.6) {
+  } else if (interval_ms <= 34.5) {
     if (!fps_guard_fast_since_tick_) fps_guard_fast_since_tick_ = now;
     fps_guard_slow_since_tick_ = 0;
   } else {
