@@ -234,6 +234,8 @@ REXCVAR_DEFINE_BOOL(gta4_native_partial_constant_snapshot, true, "GTA IV/Graphic
 REXCVAR_DEFINE_BOOL(gta4_native_recycle_commands, true, "GTA IV/Graphics/Native Renderer",
                     "Re-initialize retired commands on the retirement thread and reuse them, "
                     "instead of destroying them and constructing new ones on the title thread");
+REXCVAR_DEFINE_BOOL(gta4_native_dedupe_vertex_bindings, true, "GTA IV/Graphics/Native Renderer",
+                    "Skip vkCmdBindVertexBuffers when the binding already holds that buffer and offset");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -3657,8 +3659,7 @@ void Gta4NativeGraphicsSystem::PublishStagedDrawCommandsLocked() {
   for (auto& staged : staged_draw_commands_) {
     staged->diagnostic_submit_sequence = ++diagnostic_submit_sequence_;
     staged->diagnostic_producer_epoch = diagnostic_producer_epoch_;
-    QueueTextureProtection(*staged, true);
-    render_queue_.push_back(std::move(staged));
+    render_queue_.push_back(std::move(staged));  // Retained when it was staged.
   }
   staged_draw_commands_.clear();
 }
@@ -3757,6 +3758,7 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
   // (which the worker also needs) is taken; the queue then retains from the
   // dense generation array.
   CollectTextureProtection(native_command);
+  QueueTextureProtection(native_command, true);
   if (stageable && !phone_envelope && !tv_envelope && !fire_envelope && !profile_transport &&
       REXCVAR_GET(gta4_native_stage_draw_commands)) {
     staged_draw_commands_.push_back(std::move(native_command_owner));
@@ -3811,7 +3813,6 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
       native_command.profile_transport = {enqueued, enqueued-capture_begin,
           capture_acquired-capture_begin, queue_lock_end-queue_lock_begin, backpressure_end-queue_lock_end};
     }
-    QueueTextureProtection(native_command, true);
     render_queue_.push_back(std::move(native_command_owner));
     if (title_header.type == CommandType::kPresent) {
       ++queued_title_presents_;
@@ -6104,13 +6105,18 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
         continue;
       }
       const size_t count = std::min<size_t>(32, render_queue_.size());
-      std::lock_guard protection_lock(worker_protection_mutex_);
-      for (size_t i = 0; i < count; ++i) {
-        worker_command_batch_.push_back(render_queue_.TakeFront());
-        QueueTextureProtection(worker_command_batch_.back(), false);
+      {
+        std::lock_guard protection_lock(worker_protection_mutex_);
+        for (size_t i = 0; i < count; ++i) worker_command_batch_.push_back(render_queue_.TakeFront());
       }
       queued_after_batch = render_queue_.size();
       wake_producer = producer_waiting_ && queued_title_presents_ < MaxQueuedTitlePresents();
+      lock.unlock();
+      // The batch protects these commands now; drop their queue references
+      // without holding the queue lock (only this thread writes the batch).
+      std::lock_guard queued_lock(queued_protection_mutex_);
+      for (size_t i = 0; i < worker_command_batch_.size(); ++i)
+        QueueTextureProtectionLocked(worker_command_batch_[i], false);
     }
     NativeCommandPool<NativeCommand>::Owner command_owner;
     {
@@ -6808,6 +6814,7 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
   {
     std::lock_guard lock(render_mutex_);
     render_queue_.clear();
+    std::lock_guard protection_lock(queued_protection_mutex_);
     queued_texture_protection_.Reset();
     queued_title_presents_ = 0;
     producer_waiting_ = false;
@@ -19217,6 +19224,12 @@ void Gta4NativeGraphicsSystem::CollectTextureProtection(const NativeCommand& com
 }
 
 void Gta4NativeGraphicsSystem::QueueTextureProtection(const NativeCommand& command, bool retain) {
+  std::lock_guard lock(queued_protection_mutex_);
+  QueueTextureProtectionLocked(command, retain);
+}
+
+void Gta4NativeGraphicsSystem::QueueTextureProtectionLocked(const NativeCommand& command,
+                                                            bool retain) {
   auto apply = [&](uint64_t generation) {
     const bool ok = retain ? queued_texture_protection_.Retain(generation)
                            : queued_texture_protection_.Release(generation);
@@ -19248,6 +19261,7 @@ void Gta4NativeGraphicsSystem::AppendWorkerTextureProtection(
 
 void Gta4NativeGraphicsSystem::AppendQueuedTextureProtection(std::unordered_set<uint64_t>& generations) const {
   // Caller owns render_mutex_; fallback retains the previous exact scan policy.
+  std::lock_guard lock(queued_protection_mutex_);
   if (queued_texture_protection_.valid()) queued_texture_protection_.AppendTo(generations);
   else for (const auto& command : render_queue_) AddProtectedTextureGenerations(command, generations);
 }
@@ -22536,9 +22550,8 @@ bool Gta4NativeGraphicsSystem::RecordPrimitiveUpBatch(
   const auto& dfn = vulkan_provider->vulkan_device()->functions();
   const VkBuffer default_vertex_buffer = upload_buffer_.buffer;
   const VkDeviceSize default_vertex_offset = 0;
-  dfn.vkCmdBindVertexBuffers(command_buffer, kDefaultVertexBinding, 1, &default_vertex_buffer,
-                             &default_vertex_offset);
-  dfn.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertices.buffer, &vertices.offset);
+  BindNativeVertexBuffer(command_buffer, kDefaultVertexBinding, default_vertex_buffer, default_vertex_offset);
+  BindNativeVertexBuffer(command_buffer, 0, vertices.buffer, vertices.offset);
   dfn.vkCmdBindIndexBuffer(command_buffer, indices.buffer, indices.offset, VK_INDEX_TYPE_UINT32);
   ObserveNativeGpuProfileDraw(first, pipeline, target.samples, 0, uint32_t(index_count));
   dfn.vkCmdDrawIndexed(command_buffer, uint32_t(index_count), 1, 0, 0, 0);
@@ -22860,11 +22873,10 @@ bool Gta4NativeGraphicsSystem::RecordPrimitiveUp(VkCommandBuffer command_buffer,
   const auto& dfn = vulkan_provider->vulkan_device()->functions();
   const VkBuffer default_vertex_buffer = upload_buffer_.buffer;
   const VkDeviceSize default_vertex_offset = 0;
-  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindVertexBuffers(command_buffer, kDefaultVertexBinding, 1, &default_vertex_buffer,
-                             &default_vertex_offset); });
+  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return BindNativeVertexBuffer(command_buffer, kDefaultVertexBinding, default_vertex_buffer, default_vertex_offset); });
   const VkBuffer vertex_buffer = vertex_allocation.buffer;
   const VkDeviceSize vertex_offset = vertex_allocation.offset;
-  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer, &vertex_offset); });
+  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return BindNativeVertexBuffer(command_buffer, 0, vertex_buffer, vertex_offset); });
   if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kRectangleList)) {
     const uint32_t rectangle_count = host_vertex_count / 4;
     for (uint32_t rectangle = 0; rectangle < rectangle_count; ++rectangle) {
@@ -22964,8 +22976,7 @@ bool Gta4NativeGraphicsSystem::RecordPrimitive(VkCommandBuffer command_buffer,
   const auto& dfn = vulkan_provider->vulkan_device()->functions();
   const VkBuffer upload_buffer = upload_buffer_.buffer;
   const VkDeviceSize default_vertex_offset = 0;
-  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindVertexBuffers(command_buffer, kDefaultVertexBinding, 1, &upload_buffer,
-                             &default_vertex_offset); });
+  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return BindNativeVertexBuffer(command_buffer, kDefaultVertexBinding, upload_buffer, default_vertex_offset); });
   std::array<bool, kVertexStreamCount> required_streams{};
   if (!GetRequiredVertexStreams(*command.pipeline_state, required_streams)) {
     return fail("vertex-input-layout");
@@ -23003,8 +23014,7 @@ bool Gta4NativeGraphicsSystem::RecordPrimitive(VkCommandBuffer command_buffer,
       return fail("vertex-stream-upload");
     }
     const VkDeviceSize stream_offset = stream_allocation.offset + stream_state.offset;
-    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindVertexBuffers(command_buffer, stream, 1, &stream_allocation.buffer,
-                               &stream_offset); });
+    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return BindNativeVertexBuffer(command_buffer, stream, stream_allocation.buffer, stream_offset); });
   }
 
   if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kQuadList)) {
@@ -23049,6 +23059,20 @@ bool Gta4NativeGraphicsSystem::RecordPrimitive(VkCommandBuffer command_buffer,
   }
   TraceModernShaderDraw(command, target);
   return true;
+}
+
+void Gta4NativeGraphicsSystem::BindNativeVertexBuffer(VkCommandBuffer command_buffer,
+                                                      uint32_t binding, VkBuffer buffer,
+                                                      VkDeviceSize offset) {
+  // The cache is always updated, so turning the option back on cannot trust
+  // a binding it did not see.
+  const bool changed = native_draw_state_cache_.UpdateVertexBuffer(
+      NativeVulkanHandleIdentity(command_buffer), binding, NativeVulkanHandleIdentity(buffer),
+      uint64_t(offset));
+  if (!changed && REXCVAR_GET(gta4_native_dedupe_vertex_bindings)) return;
+  auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+  vulkan_provider->vulkan_device()->functions().vkCmdBindVertexBuffers(command_buffer, binding, 1,
+                                                                       &buffer, &offset);
 }
 
 bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_buffer,
@@ -23103,8 +23127,7 @@ bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_bu
   const auto& dfn = vulkan_provider->vulkan_device()->functions();
   const VkBuffer upload_buffer = upload_buffer_.buffer;
   const VkDeviceSize default_vertex_offset = 0;
-  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindVertexBuffers(command_buffer, kDefaultVertexBinding, 1, &upload_buffer,
-                             &default_vertex_offset); });
+  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return BindNativeVertexBuffer(command_buffer, kDefaultVertexBinding, upload_buffer, default_vertex_offset); });
   std::array<bool, kVertexStreamCount> required_streams{};
   if (!GetRequiredVertexStreams(*command.pipeline_state, required_streams)) {
     return fail("vertex-input-layout");
@@ -23136,8 +23159,7 @@ bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_bu
       return fail("vertex-stream-upload");
     }
     const VkDeviceSize stream_offset = stream_allocation.offset + stream_state.offset;
-    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return dfn.vkCmdBindVertexBuffers(command_buffer, stream, 1, &stream_allocation.buffer,
-                               &stream_offset); });
+    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return BindNativeVertexBuffer(command_buffer, stream, stream_allocation.buffer, stream_offset); });
   }
 
   const uint64_t element_size = index32 ? sizeof(uint32_t) : sizeof(uint16_t);

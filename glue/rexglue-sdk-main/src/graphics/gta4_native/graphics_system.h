@@ -1382,6 +1382,8 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void ApplyStateCommand(const NativeCommand& command);
   bool ApplyShaderConstantDelta(NativeCommand& command, uint32_t device);
   bool SnapshotDrawConstants(const NativeCommand& command, uint32_t device);
+  void BindNativeVertexBuffer(VkCommandBuffer command_buffer, uint32_t binding, VkBuffer buffer,
+                              VkDeviceSize offset);
   bool InitializeShaderCache();
   static bool ReflectVertexInputs(const std::vector<uint32_t>& spirv,
                                   std::vector<NativeVertexInput>& inputs);
@@ -1626,6 +1628,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     VisitNativeCommandTextureGenerations(command, visit);
   }
   void QueueTextureProtection(const NativeCommand& command, bool retain);
+  void QueueTextureProtectionLocked(const NativeCommand& command, bool retain);
   static void CollectTextureProtection(const NativeCommand& command);
   void AppendQueuedTextureProtection(std::unordered_set<uint64_t>& generations) const;
   void ClearNativeFrameCommands();
@@ -1835,7 +1838,13 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   NativeOwnedCommands<NativeCommand> worker_command_batch_;
   size_t worker_command_cursor_ = 0;
   void AppendWorkerTextureProtection(std::unordered_set<uint64_t>& generations) const;
-  NativeTextureProtectionIndex queued_texture_protection_; // render_mutex_ owns this.
+  // Its own lock, not render_mutex_: the title thread retains a command's
+  // generations before queueing it and the worker releases them after taking
+  // it, so neither holds the queue lock for this. In between, the command is
+  // counted twice (queue index and staging or worker batch), which only
+  // widens the protected set. Lock order: render_mutex_, then this.
+  NativeTextureProtectionIndex queued_texture_protection_;
+  mutable std::mutex queued_protection_mutex_;
   uint32_t queued_title_presents_ = 0;
   bool producer_waiting_ = false;
   uint64_t diagnostic_submit_sequence_ = 0;

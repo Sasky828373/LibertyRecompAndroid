@@ -46,6 +46,13 @@ class NativeDrawStateCache {
   bool UpdatePushConstants(uint64_t layout, const std::array<uint64_t, 3>& addresses) {
     return push_constants_.Update({layout, addresses});
   }
+  // Vertex buffer bindings are command-buffer state that survives pipeline
+  // and render-pass changes; the command buffer is part of the value.
+  bool UpdateVertexBuffer(uint64_t command_buffer, uint32_t binding, uint64_t buffer,
+                          uint64_t offset) {
+    if (binding >= vertex_buffers_.size()) return true;
+    return vertex_buffers_[binding].Update({command_buffer, buffer, offset});
+  }
 
  private:
   template <typename Value>
@@ -74,6 +81,7 @@ class NativeDrawStateCache {
   Tracked<std::array<uint32_t, 6>> stencil_;
   Tracked<std::array<uint32_t, 4>> blend_constants_;
   Tracked<LayoutValues<3>> push_constants_;
+  std::array<Tracked<std::array<uint64_t, 3>>, 32> vertex_buffers_;
 };
 
 }  // namespace rex::graphics::gta4_native
