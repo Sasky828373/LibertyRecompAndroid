@@ -10,6 +10,9 @@ You need two files from your own copy of the game:
 | `something.iso` | The GTA IV Xbox 360 disc image (USA release, about 7.8 GB). |
 | Title update 8 | Version 0.0.8.5 for the USA release, either the STFS package (a file with a long hexadecimal name) or a raw `default.xexp`. |
 
+The MD5 and SHA-1 hashes of the tested files are listed in the
+[README](../../README.md#game-files-required).
+
 ## 1. Install the APK
 
 1. Download the latest `LibertyRecompAndroid-*.apk` from the [Releases](../../../../releases) page.

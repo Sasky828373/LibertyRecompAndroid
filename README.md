@@ -112,6 +112,17 @@ the touch controls option in the game's settings menu.
 - **Title Update 8** for that release (version **0.0.8.5**), either as the STFS package or as a raw
   `default.xexp`. The PAL title update (0.0.8.6) is rejected.
 
+The port was developed and tested with these exact files:
+
+| File | Size | MD5 | SHA-1 |
+|---|---|---|---|
+| `Grand Theft Auto IV (USA) (En,Fr,De,Es,It).iso` (full disc image) | 7,835,492,352 bytes | `f0a046aed1520a913b2125f0a69ee7d0` | `caa48dfb3b1b2fe3131e61fc66e35a22c6d0ba13` |
+| `TU_1A581VI_000000K000000.0000000000205` (Title Update 8, STFS package) | 3,715,072 bytes | `f041b5f6721d7ee578560bac21668826` | `88d1c438814298b6da987b3ad5edc7e48a769ac9` |
+
+If your files match, they are known to work. Other dumps of the same USA disc (for example
+trimmed or extracted images) may work too, but they have not been tested. Check your files with
+`certutil -hashfile <file> MD5` on Windows, or `md5sum <file>` on Linux and macOS.
+
 See the upstream [dumping guide](docs/DUMPING-en.md) for how to get these files from your own
 console and disc.
 
