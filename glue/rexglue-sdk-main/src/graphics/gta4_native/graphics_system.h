@@ -436,6 +436,29 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     // User-provided so pool construction does not zero the whole ~3 KB
     // command before running the member initializers below.
     NativeCommand() {}
+    // Retirement re-initializes pooled commands in place: everything is
+    // destroyed and default-constructed again, except that the constant delta
+    // buffers keep a bounded capacity, so the next draw captured into this
+    // slot does not allocate them.
+    void RecycleInPlace() {
+      constexpr size_t kKeptBytes = 1024;
+      const auto keep = [](auto& buffer) {
+        auto kept = std::move(buffer);
+        kept.clear();
+        if (kept.capacity() * sizeof(kept[0]) > kKeptBytes) kept = {};
+        return kept;
+      };
+      auto vertex_ranges = keep(shader_constant_delta.vertex_constants.ranges);
+      auto vertex_payload = keep(shader_constant_delta.vertex_constants.payload);
+      auto pixel_ranges = keep(shader_constant_delta.pixel_constants.ranges);
+      auto pixel_payload = keep(shader_constant_delta.pixel_constants.payload);
+      std::destroy_at(this);
+      std::construct_at(this);
+      shader_constant_delta.vertex_constants.ranges = std::move(vertex_ranges);
+      shader_constant_delta.vertex_constants.payload = std::move(vertex_payload);
+      shader_constant_delta.pixel_constants.ranges = std::move(pixel_ranges);
+      shader_constant_delta.pixel_constants.payload = std::move(pixel_payload);
+    }
     std::shared_ptr<const TemporalCommand> temporal_instance;
     NativeTextureImage* temporal_scene_binding = nullptr;
     uint32_t temporal_scene_stage = UINT32_MAX;

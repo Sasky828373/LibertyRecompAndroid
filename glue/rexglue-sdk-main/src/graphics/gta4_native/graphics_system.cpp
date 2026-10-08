@@ -231,6 +231,9 @@ static uint32_t NativeConstantUploadPrefix(const Shader* shader, size_t bank_siz
 REXCVAR_DEFINE_BOOL(gta4_native_partial_constant_snapshot, true, "GTA IV/Graphics/Native Renderer",
                     "Snapshot only the part of each constant bank the draw's shaders read "
                     "(extended if a later draw of the same state reads more)");
+REXCVAR_DEFINE_BOOL(gta4_native_recycle_commands, true, "GTA IV/Graphics/Native Renderer",
+                    "Re-initialize retired commands on the retirement thread and reuse them, "
+                    "instead of destroying them and constructing new ones on the title thread");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -19254,6 +19257,7 @@ bool Gta4NativeGraphicsSystem::ResetImmutableBindings(NativeFrameConstantArena& 
 }
 
 void Gta4NativeGraphicsSystem::ClearNativeFrameCommands() {
+  native_command_pool_.SetRecycling(REXCVAR_GET(gta4_native_recycle_commands));
   if (REXCVAR_GET(gta4_native_async_command_retire)) {
     command_retirer_.Retire(current_frame_.TakeAll());
   } else {

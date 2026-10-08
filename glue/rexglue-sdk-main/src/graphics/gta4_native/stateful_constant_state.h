@@ -68,7 +68,10 @@ inline bool CaptureConstantPayloadDelta(std::span<const uint8_t> source,
                                         const DirtyRangeSet& dirty_ranges,
                                         uint32_t bytes_per_element,
                                         ConstantPayloadDelta& result) {
-  result = {};
+  // Cleared, not reassigned: recycled commands keep these buffers' capacity.
+  result.ranges.clear();
+  result.payload.clear();
+  result.complete_snapshot = false;
   if (!bytes_per_element) {
     return false;
   }

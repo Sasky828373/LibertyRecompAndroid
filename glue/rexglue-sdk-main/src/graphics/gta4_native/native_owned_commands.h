@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cassert>
 #include <condition_variable>
 #include <cstddef>
@@ -40,9 +41,24 @@ class NativeCommandPool {
   };
   using Owner = std::unique_ptr<T, Deleter>;
 
+  // Recycling: retirement re-initializes a command in place (T::RecycleInPlace)
+  // instead of destroying it, and Make() hands that object out as is. The
+  // producer then neither constructs ~3 KB per command nor allocates buffers
+  // the previous occupant already had.
+  static constexpr bool kRecyclable = requires(T& value) { value.RecycleInPlace(); };
+  void SetRecycling(bool enabled) { recycling_.store(enabled, std::memory_order_relaxed); }
+
   template <typename... Args>
   Owner Make(Args&&... args) {
     void* storage = resource_.allocate(sizeof(T), alignof(T));
+    auto* slot = static_cast<Slot*>(storage);
+    if (slot->constructed) {
+      // Ordered after the retiring thread's writes by the free-list mutex.
+      slot->constructed = false;
+      T* recycled = std::launder(reinterpret_cast<T*>(slot->storage));
+      if constexpr (sizeof...(Args) == 0) return Owner(recycled, Deleter{&resource_});
+      std::destroy_at(recycled);
+    }
     try {
       T* value = std::construct_at(static_cast<T*>(storage), std::forward<Args>(args)...);
       return Owner(value, Deleter{&resource_});
@@ -68,8 +84,17 @@ class NativeCommandPool {
         continue;
       }
       T* object = owner.release();
-      std::destroy_at(object);
       auto* slot = reinterpret_cast<Slot*>(object);
+      if constexpr (kRecyclable) {
+        if (recycling_.load(std::memory_order_relaxed)) {
+          object->RecycleInPlace();
+          slot->constructed = true;
+        } else {
+          std::destroy_at(object);
+        }
+      } else {
+        std::destroy_at(object);
+      }
       slot->next = first;
       first = slot;
       if (!last) last = slot;
@@ -83,6 +108,7 @@ class NativeCommandPool {
   struct Slot {
     alignas(T) std::byte storage[sizeof(T)];
     Slot* next = nullptr;
+    bool constructed = false;  // storage holds a recycled, default-state T.
   };
   static_assert(std::is_standard_layout_v<Slot> && offsetof(Slot, storage) == 0);
   struct Slab {
@@ -92,6 +118,11 @@ class NativeCommandPool {
   class FixedResource final : public std::pmr::memory_resource {
    public:
     ~FixedResource() override {
+      // Recycled objects still own (empty but allocated) buffers.
+      for (Slot* slot : local_)
+        if (slot->constructed) std::destroy_at(std::launder(reinterpret_cast<T*>(slot->storage)));
+      for (Slot* slot : free_)
+        if (slot->constructed) std::destroy_at(std::launder(reinterpret_cast<T*>(slot->storage)));
       live_ -= local_.size();  // Taken by the allocator cache, never handed out.
       // Destruction occurs after the render worker has joined and owners drain.
       assert(live_ == 0);
@@ -173,6 +204,7 @@ class NativeCommandPool {
     size_t live_ = 0;
   };
   FixedResource resource_;
+  std::atomic<bool> recycling_{true};
 };
 
 // Forward iteration yields commands, never handles. Element addresses stay
