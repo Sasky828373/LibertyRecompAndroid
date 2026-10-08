@@ -150,6 +150,11 @@ Android file picker. The full walkthrough is in [INSTALL.md](docs/android/INSTAL
 - The Vulkan driver proxy comes from [skate3-android](https://github.com/andrewnakas/skate3-android)
   and [skate3-pocket](https://github.com/AlanConstantino/skate3-pocket).
 - [SDL3](https://github.com/libsdl-org/SDL) for the Android activity, input and audio.
+- [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) by StevensND, a ReXGlue port of Need for Speed:
+  Most Wanted to the Nintendo Switch and a great reference for running a ReXGlue recompilation on
+  weak hardware. Our direct-calls tool (`gta4-recomp/tools/direct_calls.py`) is adapted from their
+  `llamadas_directas.py`. Their work on game busy-waits and thread placement led to this port's
+  frame-wait hook and thread pinning experiments.
 
 Grand Theft Auto IV is a trademark of Take-Two Interactive Software. This project is not affiliated
 with or endorsed by Rockstar Games or Take-Two Interactive.
