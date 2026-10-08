@@ -258,6 +258,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.7.2 | On-screen Xbox gamepad replaces the context touch layout; it hides while a controller is connected |
 | 0.5.7.3 | Crash reports: the launcher saves and shows every crash of the game process (signal, backtrace, last log lines) with a Share button; the runtime log is on by default |
 | 0.5.7.4 | Guest memory is created with ASharedMemory (the initializer was never called, so every device used the legacy /dev/ashmem that newer Android builds refuse), with a memfd fallback; a failed start shows a dialog instead of crashing on teardown |
+| 0.5.7.5 | The game picks a landscape output even when its window is still portrait at startup (phones whose natural orientation is portrait got a narrow strip in the middle of the screen) |
 
 ## 7. What is left
 

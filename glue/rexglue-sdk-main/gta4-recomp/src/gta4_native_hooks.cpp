@@ -2776,6 +2776,23 @@ struct NativeResolutionOverride {
   bool active() const { return override_width || override_height; }
 };
 
+// The display window's physical size. On Android the game activity is locked
+// to landscape, but on phones whose natural orientation is portrait the window
+// can still be portrait when the title picks its resolution, before the
+// rotation lands. That baked a portrait-shaped output (a 1440x3120 phone got a
+// narrow strip in the middle of the landscape screen), so take the landscape
+// shape of whatever size the window has right now.
+std::pair<uint32_t, uint32_t> LandscapeDrawableSize() {
+  auto* runtime = rex::Runtime::instance();
+  auto* window = runtime ? runtime->display_window() : nullptr;
+  uint32_t width = window ? window->GetActualPhysicalWidth() : 0;
+  uint32_t height = window ? window->GetActualPhysicalHeight() : 0;
+#if REX_PLATFORM_ANDROID
+  if (height > width) std::swap(width, height);
+#endif
+  return {width, height};
+}
+
 NativeResolutionOverride GetNativeResolutionOverride(uint32_t requested_width,
                                                      uint32_t requested_height) {
   int32_t configured_width = REXCVAR_GET(video_mode_width);
@@ -2801,10 +2818,7 @@ NativeResolutionOverride GetNativeResolutionOverride(uint32_t requested_width,
   // so GTA IV constructs its render graph and projection for the display's
   // physical pixel resolution and aspect ratio from the first frame.
   if (!override_width && !override_height) {
-    auto* runtime = rex::Runtime::instance();
-    auto* window = runtime ? runtime->display_window() : nullptr;
-    const uint32_t display_width = window ? window->GetActualPhysicalWidth() : 0;
-    const uint32_t display_height = window ? window->GetActualPhysicalHeight() : 0;
+    const auto [display_width, display_height] = LandscapeDrawableSize();
     if (display_width && display_height) {
       configured_width = int32_t(display_width);
       configured_height = int32_t(display_height);
@@ -2829,11 +2843,8 @@ NativeResolutionOverride GetNativeResolutionOverride(uint32_t requested_width,
   // Resolution selects a pixel budget; aspect selects a shape within it. Auto
   // follows the drawable even with an explicit resolution preset. Limit both
   // dimensions uniformly before fitting, avoiding independent 4095px clamps.
-  auto* aspect_runtime = rex::Runtime::instance();
-  auto* aspect_window = aspect_runtime ? aspect_runtime->display_window() : nullptr;
-  const gta4::aspect::Extent drawable{
-      aspect_window ? aspect_window->GetActualPhysicalWidth() : 0,
-      aspect_window ? aspect_window->GetActualPhysicalHeight() : 0};
+  const auto [drawable_width, drawable_height] = LandscapeDrawableSize();
+  const gta4::aspect::Extent drawable{drawable_width, drawable_height};
   const auto selected = gta4::aspect::resolution::Select(
       gta4::aspect::resolution::Limit({result.display_width, result.display_height}, 0x0FFF),
       REXCVAR_GET(gta4_aspect_ratio), drawable);
