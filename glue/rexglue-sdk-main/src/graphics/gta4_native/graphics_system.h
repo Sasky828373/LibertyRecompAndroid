@@ -1884,13 +1884,40 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t size = 0;
     uint64_t epoch = 0;
     std::weak_ptr<const NativeBufferResource> resource;
+    bool recent = false;
   };
-  std::array<BufferCaptureCacheSlot, 4096> buffer_capture_cache_{};  // command_capture_mutex_
-  std::atomic<uint64_t> buffer_resources_epoch_{1};
-  void ForgetBufferCapture(uint32_t handle) {
-    BufferCaptureCacheSlot& slot = buffer_capture_cache_[(handle >> 4) & (buffer_capture_cache_.size() - 1)];
-    if (slot.handle == handle) slot.handle = 0;
+  // Two-way sets under a multiplicative hash: far views draw a few thousand
+  // distinct buffers a frame, and a direct-mapped table indexed by handle bits
+  // sent colliding ones to the locked map on every draw.
+  template <typename Slots>
+  static auto& CaptureCacheWay(Slots& slots, uint32_t handle) {
+    constexpr size_t kSets = std::tuple_size_v<Slots> / 2;
+    static_assert(kSets && !(kSets & (kSets - 1)));
+    const size_t set = size_t((handle * 0x9E3779B1u) >> (32 - std::countr_zero(kSets)));
+    auto& first = slots[set * 2];
+    auto& second = slots[set * 2 + 1];
+    auto* way = first.handle == handle ? &first
+                : second.handle == handle ? &second
+                : !first.handle ? &first
+                : !second.handle ? &second
+                : first.recent ? &second : &first;
+    first.recent = way == &first;
+    second.recent = way == &second;
+    return *way;
   }
+  template <typename Slots>
+  static void ForgetCaptureCache(Slots& slots, uint32_t handle) {
+    constexpr size_t kSets = std::tuple_size_v<Slots> / 2;
+    const size_t set = size_t((handle * 0x9E3779B1u) >> (32 - std::countr_zero(kSets)));
+    for (size_t way = 0; way < 2; ++way)
+      if (slots[set * 2 + way].handle == handle) slots[set * 2 + way].handle = 0;
+  }
+  std::array<BufferCaptureCacheSlot, 8192> buffer_capture_cache_{};  // command_capture_mutex_
+  std::atomic<uint64_t> buffer_resources_epoch_{1};
+  BufferCaptureCacheSlot& BufferCaptureSlot(uint32_t handle) {
+    return CaptureCacheWay(buffer_capture_cache_, handle);
+  }
+  void ForgetBufferCapture(uint32_t handle) { ForgetCaptureCache(buffer_capture_cache_, handle); }
   // Producer-only memo of clean texture captures: same handle and identical
   // image fetch words with no texture-map change since give the same resource, so
   // Prepare, both texture_resource_mutex_ acquisitions and three hash lookups
@@ -1901,16 +1928,14 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     std::array<uint32_t, 6> fetch{};
     uint64_t epoch = 0;
     std::weak_ptr<const NativeTextureResource> resource;
+    bool recent = false;
   };
-  std::array<TextureCaptureCacheSlot, 2048> texture_capture_cache_{};  // command_capture_mutex_
+  std::array<TextureCaptureCacheSlot, 4096> texture_capture_cache_{};  // command_capture_mutex_
   std::atomic<uint64_t> texture_resources_epoch_{1};
   TextureCaptureCacheSlot& TextureCaptureSlot(uint32_t handle) {
-    return texture_capture_cache_[(handle >> 4) & (texture_capture_cache_.size() - 1)];
+    return CaptureCacheWay(texture_capture_cache_, handle);
   }
-  void ForgetTextureCapture(uint32_t handle) {
-    TextureCaptureCacheSlot& slot = TextureCaptureSlot(handle);
-    if (slot.handle == handle) slot.handle = 0;
-  }
+  void ForgetTextureCapture(uint32_t handle) { ForgetCaptureCache(texture_capture_cache_, handle); }
   DirtyDeltaScratch producer_dirty_scratch_;  // command_capture_mutex_
   // Pipelined recording: the worker assembles frame N+1 while the recorder
   // thread records and submits frame N from current_frame_. Commands that

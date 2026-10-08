@@ -4973,8 +4973,7 @@ Gta4NativeGraphicsSystem::CaptureBufferResource(uint32_t handle) {
   // Slots are dropped when the handle is dirtied or released; a recorder-side
   // clear or reclamation bumps the epoch. weak_ptr keeps use_count() exact for
   // reclamation.
-  BufferCaptureCacheSlot& cache_slot =
-      buffer_capture_cache_[(handle >> 4) & (buffer_capture_cache_.size() - 1)];
+  BufferCaptureCacheSlot& cache_slot = BufferCaptureSlot(handle);
   const uint64_t cache_epoch = buffer_resources_epoch_.load(std::memory_order_acquire);
   auto remember = [&](const std::shared_ptr<const NativeBufferResource>& resource) {
     cache_slot.handle = handle;
