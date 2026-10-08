@@ -223,13 +223,49 @@ class AuthoritativeConstantState {
   }
 
 
+  // consume: a draw takes the new state at once. The version then holds the
+  // complete bytes and no delta, so nothing is copied twice or allocated for
+  // a replay chain that would never be used.
   template <typename HashCallback>
-  ConstantApplyResult Apply(const ConstantPayloadDelta& delta, HashCallback&& hash_callback) {
+  ConstantApplyResult Apply(const ConstantPayloadDelta& delta, HashCallback&& hash_callback,
+                            bool consume = false) {
     if (!ValidateConstantPayloadDelta(delta, canonical_.size())) {
       return {ConstantApplyStatus::kInvalidDelta, false, current_};
     }
     if (!initialized_ && !delta.complete_snapshot) {
       return {ConstantApplyStatus::kNeedsCompleteSnapshot, false, current_};
+    }
+    if (consume) {
+      if (!CanIncrementStateVersion(version_)) {
+        // Checked before writing: the state must keep matching current_.
+        bool unchanged = initialized_;
+        for (const ConstantDeltaRange& range : delta.ranges) {
+          unchanged = unchanged && std::memcmp(canonical_.data() + range.destination_offset,
+                                               delta.payload.data() + range.payload_offset,
+                                               range.byte_count) == 0;
+        }
+        return {unchanged ? ConstantApplyStatus::kApplied : ConstantApplyStatus::kVersionSpaceExhausted,
+                false, current_};
+      }
+      bool changed = !initialized_;
+      for (const ConstantDeltaRange& range : delta.ranges) {
+        const uint8_t* source = delta.payload.data() + range.payload_offset;
+        uint8_t* destination = canonical_.data() + range.destination_offset;
+        if (initialized_ && std::memcmp(destination, source, range.byte_count) == 0) continue;
+        changed = true;
+        std::memcpy(destination, source, range.byte_count);
+      }
+      if (!changed) return {ConstantApplyStatus::kApplied, false, current_};
+      IncrementStateVersion(version_);
+      initialized_ = true;
+      auto next = std::make_shared<ConstantStateVersion>();
+      next->token = version_;
+      next->content_hash = hash_callback(std::span<const uint8_t>(canonical_));
+      next->byte_size = canonical_.size();
+      next->delta.complete_snapshot = true;
+      next->materialized = ConstantSnapshotPool::Copy(canonical_);
+      current_ = std::move(next);
+      return {ConstantApplyStatus::kApplied, true, current_};
     }
 
     ConstantPayloadDelta changed_delta;

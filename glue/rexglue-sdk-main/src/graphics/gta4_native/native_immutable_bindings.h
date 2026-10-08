@@ -4,10 +4,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <type_traits>
 #include <vector>
+
+#include <xxhash.h>
 
 #include "frame_constant_arena.h"
 #include "native_working_set.h"
@@ -46,10 +49,16 @@ class NativeImmutableBindings {
     }
     bytes = materialize(version);
     if (!bytes || bytes->size() != version->byte_size || bytes->size() > UINT32_MAX) return Result::kFailure;
-    const NativeConstantContentKey key{version->content_hash, uint32_t(kind), written};
+    // Content identity covers only the written prefix: draws whose shaders
+    // read the same bytes share one upload even if the rest of the bank
+    // differs. A version hashed at creation (the whole bank) needs no rehash.
+    const uint64_t content_hash = written == bytes->size() && version->content_hash
+                                      ? version->content_hash
+                                      : XXH3_64bits(bytes->data(), written);
+    const NativeConstantContentKey key{content_hash, uint32_t(kind), written};
     const Entry* candidate = contents_.Find(key);
     Result result = Result::kUploaded;
-    if (candidate && *candidate->bytes == *bytes) {
+    if (candidate && std::memcmp(candidate->bytes->data(), bytes->data(), written) == 0) {
       allocation = candidate->allocation;
       result = Result::kContentHit;
     } else {
@@ -64,7 +73,7 @@ class NativeImmutableBindings {
       if (!uploaded) return Result::kFailure;
     }
     // Own before publishing any pointer-bearing entry. A content-hash match is
-    // never used without equality of the complete guest-endian byte block.
+    // never used without equality of the written guest-endian bytes.
     owners_.push_back(version);
     const Entry entry{allocation, bytes};
     if (!candidate && !contents_.Insert(key, entry)) return Result::kFailure;

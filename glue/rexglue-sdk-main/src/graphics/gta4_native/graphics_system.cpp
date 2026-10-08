@@ -200,6 +200,12 @@ REXCVAR_DEFINE_BOOL(gta4_native_water_reflection_on_demand, true, "GTA IV/Graphi
                     "every 8th frame while occlusion queries find all of that water hidden");
 REXCVAR_DEFINE_BOOL(gta4_native_partial_constant_upload, true, "GTA IV/Graphics/Native Renderer",
                     "Upload only the part of each guest constant bank the draw's shader can read");
+REXCVAR_DEFINE_BOOL(gta4_native_lazy_constant_hash, true, "GTA IV/Graphics/Native Renderer",
+                    "Hash guest constants only where a draw uploads them, over the bytes it reads, "
+                    "instead of hashing the whole bank on every change");
+REXCVAR_DEFINE_BOOL(gta4_native_direct_constant_apply, true, "GTA IV/Graphics/Native Renderer",
+                    "Draws write constant changes straight into the worker's state and snapshot it, "
+                    "without building a copied delta first");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -7062,9 +7068,17 @@ bool Gta4NativeGraphicsSystem::ApplyShaderConstantDelta(NativeCommand& command, 
     }
   }
 
-  const auto content_hash = [](std::span<const uint8_t> bytes) {
-    return XXH3_64bits(bytes.data(), bytes.size());
+  // Diagnostic captures compare whole-bank hashes and keep the eager hash.
+  const bool eager_hash = !REXCVAR_GET(gta4_native_lazy_constant_hash) ||
+                          command.captured_vertex_constants_hash ||
+                          command.captured_pixel_constants_hash;
+  const auto content_hash = [eager_hash](std::span<const uint8_t> bytes) -> uint64_t {
+    return eager_hash ? XXH3_64bits(bytes.data(), bytes.size()) : 0;
   };
+  const bool consume = REXCVAR_GET(gta4_native_direct_constant_apply) &&
+                       (command.type == CommandType::kDrawPrimitive ||
+                        command.type == CommandType::kDrawPrimitiveUp ||
+                        command.type == CommandType::kDrawIndexedPrimitive);
   if (!ValidateConstantPayloadDelta(command.shader_constant_delta.vertex_constants,
                                     state.vertex_constants.byte_size()) ||
       !ValidateConstantPayloadDelta(command.shader_constant_delta.pixel_constants,
@@ -7077,9 +7091,9 @@ bool Gta4NativeGraphicsSystem::ApplyShaderConstantDelta(NativeCommand& command, 
     return false;
   }
   ConstantApplyResult vertex_result =
-      state.vertex_constants.Apply(command.shader_constant_delta.vertex_constants, content_hash);
+      state.vertex_constants.Apply(command.shader_constant_delta.vertex_constants, content_hash, consume);
   ConstantApplyResult pixel_result =
-      state.pixel_constants.Apply(command.shader_constant_delta.pixel_constants, content_hash);
+      state.pixel_constants.Apply(command.shader_constant_delta.pixel_constants, content_hash, consume);
   AuthoritativeScalarState<std::array<uint32_t, 2>>::ApplyResult boolean_result{};
   if (command.shader_constant_delta.booleans_present) {
     boolean_result = state.booleans.Apply(command.shader_constant_delta.booleans);
@@ -7205,8 +7219,17 @@ bool Gta4NativeGraphicsSystem::ApplyShaderConstantDelta(NativeCommand& command, 
     } else {
       ++shader_snapshot_reuses_;
     }
-    command.vertex_constants_hash = vertex_constants->content_hash;
-    command.pixel_constants_hash = pixel_constants->content_hash;
+    // Unhashed versions are identified by address for logs and lineage; the
+    // command retains them, so addresses stay unique while they are compared.
+    const auto constants_identity = [eager_hash](const std::shared_ptr<const ConstantStateVersion>& version) {
+      if (version->content_hash) return version->content_hash;
+      // A version from an earlier lazy command, now compared by a capture.
+      if (eager_hash && version->materialized)
+        return XXH3_64bits(version->materialized->data(), version->materialized->size());
+      return uint64_t(reinterpret_cast<uintptr_t>(version.get()));
+    };
+    command.vertex_constants_hash = constants_identity(vertex_constants);
+    command.pixel_constants_hash = constants_identity(pixel_constants);
     if ((command.captured_vertex_constants_hash &&
          command.captured_vertex_constants_hash != command.vertex_constants_hash) ||
         (command.captured_pixel_constants_hash &&
@@ -13784,6 +13807,16 @@ bool Gta4NativeGraphicsSystem::RecordRoomLightInputs(
   const bool constants_valid = inputs->vertex_constants && inputs->pixel_constants &&
       inputs->vertex_constants->size() == kVertexConstantsSize &&
       inputs->pixel_constants->size() == kPixelConstantsSize;
+  // Lazily hashed versions carry an address, not a content hash: export the
+  // content hash of the bytes instead.
+  if (constants_valid && command.shader_state) {
+    if (!command.shader_state->vertex_constants->content_hash)
+      inputs->vertex_constants_hash =
+          XXH3_64bits(inputs->vertex_constants->data(), inputs->vertex_constants->size());
+    if (!command.shader_state->pixel_constants->content_hash)
+      inputs->pixel_constants_hash =
+          XXH3_64bits(inputs->pixel_constants->data(), inputs->pixel_constants->size());
+  }
   if (!constants_valid) {
     inputs->failure = "immutable-constants-unavailable";
   } else if (XXH3_64bits(inputs->vertex_constants->data(), inputs->vertex_constants->size()) !=
