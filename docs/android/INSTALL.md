@@ -107,10 +107,22 @@ saves.
 
 | Symptom | What to check |
 |---|---|
-| The app closes right after launch | Unsupported GPU (not an Adreno 6xx/7xx) or an ARMv8.0 CPU, see the [requirements](../../README.md#device-requirements). Also check for an invalid line in `args.txt`; deleting the file restores the defaults. |
+| A dialog says no usable Vulkan driver / Vulkan 1.2 is needed | The GPU is not supported, see the [requirements](../../README.md#device-requirements). If you created `driver.txt`, delete it. Details are in `files/last_launch.txt`. |
+| The app closes right after launch, without a dialog | An ARMv8.0 CPU (see the [requirements](../../README.md#device-requirements)) or an invalid line in `args.txt`. Deleting `args.txt` restores the defaults. Check `files/last_launch.txt`. |
 | The installer shows **Not selected** | The files are not directly inside `files/install/`, or the disc image does not end in `.iso`. |
 | The installer rejects the title update | It must be TU8 for the **USA** release (0.0.8.5). The PAL update (0.0.8.6) is not accepted. |
 | Black screen or a crash after changing settings | Delete `args.txt` (defaults come back) and `live_cvars.txt` if you used it. |
 | Something else | Collect a log as described in [ADVANCED.md](ADVANCED.md#logs) and open an issue on the [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues) page. |
 
 Questions, bugs and feedback all go to [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues). Mention your device, the Android version and the port version.
+
+### Collecting information without a PC
+
+- **`files/last_launch.txt`** is written at every start. It holds the device, the chip, the GPU,
+  the Android version and which Vulkan driver was used, or why none could be. Attach it to your
+  issue.
+- **The newest file in `files/Liberty Recompiled/logs/`** is the game's own log.
+- **A full system log** (the same thing `adb logcat` gives) without a PC: enable Developer options
+  (tap *Build number* seven times in *About phone*), then choose *Developer options > Take bug
+  report*. Share the resulting zip.
+- **The GPU and its Vulkan version:** the free *Vulkan Caps Viewer* or *AIDA64* apps show them.

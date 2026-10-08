@@ -308,14 +308,16 @@ EXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) { return JNI_VERSION_1_6; }
 
 EXPORT jstring JNICALL Java_com_libertyrecomp_DriverBridge_nativeInit(
     JNIEnv* env, jclass, jstring native_dir_value, jstring driver_dir_value,
-    jstring filename_value, jboolean custom_value) {
+    jstring filename_value, jboolean custom_value, jboolean fallback_value) {
   std::lock_guard<std::mutex> lock(g_init_mutex);
   const std::string native_dir_arg = JavaString(env, native_dir_value);
   const std::string driver_dir_arg = JavaString(env, driver_dir_value);
   const std::string filename = JavaString(env, filename_value);
   if (env->ExceptionCheck()) return nullptr;
   const bool custom = custom_value == JNI_TRUE;
-  const std::string arguments = Quote(native_dir_arg) + Quote(driver_dir_arg) + Quote(filename) + (custom ? "1" : "0");
+  const bool fallback = fallback_value == JNI_TRUE;
+  const std::string arguments = Quote(native_dir_arg) + Quote(driver_dir_arg) + Quote(filename) +
+                                (custom ? "1" : "0") + (fallback ? "1" : "0");
   if (g_attempted) {
     const std::string response = arguments == g_arguments ? g_status :
         "{\"ok\":false,\"error\":\"Restart the application process before changing drivers\"}";
@@ -340,6 +342,7 @@ EXPORT jstring JNICALL Java_com_libertyrecomp_DriverBridge_nativeInit(
     }
     if (selected) dlclose(selected);
   }
+  const bool proxy_ok = error.empty();
   if (error.empty() && custom) {
     const std::string driver_dir = CanonicalDirectory(driver_dir_arg);
     char file_path[PATH_MAX];
@@ -382,14 +385,43 @@ EXPORT jstring JNICALL Java_com_libertyrecomp_DriverBridge_nativeInit(
     if (!g_get || !g_destroy || g_get == &vkGetInstanceProcAddr || g_destroy == &vkDestroyInstance) {
       error = "Vulkan loader entrypoints are missing or resolve recursively to the proxy";
     } else if (!Probe(devices, error)) {
-      // Keep the exact failure; custom selections never fall back to System.
+      // Keep the exact failure for the status below.
     }
+  }
+  // A custom driver that cannot run this GPU (Turnip on an Adreno 8xx or a
+  // non-Adreno GPU) falls back to the device's own driver when the caller
+  // allows it; whether that driver is good enough is decided by the caller.
+  std::string fallback_from;
+  if (!error.empty() && custom && fallback && proxy_ok) {
+    __android_log_print(ANDROID_LOG_WARN, kTag, "custom driver failed (%s); trying the system driver",
+                        error.c_str());
+    fallback_from = error;
+    error.clear();
+    devices.clear();
+    g_custom = false;
+    g_get = nullptr;
+    g_destroy = nullptr;
+    g_loader = dlopen("/system/lib64/libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!g_loader) {
+      const char* detail = dlerror();
+      error = std::string("System Vulkan loader could not open: ") + (detail ? detail : "unknown error");
+    } else {
+      g_get = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(g_loader, "vkGetInstanceProcAddr"));
+      g_destroy = reinterpret_cast<PFN_vkDestroyInstance>(dlsym(g_loader, "vkDestroyInstance"));
+      if (!g_get || !g_destroy || g_get == &vkGetInstanceProcAddr || g_destroy == &vkDestroyInstance) {
+        error = "Vulkan loader entrypoints are missing or resolve recursively to the proxy";
+      } else {
+        Probe(devices, error);
+      }
+    }
+    if (!error.empty()) error = fallback_from + "; the system driver failed too: " + error;
   }
   if (!error.empty()) {
     g_status = Failure(error);
   } else {
-    g_status = "{\"ok\":true,\"mode\":" + Quote(custom ? "turnip" : "system") +
-        ",\"error\":\"\",\"loader_path\":" + Quote(LoaderPath()) +
+    g_status = "{\"ok\":true,\"mode\":" + Quote(g_custom ? "turnip" : "system") +
+        ",\"error\":\"\",\"fallback_from\":" + Quote(fallback_from) +
+        ",\"loader_path\":" + Quote(LoaderPath()) +
         ",\"devices\":" + devices + "}";
     g_ready.store(true, std::memory_order_release);
     __android_log_print(ANDROID_LOG_INFO, kTag, "Driver initialized: %s", g_status.c_str());

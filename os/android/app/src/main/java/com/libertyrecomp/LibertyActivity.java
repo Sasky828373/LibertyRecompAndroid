@@ -3,6 +3,7 @@ package com.libertyrecomp;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.res.AssetManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -25,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Hosts the Graine RexGlue runtime.
@@ -58,6 +60,10 @@ public class LibertyActivity extends SDLActivity {
     private int mSurfaceWidth;
     private int mSurfaceHeight;
     private String mDriverMode = DriverBridge.TURNIP;
+    /** driver.txt as found, for the launch report. */
+    private String mDriverText;
+    private File mDataRoot;
+    private static final String LAUNCH_REPORT = "last_launch.txt";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -67,11 +73,71 @@ public class LibertyActivity extends SDLActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
-    /** Picks the Vulkan driver before SDL loads libmain.so; see DriverBridge. */
+    /**
+     * Picks the Vulkan driver before SDL loads libmain.so; see DriverBridge.
+     * When no driver can run the game, the error thrown here is shown by
+     * SDLActivity in a dialog instead of the game closing without a word.
+     */
     @Override
     public void loadLibraries() {
-        DriverBridge.initialize(this, mDriverMode);
+        String status = DriverBridge.initialize(this, mDriverMode);
+        String reason = DriverBridge.unusableReason(status);
+        writeLaunchReport(status, reason);
+        if (reason != null) {
+            throw new UnsatisfiedLinkError(reason
+                    + "\n\nSupported GPUs: Qualcomm Adreno 6xx and 7xx."
+                    + "\nA report was saved to Android/data/" + getPackageName()
+                    + "/files/" + LAUNCH_REPORT + ".");
+        }
         super.loadLibraries();
+    }
+
+    /**
+     * Device, GPU and driver facts of this launch in the data folder, so a
+     * player without adb can attach them to a bug report.
+     */
+    @SuppressWarnings("deprecation")
+    private void writeLaunchReport(String driverStatus, String problem) {
+        if (mDataRoot == null) return;
+        StringBuilder report = new StringBuilder();
+        String version = "?";
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            version = info.versionName + " (" + info.versionCode + ")";
+        } catch (Exception ignored) {
+        }
+        report.append("Liberty Recompiled for Android ").append(version).append('\n');
+        report.append("time: ").append(new java.util.Date()).append('\n');
+        report.append("device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                .append(" (").append(Build.DEVICE).append(", board ").append(Build.BOARD)
+                .append(", hardware ").append(Build.HARDWARE).append(")\n");
+        if (Build.VERSION.SDK_INT >= 31) {
+            report.append("soc: ").append(Build.SOC_MANUFACTURER).append(' ')
+                    .append(Build.SOC_MODEL).append('\n');
+        }
+        report.append("android: ").append(Build.VERSION.RELEASE).append(" (API ")
+                .append(Build.VERSION.SDK_INT).append(")\n");
+        report.append("abis: ").append(String.join(", ", Build.SUPPORTED_ABIS)).append('\n');
+        try {
+            report.append("page size: ")
+                    .append(Os.sysconf(android.system.OsConstants._SC_PAGESIZE)).append('\n');
+        } catch (Exception ignored) {
+        }
+        String kgsl = readFirstLine(new File("/sys/class/kgsl/kgsl-3d0/gpu_model"));
+        report.append("kgsl gpu: ").append(kgsl != null ? kgsl : "(not readable or not Adreno)")
+                .append('\n');
+        report.append("driver.txt: ")
+                .append(mDriverText == null ? "(none)" : "\"" + mDriverText + "\"")
+                .append(" -> ").append(mDriverMode).append('\n');
+        report.append("driver status: ").append(driverStatus).append('\n');
+        report.append("result: ").append(problem == null ? "driver usable, starting the game"
+                : "cannot start: " + problem.replace('\n', ' ')).append('\n');
+        try (OutputStream out = new FileOutputStream(new File(mDataRoot, LAUNCH_REPORT))) {
+            out.write(report.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            Log.w(TAG, "writing the launch report failed", e);
+        }
+        Log.i(TAG, "launch report:\n" + report);
     }
 
     @Override
@@ -100,6 +166,7 @@ public class LibertyActivity extends SDLActivity {
     private void prepareEnvironment() {
         File external = getExternalFilesDir(null);
         File dataRoot = external != null ? external : getFilesDir();
+        mDataRoot = dataRoot;
         File resources = new File(getFilesDir(), RESOURCES);
         try {
             syncResources(resources);
@@ -142,10 +209,15 @@ public class LibertyActivity extends SDLActivity {
         }
         mArguments = arguments.toArray(new String[0]);
         String driver = readFirstLine(new File(dataRoot, "driver.txt"));
-        if (driver != null && driver.trim().startsWith(DriverBridge.CUSTOM_PREFIX)) {
-            mDriverMode = driver.trim();
-        } else if (driver != null && driver.trim().equals(DriverBridge.SYSTEM)) {
+        mDriverText = driver;
+        String lower = driver == null ? "" : driver.toLowerCase(Locale.ROOT);
+        if (lower.startsWith(DriverBridge.CUSTOM_PREFIX)) {
+            mDriverMode = DriverBridge.CUSTOM_PREFIX
+                    + driver.substring(DriverBridge.CUSTOM_PREFIX.length()).trim();
+        } else if (lower.equals(DriverBridge.SYSTEM)) {
             mDriverMode = DriverBridge.SYSTEM;
+        } else if (!lower.isEmpty() && !lower.equals(DriverBridge.TURNIP)) {
+            Log.w(TAG, "unknown driver.txt value \"" + driver + "\", using Turnip");
         }
         Log.i(TAG, "data=" + dataRoot + " resources=" + resources
                 + " args=" + mArguments.length + " driver=" + mDriverMode);
@@ -163,7 +235,7 @@ public class LibertyActivity extends SDLActivity {
                 new FileInputStream(file), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                line = line.trim();
+                line = cleanLine(line);
                 int equals = line.indexOf('=');
                 if (line.isEmpty() || line.startsWith("#") || equals <= 0) {
                     continue;
@@ -292,10 +364,19 @@ public class LibertyActivity extends SDLActivity {
         }
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                 new FileInputStream(file), StandardCharsets.UTF_8))) {
-            return reader.readLine();
+            String line = reader.readLine();
+            return line == null ? null : cleanLine(line);
         } catch (IOException e) {
             return null;
         }
+    }
+
+    /**
+     * Trims a line of a settings file, including the byte-order mark some
+     * editors (Windows Notepad among them) put at the start of a file.
+     */
+    private static String cleanLine(String line) {
+        return line.replace("\uFEFF", "").trim();
     }
 
     /** One argument per line; blank lines and lines starting with '#' are skipped. */
@@ -306,7 +387,7 @@ public class LibertyActivity extends SDLActivity {
                     new FileInputStream(file), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    line = line.trim();
+                    line = cleanLine(line);
                     if (!line.isEmpty() && !line.startsWith("#")) {
                         arguments.add(line);
                     }

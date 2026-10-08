@@ -57,16 +57,22 @@ final class DriverBridge {
             "b6dae160802aec1ab48a0953fd9b09d76465a282c4a1d134645218af2a62d9d3";
 
     private static boolean sInitialized;
+    /** What the first initialization returned; the proxy is set up once per process. */
+    private static String sStatus;
 
     private DriverBridge() {}
 
     static native String nativeInit(String nativeLibraryDir, String internalDriverDir,
-                                    String driverFilename, boolean custom);
+                                    String driverFilename, boolean custom,
+                                    boolean allowSystemFallback);
+
+    /** VK_API_VERSION_1_2: the native renderer's minimum. */
+    private static final long VULKAN_1_2 = (1L << 22) | (2L << 12);
 
     /** Loads and initializes the proxy. Returns the native status JSON. */
     static synchronized String initialize(Context context, String mode) {
         if (sInitialized) {
-            return "{\"ok\":true,\"note\":\"already initialized\"}";
+            return sStatus;
         }
         String nativeDir = context.getApplicationInfo().nativeLibraryDir;
         boolean custom = TURNIP.equals(mode);
@@ -97,9 +103,12 @@ final class DriverBridge {
             Log.w(TAG, "cannot create " + driverDir);
         }
         System.load(new File(nativeDir, "libvulkan.so").getAbsolutePath());
+        // A custom driver that cannot run this GPU falls back to the system
+        // driver; an explicit "system" choice has nothing to fall back to.
         String status = nativeInit(nativeDir, driverDir.getAbsolutePath(),
-                custom ? library : "", custom);
+                custom ? library : "", custom, custom);
         sInitialized = true;
+        sStatus = status;
         boolean ok = false;
         try {
             ok = new JSONObject(status).optBoolean("ok", false);
@@ -111,6 +120,43 @@ final class DriverBridge {
             Log.e(TAG, "driver failed: " + status);
         }
         return status;
+    }
+
+    /**
+     * Null when the initialized driver can run the game, otherwise a message
+     * for the player saying what is missing.
+     */
+    static String unusableReason(String status) {
+        JSONObject json;
+        try {
+            json = new JSONObject(status);
+        } catch (JSONException e) {
+            return "The Vulkan driver could not be initialized (unreadable status).";
+        }
+        if (!json.optBoolean("ok", false)) {
+            return "No usable Vulkan driver was found on this device.\n\n"
+                    + json.optString("error", "unknown error");
+        }
+        org.json.JSONArray devices = json.optJSONArray("devices");
+        long best = 0;
+        String name = "unknown GPU";
+        for (int i = 0; devices != null && i < devices.length(); ++i) {
+            JSONObject device = devices.optJSONObject(i);
+            if (device == null) continue;
+            long api = device.optLong("api_version", 0);
+            if (api >= best) {
+                best = api;
+                name = device.optString("name", name);
+            }
+        }
+        if (best >= VULKAN_1_2) return null;
+        String fallbackFrom = json.optString("fallback_from");
+        return "This device's GPU (" + name + ") only offers Vulkan " + (best >> 22) + "."
+                + ((best >> 12) & 0x3FF) + " through its own driver, and the game needs Vulkan 1.2."
+                + (fallbackFrom.isEmpty()
+                        ? "\n\nIf driver.txt says \"system\", delete it to use the bundled Turnip driver."
+                        : "\n\nThe selected custom driver (the bundled Turnip unless driver.txt names "
+                                + "another) could not be used either: " + fallbackFrom);
     }
 
     /** Copies an unpacked package from external storage into exec-capable private storage. */

@@ -168,8 +168,16 @@ for this app only.
 A custom driver package is a folder with the driver library (`.so`) and, optionally, the
 `meta.json` of an AdrenoTools/Turnip release zip. Unpack the zip into `files/drivers/NAME/` and put
 `custom:NAME` in `driver.txt`. If `meta.json` names a `libraryName`, that library is used.
-Otherwise the folder must contain exactly one `.so`. If the custom driver fails to load, the app
-reports it in the log (tag `LibertyDriver`) and does **not** fall back to another driver.
+Otherwise the folder must contain exactly one `.so`.
+
+If the bundled Turnip or a custom driver fails to load, the app falls back to the system driver
+(since 0.5.6.2) and records both in the log (tag `LibertyDriver`) and in `files/last_launch.txt`.
+If the system driver offers less than Vulkan 1.2, the app shows a dialog with the reason and
+exits. An explicit `system` has nothing to fall back to.
+
+The file may be saved with any editor: upper and lower case, surrounding spaces and the invisible
+byte-order mark that Windows Notepad adds are all ignored. The same applies to `args.txt` and
+`env.txt`.
 
 Drivers tried on the Adreno 650:
 
@@ -214,7 +222,9 @@ need **both** of these lines in `args.txt`:
 > Add or remove these two lines together.
 
 Crashes are logged by Android's `DEBUG` tag with a native backtrace. The runtime also writes its
-own log files to `files/Liberty Recompiled/logs/`. Include both when you report a problem on the
+own log files to `files/Liberty Recompiled/logs/`, and every start writes the device, GPU and
+driver details to `files/last_launch.txt`. Without a PC, a full logcat can be captured with
+*Developer options > Take bug report*. Include these when you report a problem on the
 [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues) page, along with the
 device model, the Android version and your `args.txt`.
 

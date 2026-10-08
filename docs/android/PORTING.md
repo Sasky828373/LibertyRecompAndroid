@@ -235,6 +235,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.5 | 1080p output with FSR 1 quality as an alternative profile, crash guard for the freed-object race |
 | 0.5.6 | Shadow fix (console range and map size), indexed draw merging, second crash guard, native 720p defaults |
 | 0.5.6.1 | First public release: documentation, no debug shader dumps in the data folder |
+| 0.5.6.2 | System-driver fallback when Turnip cannot drive the GPU, an error dialog instead of a silent exit, `last_launch.txt` report, settings files tolerate a byte-order mark |
 
 ## 7. What is left
 

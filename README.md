@@ -82,6 +82,12 @@ with the system driver or a newer Turnip build (see [ADVANCED.md](docs/android/A
 but this is untested. Low-end Adreno 6xx parts (610/618/619) should start, but expect them to be
 far too slow.
 
+Since 0.5.6.2, when the bundled Turnip cannot drive the GPU, the app falls back to the device's own
+Vulkan driver if that driver offers Vulkan 1.2. This is untested on any GPU. If no usable driver
+exists, the app shows a dialog with the reason instead of closing silently, and it writes
+`Android/data/com.libertyrecomp/files/last_launch.txt` with the device, GPU and driver details.
+Attach that file when you report a problem.
+
 ## Controls
 
 **An XInput (Xbox-layout) gamepad is strongly recommended.** For example:
