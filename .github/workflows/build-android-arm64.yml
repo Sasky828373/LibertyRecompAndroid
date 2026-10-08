@@ -26,17 +26,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Android SDK and NDK
-        shell: pwsh
-        run: |
-          $sdk = "$env:LOCALAPPDATA\Android\Sdk"
-          New-Item -ItemType Directory -Force -Path $sdk | Out-Null
-          $env:ANDROID_HOME = $sdk
-          $env:ANDROID_SDK_ROOT = $sdk
-          $sdkmanager = Get-ChildItem -Path "$env:ANDROID_HOME" -Filter sdkmanager.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-          if (-not $sdkmanager) { throw "sdkmanager.bat not found; install Android command-line tools on runner" }
-          & $sdkmanager --sdk_root="$sdk" "platforms;android-35" "build-tools;35.0.0" "platform-tools" "ndk;29.0.14206865"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 ndk;29.0.14206865'
+      - name: Cache native build and host tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            out/build/android-arm64
+            out/build/android-driver-proxy
+            out/host-tools
+            glue/rexglue-sdk-main/out/linux-arm64
+          key: gta4-android-native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'os/android/native/CMakeLists.txt', 'os/android/scripts/*.sh') }}
+          restore-keys: |
+            gta4-android-native-${{ runner.os }}-
       - name: Prepare repo and native dependencies
         run: |
           python tools/setup_repo.py
