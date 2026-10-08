@@ -29355,9 +29355,12 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       return performance::GpuRange::kDepthCopy;
     }
     if (command.pipeline_state && command.pipeline_state->pixel_shader_resource) {
-      const performance::GpuRange translucent =
-          PerformanceRangeForTranslucentCategory(ClassifyTranslucentDiagnosticShader(
-              command.pipeline_state->pixel_shader_resource->filename));
+      uint16_t& memo = command.pipeline_state->translucent_range_memo;
+      if (memo == 0xFFFF) {
+        memo = uint16_t(PerformanceRangeForTranslucentCategory(ClassifyTranslucentDiagnosticShader(
+            command.pipeline_state->pixel_shader_resource->filename)));
+      }
+      const auto translucent = performance::GpuRange(memo);
       if (translucent != performance::GpuRange::kCount) {
         return translucent;
       }
@@ -29372,10 +29375,15 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       if(retail!=performance::GpuRange::kUnattributed)return retail;
     }
     if (command.pipeline_state) {
-      const auto* vs = command.pipeline_state->vertex_shader_resource;
-      const auto* ps = command.pipeline_state->pixel_shader_resource;
-      return performance::ProfileShaderCategory(vs ? std::string_view(vs->filename) : std::string_view{},
-                                                ps ? std::string_view(ps->filename) : std::string_view{});
+      uint16_t& memo = command.pipeline_state->shader_category_memo;
+      if (memo == 0xFFFF) {
+        const auto* vs = command.pipeline_state->vertex_shader_resource;
+        const auto* ps = command.pipeline_state->pixel_shader_resource;
+        memo = uint16_t(performance::ProfileShaderCategory(
+            vs ? std::string_view(vs->filename) : std::string_view{},
+            ps ? std::string_view(ps->filename) : std::string_view{}));
+      }
+      return performance::GpuRange(memo);
     }
     return performance::GpuRange::kUnattributed;
   };
@@ -29830,22 +29838,17 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     const NativeCommand& queued_command = current_frame_[command_index];
     // Draws, clears and resolves of the water reflection capture: the reflection
     // texture keeps the previous capture on skipped frames.
-    if (skip_water_reflection &&
+    if ((skip_water_reflection || skip_environment_reflection) &&
         (queued_command.type == CommandType::kDrawPrimitive ||
          queued_command.type == CommandType::kDrawPrimitiveUp ||
          queued_command.type == CommandType::kDrawIndexedPrimitive ||
-         queued_command.type == CommandType::kClear || queued_command.type == CommandType::kResolve) &&
-        performance_range_for_command(queued_command) == performance::GpuRange::kWaterReflections) {
-      continue;
-    }
-    if (skip_environment_reflection &&
-        (queued_command.type == CommandType::kDrawPrimitive ||
-         queued_command.type == CommandType::kDrawPrimitiveUp ||
-         queued_command.type == CommandType::kDrawIndexedPrimitive ||
-         queued_command.type == CommandType::kClear || queued_command.type == CommandType::kResolve) &&
-        performance_range_for_command(queued_command) ==
-            performance::GpuRange::kEnvironmentReflections) {
-      continue;
+         queued_command.type == CommandType::kClear || queued_command.type == CommandType::kResolve)) {
+      // One classification serves both checks.
+      const performance::GpuRange range = performance_range_for_command(queued_command);
+      if ((skip_water_reflection && range == performance::GpuRange::kWaterReflections) ||
+          (skip_environment_reflection && range == performance::GpuRange::kEnvironmentReflections)) {
+        continue;
+      }
     }
     if (lazy_resolves && queued_command.type == CommandType::kResolve &&
         queued_command.resolve_destination && queued_command.resolve_swap == UINT32_MAX) {

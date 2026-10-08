@@ -298,6 +298,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     // Only the render worker updates memoization on an immutable snapshot.
     mutable NativePipelineLookupMemo<NativeFixedFunctionState, kRenderTargetCount, VkPipeline>
         pipeline_lookup_memo;
+    // Recorder-only memos of the shader-name classifications behind GPU range
+    // attribution (string searches over both filenames); 0xFFFF: not computed.
+    mutable uint16_t translucent_range_memo = 0xFFFF;
+    mutable uint16_t shader_category_memo = 0xFFFF;
   };
 
   struct NativePersistentBufferEntry;
