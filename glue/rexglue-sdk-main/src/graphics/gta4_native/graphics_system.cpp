@@ -29824,7 +29824,10 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       const NativeTextureResource* frontbuffer = present_source.get();
       bool read = false;
       for (const NativeCommand& scan : current_frame_) {
-        for (const auto& texture : scan.textures) read |= texture.get() == frontbuffer;
+        for (const auto& texture : scan.textures) {
+          read |= texture && (texture.get() == frontbuffer ||
+                              texture->packed_depth_source.get() == frontbuffer);
+        }
         read |= scan.postfx_half_scene.get() == frontbuffer ||
                 scan.depth_handoff_source.get() == frontbuffer;
         if (read) break;
