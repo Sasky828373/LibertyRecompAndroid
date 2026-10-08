@@ -91,6 +91,20 @@ far too slow.
 See the upstream [dumping guide](docs/DUMPING-en.md) for how to get these files from your own
 console and disc.
 
+## Quick start
+
+1. Install `LibertyRecompAndroid-*.apk` from the [Releases](../../releases) page, launch it once, then close it.
+2. Copy your disc image (`*.iso`) and the Title Update 8 file into
+   `Android/data/com.libertyrecomp/files/install/`. A PC over USB is the easiest way.
+3. Launch the app again. The installer picks up both files and installs the game by itself.
+
+This is the installer screen on the first launch:
+
+![The Liberty Recompiled installer on Android](docs/android/images/installer.png)
+
+Do not use its **Select File / Select Folder** buttons: they cannot read files picked through the
+Android file picker. The full walkthrough is in [INSTALL.md](docs/android/INSTALL.md).
+
 ## Documentation
 
 | Document | Contents |
