@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="docs/images/banner_repo.png" alt="Liberty Recompiled" width="800"/>
+    <img src="docs/android/images/banner_android.png" alt="Liberty Recompiled for Android" width="800"/>
 </p>
 
 # LibertyRecompAndroid
