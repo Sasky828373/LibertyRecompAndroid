@@ -137,6 +137,13 @@ Android file picker. The full walkthrough is in [INSTALL.md](docs/android/INSTAL
 | [Building from source](docs/android/BUILDING.md) | Building the APK yourself |
 | [Upstream README](README_UPSTREAM.md) | The original Liberty Recompiled README (desktop builds, mods, online) |
 
+## Contributors
+
+| | Role |
+|---|---|
+| [vaduur](https://github.com/vaduur) | Project lead and tester: device testing on the Retroid Pocket 5, finding and reporting issues, direction and priorities |
+| [Claude](https://claude.com/claude-code) (Anthropic, Claude Code) | Code, debugging, performance work and documentation of the Android port |
+
 ## Credits
 
 - [Liberty Recompiled](https://github.com/OZORDI/LibertyRecomp) by OZORDI and contributors, and the
