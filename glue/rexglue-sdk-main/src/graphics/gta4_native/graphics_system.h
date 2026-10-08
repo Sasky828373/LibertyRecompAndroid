@@ -1392,6 +1392,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void RegisterVectorFontTexture(uint32_t texture, uint32_t vector_font_id);
   bool ApplyShaderConstantDelta(NativeCommand& command, uint32_t device);
   bool SnapshotDrawConstants(const NativeCommand& command, uint32_t device);
+  // Why the next PrepareSurfaceContent may materialize (statistics only):
+  // 0 draw scope, 1 clear scope, 2 resolve clear, 3 other.
+  uint32_t materialize_trigger_ = 3;
   void BindNativeVertexBuffer(VkCommandBuffer command_buffer, uint32_t binding, VkBuffer buffer,
                               VkDeviceSize offset);
   bool InitializeShaderCache();

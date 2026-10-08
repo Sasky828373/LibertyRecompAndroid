@@ -239,6 +239,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_dedupe_vertex_bindings, true, "GTA IV/Graphics/N
 REXCVAR_DEFINE_BOOL(gta4_native_coalesce_state_commands, true, "GTA IV/Graphics/Native Renderer",
                     "Carry title state commands (textures, streams, shaders, targets) to the worker "
                     "inside the next queued command instead of queueing each as its own command");
+REXCVAR_DEFINE_BOOL(gta4_native_clear_skips_materialization, true, "GTA IV/Graphics/Native Renderer",
+                    "Do not copy a surface's aliased EDRAM content into it when a clear covering "
+                    "the whole surface is about to overwrite it");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -525,6 +528,10 @@ std::atomic<uint64_t> g_invisible_draws_skipped{0};
 std::atomic<uint64_t> g_repeated_clears_skipped{0};
 std::atomic<uint64_t> g_water_reflections_skipped{0};
 std::atomic<uint64_t> g_lazy_resolves_skipped{0};
+// Surface materializations by trigger (draw, clear, resolve clear, other) and
+// the ones skipped because a full clear replaces the content anyway.
+std::array<std::atomic<uint64_t>, 4> g_materializations{};
+std::atomic<uint64_t> g_materializations_skipped{0};
 std::atomic<uint64_t> g_draw_state_kept{0};
 std::atomic<uint64_t> g_resolve_swaps_planned{0}, g_resolve_swaps_fast{0};
 std::atomic<uint64_t> g_present_from_surface{0};
@@ -6634,7 +6641,8 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
               __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
                                   "skips/frame: invisible-draws=%.1f repeated-clears=%.1f "
                                   "water-reflection=%.2f lazy-resolves=%.1f kept-state=%.1f "
-                                  "resolve-swaps=%.1f/%.1f present-from-surface=%.2f",
+                                  "resolve-swaps=%.1f/%.1f present-from-surface=%.2f "
+                                  "materialize draw/clear/rclear/other=%.1f/%.1f/%.1f/%.1f skipped=%.1f",
                                   g_invisible_draws_skipped.exchange(0) / 120.0,
                                   g_repeated_clears_skipped.exchange(0) / 120.0,
                                   g_water_reflections_skipped.exchange(0) / 120.0,
@@ -6642,7 +6650,12 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
                                   g_draw_state_kept.exchange(0) / 120.0,
                                   g_resolve_swaps_fast.exchange(0) / 120.0,
                                   g_resolve_swaps_planned.exchange(0) / 120.0,
-                                  g_present_from_surface.exchange(0) / 120.0);
+                                  g_present_from_surface.exchange(0) / 120.0,
+                                  g_materializations[0].exchange(0) / 120.0,
+                                  g_materializations[1].exchange(0) / 120.0,
+                                  g_materializations[2].exchange(0) / 120.0,
+                                  g_materializations[3].exchange(0) / 120.0,
+                                  g_materializations_skipped.exchange(0) / 120.0);
               {
                 std::string a2, a11;
                 for (uint32_t i = 0; i < g_resolve_swap_rejects.size(); ++i) {
@@ -26330,6 +26343,8 @@ bool Gta4NativeGraphicsSystem::PrepareSurfaceContent(VkCommandBuffer command_buf
         descriptor.handle, owner->serial);
     return false;
   }
+  g_materializations[std::min<uint32_t>(materialize_trigger_, 3)].fetch_add(
+      1, std::memory_order_relaxed);
   const bool materialized = RecordSurfaceMaterialization(command_buffer, *owner, surface, view);
   if (!materialized) {
     REXLOG_ERROR(
@@ -26373,10 +26388,30 @@ bool Gta4NativeGraphicsSystem::RecordResolveClears(VkCommandBuffer command_buffe
     if (surface) {
       MarkNativeSurfaceImageUsed(*surface);
     }
-    if (!surface || !PrepareSurfaceContent(command_buffer, *surface, descriptor, depth,
-                                           submitted_frame, command.render_phase)) {
+    // A whole-surface color clear (load-op clear) replaces every sample: the
+    // aliased content need not be copied in first. Depth keeps its path.
+    bool whole_color_clear = false;
+    if (surface && !depth && REXCVAR_GET(gta4_native_clear_skips_materialization) &&
+        REXCVAR_GET(gta4_native_lossless_resolve_optimization)) {
+      const int32_t width = int32_t(surface->logical_width);
+      const int32_t height = int32_t(surface->logical_height);
+      whole_color_clear =
+          !resolve.source_rectangle_valid ||
+          (resolve.source_rectangle.left <= 0 && resolve.source_rectangle.top <= 0 &&
+           resolve.source_rectangle.right >= width && resolve.source_rectangle.bottom >= height);
+    }
+    if (whole_color_clear && FindPlacementOwner(descriptor, false) &&
+        !HasCurrentPlacementContent(*surface, descriptor, false, submitted_frame)) {
+      g_materializations_skipped.fetch_add(1, std::memory_order_relaxed);
+    }
+    materialize_trigger_ = 2;
+    if (!surface || (!whole_color_clear &&
+                     !PrepareSurfaceContent(command_buffer, *surface, descriptor, depth,
+                                            submitted_frame, command.render_phase))) {
+      materialize_trigger_ = 3;
       return false;
     }
+    materialize_trigger_ = 3;
     const bool current_placement =
         HasCurrentPlacementContent(*surface, descriptor, depth, submitted_frame);
     if (depth && resolve.trace_origin == 3) {
@@ -33428,15 +33463,39 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         end_rendering(__LINE__);
       }
       bool content_ready = true;
+      // A clear command whose rectangle covers a whole color surface replaces
+      // every channel of it (vkCmdClearAttachments ignores write masks): that
+      // surface's aliased content is never read, so it is not copied in. The
+      // attachment then begins with a load-op clear and the clear claims it.
+      ClearCommand scope_clear{};
+      const bool scope_is_clear = command.type == CommandType::kClear &&
+                                  command.bytes.size() >= sizeof(ClearCommand) &&
+                                  REXCVAR_GET(gta4_native_clear_skips_materialization);
+      if (scope_is_clear) std::memcpy(&scope_clear, command.bytes.data(), sizeof(scope_clear));
+      materialize_trigger_ = command.type == CommandType::kClear ? 1 : 0;
       for (uint32_t index = 0; index < kRenderTargetCount; ++index) {
         if ((target.color_attachment_mask & (1u << index)) == 0 ||
             !target.color_surfaces[index]) {
           continue;
         }
-        content_ready &= PrepareSurfaceContent(command_buffer, *target.color_surfaces[index],
+        NativeSurfaceImage& color_surface = *target.color_surfaces[index];
+        if (scope_is_clear && (scope_clear.flags & (1u << index)) && scope_clear.left <= 0 &&
+            scope_clear.top <= 0 && scope_clear.right >= int32_t(color_surface.logical_width) &&
+            scope_clear.bottom >= int32_t(color_surface.logical_height) &&
+            target.logical_width >= color_surface.logical_width &&
+            target.logical_height >= color_surface.logical_height) {
+          if (FindPlacementOwner(command.pipeline_state->render_targets[index], false) &&
+              !HasCurrentPlacementContent(color_surface, command.pipeline_state->render_targets[index],
+                                          false, submitted_frame)) {
+            g_materializations_skipped.fetch_add(1, std::memory_order_relaxed);
+          }
+          continue;
+        }
+        content_ready &= PrepareSurfaceContent(command_buffer, color_surface,
                                                command.pipeline_state->render_targets[index], false,
                                                submitted_frame, command.render_phase);
       }
+      materialize_trigger_ = 3;
       if (target.depth_stencil_attachment_active && target.depth_surface) {
         if (diagnostic_frame) {
           REXLOG_WARN(
