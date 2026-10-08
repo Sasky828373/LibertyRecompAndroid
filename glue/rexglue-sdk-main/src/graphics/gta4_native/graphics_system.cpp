@@ -209,6 +209,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_direct_constant_apply, true, "GTA IV/Graphics/Na
 REXCVAR_DEFINE_BOOL(gta4_native_stamped_protection, true, "GTA IV/Graphics/Native Renderer",
                     "Add each texture to the assembled frame's protection set once per frame, "
                     "not once per draw");
+REXCVAR_DEFINE_BOOL(gta4_native_buffer_validation_per_frame, true, "GTA IV/Graphics/Native Renderer",
+                    "Check a clean vertex/index buffer's shadow copy against guest memory once per "
+                    "frame, not on every draw that uses it");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -4960,6 +4963,15 @@ Gta4NativeGraphicsSystem::CaptureBufferResource(uint32_t handle) {
       cache_slot.size == data_size && !metadata->guest_locked &&
       !buffer_fast_path_disabled_.load(std::memory_order_relaxed)) {
     if (auto cached = cache_slot.resource.lock()) {
+      // Already validated (or captured) this frame, and no unlock since: the
+      // slot is dropped when the handle is dirtied. Meshes drawn many times a
+      // frame then skip the cold shadow compare and the stores into the
+      // resource that the recorder reads.
+      if (REXCVAR_GET(gta4_native_buffer_validation_per_frame) &&
+          cached->last_used_frame.load(std::memory_order_relaxed) ==
+              g_native_memory_profile_event_frame.load(std::memory_order_relaxed)) {
+        return cached;
+      }
       const uint8_t* cached_data = memory_->TranslateVirtual<const uint8_t*>(data_address);
       if (cached_data) {
         buffer_fast_path_request_count_.fetch_add(1, std::memory_order_relaxed);
@@ -29699,10 +29711,12 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         }
       }
     }
-    const auto* profile_state = queued_command.pipeline_state.get();
-    const profile::CpuContextScope detail_command_context({uint32_t(command_index), uint32_t(queued_command.render_phase),
-        profile_state && profile_state->vertex_shader_resource ? profile_state->vertex_shader_resource->hash : 0,
-        profile_state && profile_state->pixel_shader_resource ? profile_state->pixel_shader_resource->hash : 0});
+    const profile::CpuContextScope detail_command_context([&]() -> profile::CpuContext {
+      const auto* profile_state = queued_command.pipeline_state.get();
+      return {uint32_t(command_index), uint32_t(queued_command.render_phase),
+              profile_state && profile_state->vertex_shader_resource ? profile_state->vertex_shader_resource->hash : 0,
+              profile_state && profile_state->pixel_shader_resource ? profile_state->pixel_shader_resource->hash : 0};
+    });
     const profile::CpuScope detail_command_scope(profile::CpuOp::kRecordCommand);
     phone_frame_trace_ = queued_command.phone_trace;
     phone_record_event_ = phone_frame_trace_ ? phone_frame_trace_->event : 0;
