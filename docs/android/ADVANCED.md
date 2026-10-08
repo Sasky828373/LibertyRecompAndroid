@@ -202,6 +202,11 @@ To try the tiled path:
 TU_DEBUG=
 ```
 
+`LIBERTY_FORCE_MEMFD=1` makes the game allocate its emulated Xbox 360 memory with a memfd instead
+of Android's shared-memory API. The game already falls back to it by itself when the shared-memory
+call fails (0.5.7.4 and newer), so this is only a workaround to try if the game fails with
+"Unable to reserve the 4gb guest address space".
+
 Any other Mesa/Turnip variable works the same way, for example `MESA_SHADER_CACHE_DISABLE=true` or
 `TU_DEBUG=sysmem,noubwc`.
 

@@ -44,6 +44,9 @@
 #include <rex/version.h>
 
 #include <fmt/format.h>
+#if REX_PLATFORM_ANDROID
+#include <SDL3/SDL_messagebox.h>
+#endif
 #include <imgui.h>
 
 #include <algorithm>
@@ -274,6 +277,21 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
   auto status = runtime_->Setup(ppc_info_, std::move(config_));
   if (XFAILED(status)) {
     REXLOG_ERROR("Runtime setup failed: {:08X}", status);
+#if REX_PLATFORM_ANDROID
+    // Say so instead of closing silently, then leave without tearing down the
+    // half-initialized runtime and presentation: that teardown has crashed
+    // (a double free under the ImGui drawer) and there is nothing to save.
+    const std::string message =
+        fmt::format("The game could not start on this device (runtime setup failed, status "
+                    "{:08X}).\n\nThe reason is in the crash report the launcher shows next "
+                    "and in Android/data/com.libertyrecomp/files/Liberty Recompiled/logs.",
+                    status);
+    // SDL shows a real Android dialog and waits for OK; the POSIX message box
+    // only prints to stderr.
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Liberty Recompiled", message.c_str(), nullptr);
+    rex::FlushLogging();
+    std::_Exit(3);
+#endif
     return false;
   }
 

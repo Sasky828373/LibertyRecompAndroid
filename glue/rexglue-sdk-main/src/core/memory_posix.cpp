@@ -35,6 +35,13 @@
 #include <rex/main_android.h>
 
 #include <linux/ashmem.h>
+#include <sys/syscall.h>
+
+#include <cerrno>
+#include <cstdlib>
+#include <mutex>
+
+#include <rex/logging.h>
 
 // TODO(tomc): Android or maybe na. idk
 // #include "xenia/base/main_android.h"
@@ -328,18 +335,53 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
                                           PageAccess access, bool commit) {
 #if REX_PLATFORM_ANDROID
-  // TODO(Triang3l): Check if memfd can be used instead on API 30+.
+  // Nothing calls AndroidInitialize() on this host, which left the pointer
+  // null and every device on the legacy /dev/ashmem path below - closed to
+  // apps targeting API 29+ and refused outright on newer builds (Samsung,
+  // Android 17: "Unable to reserve the 4gb guest address space").
+  static std::once_flag android_init;
+  std::call_once(android_init, [] {
+    if (!android_ASharedMemory_create_) AndroidInitialize();
+  });
   if (android_ASharedMemory_create_) {
-    int sharedmem_fd = android_ASharedMemory_create_(path.c_str(), length);
-    return sharedmem_fd >= 0 ? static_cast<FileMappingHandle>(sharedmem_fd)
-                             : kFileMappingHandleInvalid;
+    // LIBERTY_FORCE_MEMFD=1 (env.txt) goes straight to the memfd path below.
+    const char* force_memfd = std::getenv("LIBERTY_FORCE_MEMFD");
+    int sharedmem_fd = force_memfd && force_memfd[0] == '1'
+                           ? -1
+                           : android_ASharedMemory_create_(path.c_str(), length);
+    if (sharedmem_fd >= 0) return static_cast<FileMappingHandle>(sharedmem_fd);
+    // Some devices refuse a region this large (the guest memory is ~4.5 GB of
+    // address space, almost none of it ever touched): seen on a Samsung
+    // Android 17 build. A memfd sized with ftruncate is the same kind of shared
+    // mapping without the ashmem wrapper.
+    const int create_errno = errno;
+    if (force_memfd && force_memfd[0] == '1') {
+      REXLOG_WARN("LIBERTY_FORCE_MEMFD is set; skipping ASharedMemory_create");
+    } else {
+      REXLOG_WARN("ASharedMemory_create({} bytes) failed: errno {} ({}); trying memfd", length,
+                  create_errno, strerror(create_errno));
+    }
+    int memfd = static_cast<int>(syscall(__NR_memfd_create, path.c_str(), 1u /* MFD_CLOEXEC */));
+    if (memfd < 0) {
+      REXLOG_ERROR("memfd_create failed: errno {} ({})", errno, strerror(errno));
+      return kFileMappingHandleInvalid;
+    }
+    if (ftruncate64(memfd, static_cast<off64_t>(length)) != 0) {
+      REXLOG_ERROR("memfd ftruncate({}) failed: errno {} ({})", length, errno, strerror(errno));
+      close(memfd);
+      return kFileMappingHandleInvalid;
+    }
+    REXLOG_WARN("Guest memory uses a memfd of {} bytes", length);
+    return static_cast<FileMappingHandle>(memfd);
   }
+  REXLOG_WARN("ASharedMemory_create is unavailable; trying the legacy /dev/ashmem");
 
   // Use /dev/ashmem on API versions below 26, which added ASharedMemory.
   // /dev/ashmem was disabled on API 29 for apps targeting it.
   // https://chromium.googlesource.com/chromium/src/+/master/third_party/ashmem/ashmem-dev.c
   int ashmem_fd = open("/" ASHMEM_NAME_DEF, O_RDWR);
   if (ashmem_fd < 0) {
+    REXLOG_ERROR("/dev/ashmem: errno {} ({})", errno, strerror(errno));
     return kFileMappingHandleInvalid;
   }
   char ashmem_name[ASHMEM_NAME_LEN];
