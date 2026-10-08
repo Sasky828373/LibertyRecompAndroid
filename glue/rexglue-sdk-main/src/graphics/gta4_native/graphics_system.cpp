@@ -218,6 +218,19 @@ REXCVAR_DEFINE_BOOL(gta4_native_assembly_constant_bound, true, "GTA IV/Graphics/
 REXCVAR_DEFINE_BOOL(gta4_native_prepared_binding_cache, true, "GTA IV/Graphics/Native Renderer",
                     "Reuse texture bindings prepared for any recent draw with identical inputs, "
                     "not only the immediately preceding draw");
+// The prefix of a guest constant bank a draw's shader reads, in the 256-byte
+// steps uploads use. The worker snapshots and the recorder uploads exactly
+// this, so the two must agree.
+template <typename Shader>
+static uint32_t NativeConstantUploadPrefix(const Shader* shader, size_t bank_size) {
+  // No pixel shader reads nothing; one register keeps the binding non-empty.
+  const uint32_t used = shader ? shader->upload_constant_bytes : 16u;
+  if (used == UINT32_MAX) return uint32_t(bank_size);
+  return uint32_t(std::min<size_t>(bank_size, std::max<uint32_t>(16u, (used + 255u) & ~255u)));
+}
+REXCVAR_DEFINE_BOOL(gta4_native_partial_constant_snapshot, true, "GTA IV/Graphics/Native Renderer",
+                    "Snapshot only the part of each constant bank the draw's shaders read "
+                    "(extended if a later draw of the same state reads more)");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -6733,6 +6746,11 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
             break;
           }
           command.pipeline_state = SnapshotPipeline(command, true);
+          if (!SnapshotDrawConstants(command, device)) {
+            REXLOG_ERROR("gta4-native-constants: draw constant snapshot failed type={} device={:08X}",
+                         CommandTypeName(command.type), device);
+            break;
+          }
         } else {
           command.pipeline_state = SnapshotPipeline(command, false);
         }
@@ -7279,8 +7297,16 @@ bool Gta4NativeGraphicsSystem::ApplyShaderConstantDelta(NativeCommand& command, 
                        command.type == CommandType::kDrawPrimitiveUp ||
                        command.type == CommandType::kDrawIndexedPrimitive;
   if (is_draw) {
-    const auto& vertex_constants = state.vertex_constants.SnapshotCurrentVersion();
-    const auto& pixel_constants = state.pixel_constants.SnapshotCurrentVersion();
+    // Partial snapshots wait for the pipeline snapshot, which names the
+    // shaders and thus how much of each bank they read (SnapshotDrawConstants).
+    const bool partial_snapshot = REXCVAR_GET(gta4_native_partial_constant_snapshot) &&
+                                  !eager_hash && !REXCVAR_GET(gta4_validate_native_hot_caches) &&
+                                  !rex::diagnostics::IsEnabled(rex::diagnostics::Category::kNativeTrace) &&
+                                  !rex::diagnostics::IsEnabled(rex::diagnostics::Category::kNativeProbes);
+    const auto& vertex_constants = partial_snapshot ? state.vertex_constants.current_version()
+                                                    : state.vertex_constants.SnapshotCurrentVersion();
+    const auto& pixel_constants = partial_snapshot ? state.pixel_constants.current_version()
+                                                   : state.pixel_constants.SnapshotCurrentVersion();
     const uint32_t vertex_booleans = state.booleans.value()[0];
     const uint32_t pixel_booleans = state.booleans.value()[1];
     std::shared_ptr<const NativeShaderState> shader_state = last_shader_snapshot_;
@@ -7333,6 +7359,36 @@ bool Gta4NativeGraphicsSystem::ApplyShaderConstantDelta(NativeCommand& command, 
     command.shader_state = std::move(shader_state);
   }
   return true;
+}
+
+bool Gta4NativeGraphicsSystem::SnapshotDrawConstants(const NativeCommand& command,
+                                                     uint32_t device) {
+  if (!command.shader_state) return true;  // Clears carry no constant state.
+  const auto state_entry = device_constant_states_.find(device);
+  if (state_entry == device_constant_states_.end()) return false;
+  NativeDeviceConstantState& state = state_entry->second;
+  const NativeShader* vertex_shader =
+      command.pipeline_state ? command.pipeline_state->vertex_shader_resource : nullptr;
+  const NativeShader* pixel_shader =
+      command.pipeline_state ? command.pipeline_state->pixel_shader_resource : nullptr;
+  const auto snapshot = [&](AuthoritativeConstantState& bank,
+                            const std::shared_ptr<const ConstantStateVersion>& version,
+                            const NativeShader* shader, size_t bank_size) {
+    if (!version) return false;
+    if (version->materialized &&
+        (!version->materialized_bytes || version->materialized_bytes >= bank_size))
+      return true;
+    // Only the current version can still be read from the canonical bank.
+    if (bank.current_version() != version) return false;
+    const size_t bytes = command.pipeline_state ? NativeConstantUploadPrefix(shader, bank_size)
+                                                : bank_size;
+    bank.SnapshotCurrentVersion(bytes);
+    return true;
+  };
+  return snapshot(state.vertex_constants, command.shader_state->vertex_constants, vertex_shader,
+                  kVertexConstantsSize) &&
+         snapshot(state.pixel_constants, command.shader_state->pixel_constants, pixel_shader,
+                  kPixelConstantsSize);
 }
 
 void Gta4NativeGraphicsSystem::RegisterVertexDeclaration(
@@ -21814,12 +21870,8 @@ bool Gta4NativeGraphicsSystem::BindCommonDrawState(
       const NativeShader* shader = kind == NativeConstantBufferKind::kVertex
                                        ? command.pipeline_state->vertex_shader_resource
                                        : command.pipeline_state->pixel_shader_resource;
-      // No pixel shader reads nothing; one register keeps the binding non-empty.
-      const uint32_t used = shader ? shader->upload_constant_bytes : 16u;
-      if (used != UINT32_MAX) {
-        // 256-byte steps bound the number of distinct uploads per version.
-        write_bytes = std::max<uint32_t>(16u, (used + 255u) & ~255u);
-      }
+      // 256-byte steps bound the number of distinct uploads per version.
+      write_bytes = NativeConstantUploadPrefix(shader, required_size);
     }
     const auto result = bindings.Bind(kind, version, allocation, bytes,
         [](const auto& v) {

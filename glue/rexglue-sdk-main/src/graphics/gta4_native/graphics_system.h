@@ -1351,6 +1351,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void TraceModernShaderFailure(const NativeCommand& command, std::string_view point, std::string_view reason);
   void ApplyStateCommand(const NativeCommand& command);
   bool ApplyShaderConstantDelta(NativeCommand& command, uint32_t device);
+  bool SnapshotDrawConstants(const NativeCommand& command, uint32_t device);
   bool InitializeShaderCache();
   static bool ReflectVertexInputs(const std::vector<uint32_t>& spirv,
                                   std::vector<NativeVertexInput>& inputs);

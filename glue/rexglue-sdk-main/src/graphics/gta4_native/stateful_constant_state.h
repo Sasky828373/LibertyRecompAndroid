@@ -137,6 +137,11 @@ struct ConstantStateVersion {
   // State bytes and token are immutable once the version is published.
   mutable std::shared_ptr<const ConstantStateVersion> parent;
   mutable std::shared_ptr<const std::vector<uint8_t>> materialized;
+  // Valid prefix of materialized when the render worker snapshots only what
+  // the consuming draws read (the buffer is always byte_size long). Render
+  // worker only; while the version is current, the canonical bank equals its
+  // content, so the prefix can still be extended for a later draw. 0: all.
+  mutable size_t materialized_bytes = 0;
 };
 
 enum class ConstantApplyStatus : uint8_t {
@@ -162,7 +167,9 @@ struct ConstantApplyResult {
 // from any thread (command retirement is asynchronous), hence the mutex.
 class ConstantSnapshotPool {
  public:
-  static std::shared_ptr<const std::vector<uint8_t>> Copy(const std::vector<uint8_t>& source) {
+  static std::shared_ptr<const std::vector<uint8_t>> Copy(const std::vector<uint8_t>& source,
+                                                          size_t copy_bytes = SIZE_MAX) {
+    copy_bytes = std::min(copy_bytes, source.size());
     std::vector<uint8_t>* buffer = nullptr;
     {
       std::lock_guard lock(mutex());
@@ -173,9 +180,12 @@ class ConstantSnapshotPool {
       }
     }
     if (buffer) {
-      std::memcpy(buffer->data(), source.data(), source.size());
-    } else {
+      std::memcpy(buffer->data(), source.data(), copy_bytes);
+    } else if (copy_bytes == source.size()) {
       buffer = new std::vector<uint8_t>(source);
+    } else {
+      buffer = new std::vector<uint8_t>(source.size());
+      std::memcpy(buffer->data(), source.data(), copy_bytes);
     }
     return std::shared_ptr<const std::vector<uint8_t>>(buffer, [](const std::vector<uint8_t>* bytes) {
       auto* owned = const_cast<std::vector<uint8_t>*>(bytes);
@@ -214,10 +224,22 @@ class AuthoritativeConstantState {
   // Copy that complete state once here, rather than reconstructing a chain of
   // deltas on the frame's Vulkan recording critical path. Unconsumed updates
   // stay deferred and allocate no full-size snapshot.
-  const std::shared_ptr<const ConstantStateVersion>& SnapshotCurrentVersion() const {
-    if (current_ && !current_->materialized) {
-      current_->materialized = ConstantSnapshotPool::Copy(canonical_);
+  // bytes: the prefix later consumers read (all of it by default).
+  const std::shared_ptr<const ConstantStateVersion>& SnapshotCurrentVersion(
+      size_t bytes = SIZE_MAX) const {
+    if (!current_) return current_;
+    bytes = std::min(bytes, canonical_.size());
+    if (!current_->materialized) {
+      current_->materialized = ConstantSnapshotPool::Copy(canonical_, bytes);
+      current_->materialized_bytes = bytes;
       current_->parent.reset();
+    } else if (current_->materialized_bytes && current_->materialized_bytes < bytes) {
+      // Bytes past the old prefix are read by no earlier consumer.
+      auto* data = const_cast<uint8_t*>(current_->materialized->data());
+      std::memcpy(data + current_->materialized_bytes,
+                  canonical_.data() + current_->materialized_bytes,
+                  bytes - current_->materialized_bytes);
+      current_->materialized_bytes = bytes;
     }
     return current_;
   }
@@ -262,8 +284,9 @@ class AuthoritativeConstantState {
       next->token = version_;
       next->content_hash = hash_callback(std::span<const uint8_t>(canonical_));
       next->byte_size = canonical_.size();
+      // No delta and no parent: the draw snapshots this version from the
+      // canonical bank right away (SnapshotCurrentVersion), while it is current.
       next->delta.complete_snapshot = true;
-      next->materialized = ConstantSnapshotPool::Copy(canonical_);
       current_ = std::move(next);
       return {ConstantApplyStatus::kApplied, true, current_};
     }
@@ -351,12 +374,15 @@ class AuthoritativeConstantState {
     // temporary owning chain and its allocator traffic for a single delta.
     if (version->parent && version->parent->materialized &&
         version->parent->materialized->size() == version->byte_size &&
+        (!version->parent->materialized_bytes ||
+         version->parent->materialized_bytes == version->byte_size) &&
         ValidateConstantPayloadDelta(version->delta, version->byte_size)) {
       auto bytes = std::make_shared<std::vector<uint8_t>>(*version->parent->materialized);
       for (const auto& range : version->delta.ranges)
         std::memcpy(bytes->data() + range.destination_offset,
                     version->delta.payload.data() + range.payload_offset, range.byte_count);
       version->materialized = std::move(bytes);
+      version->materialized_bytes = version->byte_size;
       version->parent.reset();
       return version->materialized;
     }
@@ -367,6 +393,8 @@ class AuthoritativeConstantState {
       chain.push_back(cursor);
       cursor = cursor->parent;
     }
+    if (cursor && cursor->materialized_bytes && cursor->materialized_bytes != cursor->byte_size)
+      return {};
     auto bytes = std::make_shared<std::vector<uint8_t>>(
         cursor && cursor->materialized ? *cursor->materialized
                                        : std::vector<uint8_t>(version->byte_size));
@@ -381,6 +409,7 @@ class AuthoritativeConstantState {
       }
     }
     version->materialized = bytes;
+    version->materialized_bytes = version->byte_size;
     // The memoized contiguous state is now a complete immutable base. Cutting
     // its ancestry prevents a long-running device from retaining every prior
     // delta version across frames.
