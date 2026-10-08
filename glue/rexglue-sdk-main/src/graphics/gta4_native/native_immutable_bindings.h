@@ -1,9 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -26,26 +28,40 @@ class NativeImmutableBindings {
     Allocation allocation{};
     const std::vector<uint8_t>* bytes = nullptr;
   };
+  // write_bytes: the prefix of the bank the consuming shader can read. Only
+  // that prefix is written; the identity includes it, so a shader reading
+  // further never reuses a shorter upload of the same version.
   template <typename Materialize, typename Upload>
   Result Bind(FrameConstantKind kind, const std::shared_ptr<const ConstantStateVersion>& version,
               Allocation& allocation, const std::vector<uint8_t>*& bytes,
-              Materialize&& materialize, Upload&& upload) {
+              Materialize&& materialize, Upload&& upload, uint32_t write_bytes = UINT32_MAX) {
     bytes = nullptr;
     if (!version || !version->byte_size || kind == FrameConstantKind::kShared) return Result::kFailure;
-    const FrameConstantIdentity identity{kind, uint64_t(reinterpret_cast<uintptr_t>(version.get()))};
+    const uint32_t written = uint32_t(std::min<size_t>(write_bytes, version->byte_size));
+    // User-space pointers fit in 48 bits; the prefix (16-byte units) tags the top.
+    const uint64_t tag = written == version->byte_size ? 0 : uint64_t(written / 16 + 1) << 48;
+    const FrameConstantIdentity identity{kind, uint64_t(reinterpret_cast<uintptr_t>(version.get())) | tag};
     if (const auto* hit = versions_.Find(identity)) {
       allocation = hit->allocation; bytes = hit->bytes; return Result::kVersionHit;
     }
     bytes = materialize(version);
     if (!bytes || bytes->size() != version->byte_size || bytes->size() > UINT32_MAX) return Result::kFailure;
-    const NativeConstantContentKey key{version->content_hash, uint32_t(kind), uint32_t(bytes->size())};
+    const NativeConstantContentKey key{version->content_hash, uint32_t(kind), written};
     const Entry* candidate = contents_.Find(key);
     Result result = Result::kUploaded;
     if (candidate && *candidate->bytes == *bytes) {
       allocation = candidate->allocation;
       result = Result::kContentHit;
-    } else if (!upload(kind, uint64_t(reinterpret_cast<uintptr_t>(bytes)), *bytes, allocation)) {
-      return Result::kFailure;
+    } else {
+      bool uploaded;
+      if constexpr (std::is_invocable_v<Upload&, FrameConstantKind, uint64_t, std::span<const uint8_t>,
+                                        size_t, Allocation&>) {
+        uploaded = upload(kind, uint64_t(reinterpret_cast<uintptr_t>(bytes)) | tag,
+                          std::span<const uint8_t>(bytes->data(), written), bytes->size(), allocation);
+      } else {
+        uploaded = upload(kind, uint64_t(reinterpret_cast<uintptr_t>(bytes)) | tag, *bytes, allocation);
+      }
+      if (!uploaded) return Result::kFailure;
     }
     // Own before publishing any pointer-bearing entry. A content-hash match is
     // never used without equality of the complete guest-endian byte block.

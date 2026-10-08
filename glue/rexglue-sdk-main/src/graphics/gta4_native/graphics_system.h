@@ -175,6 +175,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     // Bytes of this stage's guest constant bank any of its modules can read
     // (SpirvConstantRange::kUnbounded: the whole bank).
     uint32_t constant_bytes = 0xFFFFFFFFu;
+    // Bytes of its own guest constant bank the shader can read, measured before
+    // the UBO rewrite (whose loads the range pass does not follow). Draws upload
+    // only this prefix of the bank; 0xFFFFFFFF means the whole bank.
+    uint32_t upload_constant_bytes = 0xFFFFFFFFu;
     // Loops bounded by the loop watchdog in the stock modules (diagnostics).
     uint32_t watchdog_loops = 0;
     bool water_surface = false;  // scene water, the consumer of the water reflection
@@ -1712,7 +1716,8 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
                                NativeUploadAllocation& allocation) const;
   bool GetOrCreateFrameConstantBuffer(NativeConstantBufferKind kind, uint64_t immutable_identity,
                                       std::span<const uint8_t> source_bytes, bool guest_word_order,
-                                      NativeUploadAllocation& allocation);
+                                      NativeUploadAllocation& allocation,
+                                      size_t reserve_bytes = 0);
   bool ResetFrameConstantArena(uint32_t slot, uint64_t completed_submission, bool unsubmitted);
   void DestroyNativeFrameConstantArenas();
   void ReleaseUnusedPersistentBuffers(uint64_t completed_submission);

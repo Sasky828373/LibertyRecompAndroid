@@ -198,6 +198,8 @@ REXCVAR_DEFINE_BOOL(gta4_native_vertex_cache_order, false, "GTA IV/Graphics/Nati
 REXCVAR_DEFINE_BOOL(gta4_native_water_reflection_on_demand, true, "GTA IV/Graphics/Reflections",
                     "Render the water reflection only in frames that draw scene water, and only "
                     "every 8th frame while occlusion queries find all of that water hidden");
+REXCVAR_DEFINE_BOOL(gta4_native_partial_constant_upload, true, "GTA IV/Graphics/Native Renderer",
+                    "Upload only the part of each guest constant bank the draw's shader can read");
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
                       "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
@@ -7753,6 +7755,14 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
     RemapSpirvDrawDescriptorSets(stock_late_spirv);
     apply_loop_watchdog(stock_early_spirv);
     apply_loop_watchdog(stock_late_spirv);
+    const uint32_t constant_bank = command.stage == ShaderStage::kVertex ? 0 : 1;
+    uint32_t upload_constant_bytes =
+        AnalyzeSpirvConstantRange(stock_early_spirv.data(), stock_early_spirv.size()).bytes[constant_bank];
+    if (!stock_late_spirv.empty()) {
+      upload_constant_bytes = std::max(
+          upload_constant_bytes,
+          AnalyzeSpirvConstantRange(stock_late_spirv.data(), stock_late_spirv.size()).bytes[constant_bank]);
+    }
     apply_ubo_constants(stock_early_spirv);
     apply_relaxed(stock_early_spirv);
     stock_early_spirv_size = stock_early_spirv.size() * sizeof(uint32_t);
@@ -7807,6 +7817,7 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
       if (!stock_late_spirv.empty())
         bytes = std::max(bytes, AnalyzeSpirvConstantRange(stock_late_spirv.data(), stock_late_spirv.size()).bytes[bank]);
       resource->constant_bytes = bytes;
+      resource->upload_constant_bytes = upload_constant_bytes;
     }
     if (command.stage == ShaderStage::kVertex) {
       // OpDecorate <id> BuiltIn VertexIndex(42)/InstanceIndex(43).
@@ -7952,6 +7963,13 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         RemapSpirvDrawDescriptorSets(override_late_spirv);
         apply_loop_watchdog(override_early_spirv);
         apply_loop_watchdog(override_late_spirv);
+        const uint32_t override_constant_bytes = std::max(
+            AnalyzeSpirvConstantRange(override_early_spirv.data(), override_early_spirv.size())
+                .bytes[constant_bank],
+            override_late_spirv.empty()
+                ? 0u
+                : AnalyzeSpirvConstantRange(override_late_spirv.data(), override_late_spirv.size())
+                      .bytes[constant_bank]);
         apply_ubo_constants(override_early_spirv);
         apply_ubo_constants(override_late_spirv);
         apply_relaxed(override_early_spirv);
@@ -7980,6 +7998,8 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
                 fmt::format("GTA4/native-override/{}/{:016X}/late", resource->filename, resource->hash));
           }
           resource->override_entry = override_entry;
+          resource->upload_constant_bytes =
+              std::max(resource->upload_constant_bytes, override_constant_bytes);
           {
             const uint32_t bank = command.stage == ShaderStage::kVertex ? 0 : 1;
             resource->constant_bytes = std::max(
@@ -8708,7 +8728,8 @@ bool Gta4NativeGraphicsSystem::GetOrCreateFrameConstantBuffer(NativeConstantBuff
                                                               uint64_t immutable_identity,
                                                               std::span<const uint8_t> source_bytes,
                                                               bool guest_word_order,
-                                                              NativeUploadAllocation& allocation) {
+                                                              NativeUploadAllocation& allocation,
+                                                              size_t reserve_bytes) {
   const profile::CpuScope profile_scope(profile::CpuOp::kConstantBind);
 
   if (active_frame_slot_ >= frame_constant_arenas_.size() || !immutable_identity ||
@@ -8722,8 +8743,10 @@ bool Gta4NativeGraphicsSystem::GetOrCreateFrameConstantBuffer(NativeConstantBuff
   }
   // FindOrReserve returns the existing allocation as well as new reservations;
   // use that result directly instead of probing the same identity again.
+  // The reservation always spans the whole bank: its descriptor range does.
   const auto reservation = arena.index.FindOrReserve(
-      {kind, immutable_identity}, source_bytes.size(), size_t(NativeConstantArenaAlignment()));
+      {kind, immutable_identity}, std::max(reserve_bytes, source_bytes.size()),
+      size_t(NativeConstantArenaAlignment()));
   if (!reservation || reservation->offset > arena.storage.capacity ||
       reservation->byte_size > arena.storage.capacity - reservation->offset ||
       reservation->offset >
@@ -21618,14 +21641,29 @@ bool Gta4NativeGraphicsSystem::BindCommonDrawState(
     const size_t required_size = kind == NativeConstantBufferKind::kVertex ? kVertexConstantsSize : kPixelConstantsSize;
     if (!version || version->byte_size != required_size) return false;
     auto& bindings = frame_constant_arenas_[active_frame_slot_].immutable_bindings;
+    uint32_t write_bytes = UINT32_MAX;
+    if (REXCVAR_GET(gta4_native_partial_constant_upload) && command.pipeline_state) {
+      const NativeShader* shader = kind == NativeConstantBufferKind::kVertex
+                                       ? command.pipeline_state->vertex_shader_resource
+                                       : command.pipeline_state->pixel_shader_resource;
+      // No pixel shader reads nothing; one register keeps the binding non-empty.
+      const uint32_t used = shader ? shader->upload_constant_bytes : 16u;
+      if (used != UINT32_MAX) {
+        // 256-byte steps bound the number of distinct uploads per version.
+        write_bytes = std::max<uint32_t>(16u, (used + 255u) & ~255u);
+      }
+    }
     const auto result = bindings.Bind(kind, version, allocation, bytes,
         [](const auto& v) {
           return profile::CpuCall(profile::CpuOp::kConstantMaterialize,
               [&] { return AuthoritativeConstantState::MaterializeView(v); });
         },
-        [&](auto constant_kind, uint64_t identity, const auto& data, auto& out) {
-          return GetOrCreateFrameConstantBuffer(constant_kind, identity, data, true, out);
-        });
+        [&](auto constant_kind, uint64_t identity, std::span<const uint8_t> data,
+            size_t reserve_bytes, auto& out) {
+          return GetOrCreateFrameConstantBuffer(constant_kind, identity, data, true, out,
+                                                reserve_bytes);
+        },
+        write_bytes);
     using Binding = NativeImmutableBindings<NativeUploadAllocation>;
     if (result == Binding::Result::kVersionHit)
       AddNativeGpuProfileCounter(performance::Counter::kConstantVersionHits);
