@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <utility>
 
@@ -143,7 +144,10 @@ bool Memory::Initialize() {
   mapping_ = rex::memory::CreateFileMappingHandle(file_name_, mapping_size,
                                                   rex::memory::PageAccess::kReadWrite, false);
   if (mapping_ == rex::memory::kFileMappingHandleInvalid) {
-    REXSYS_ERROR("Unable to reserve the 4gb guest address space.");
+    const int mapping_errno = errno;
+    REXSYS_ERROR("Unable to reserve guest address space: mapping_size=0x{:X}, granularity=0x{:X}, errno={} ({})",
+                 mapping_size, system_allocation_granularity_, mapping_errno,
+                 std::strerror(mapping_errno));
     assert_always();
     return false;
   }
