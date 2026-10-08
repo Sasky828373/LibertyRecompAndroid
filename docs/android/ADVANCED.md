@@ -226,9 +226,14 @@ need **both** of these lines in `args.txt`:
 > `--diagnostics_categories` without `--diagnostics=true` makes the runtime exit immediately.
 > Add or remove these two lines together.
 
-Crashes are logged by Android's `DEBUG` tag with a native backtrace. The runtime also writes its
-own log files to `files/Liberty Recompiled/logs/`, and every start writes the device, GPU and
-driver details to `files/last_launch.txt`. Without a PC, a full logcat can be captured with
+Crashes are logged by Android's `DEBUG` tag with a native backtrace. Since 0.5.7.3 the launcher
+also turns every crash of the game process into `files/crash_reports/crash-DATE.txt`, from what
+Android keeps about it (ApplicationExitInfo and the tombstone): the signal, the crashing thread's
+backtrace, the last log lines of the process, the device and driver details, and the end of the
+runtime log. The raw tombstone is saved next to it as `.tombstone.pb`. The runtime writes its own
+log files to `files/Liberty Recompiled/logs/`. Since 0.5.7.3 this log is on by default, at the
+`--log_level` from `args.txt`, unless `args.txt` sets `--diagnostics` itself. Every start also
+writes the device, GPU and driver details to `files/last_launch.txt`. Without a PC, a full logcat can be captured with
 *Developer options > Take bug report*. Include these when you report a problem on the
 [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues) page, along with the
 device model, the Android version and your `args.txt`.

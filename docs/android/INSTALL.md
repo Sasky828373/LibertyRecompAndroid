@@ -151,6 +151,7 @@ saves.
 | Symptom | What to check |
 |---|---|
 | A dialog says no usable Vulkan driver / Vulkan 1.2 is needed | The GPU is not supported, see the [requirements](../../README.md#device-requirements). If you created `driver.txt`, delete it. Details are in `files/last_launch.txt`. |
+| The game closes after Play (0.5.7.3+: a red crash card on the launcher) | Press **Share report** on the card, or attach `files/crash_reports/crash-*.txt`, to an issue. |
 | The app closes right after launch, without a dialog | An ARMv8.0 CPU (see the [requirements](../../README.md#device-requirements)) or an invalid line in `args.txt`. Deleting `args.txt` restores the defaults. Check `files/last_launch.txt`. |
 | The installer shows **Not selected** | The files are not directly inside `files/install/`, or the disc image does not end in `.iso`. |
 | The installer rejects the title update | It must be TU8 for the **USA** release (0.0.8.5). The PAL update (0.0.8.6) is not accepted. |
@@ -161,6 +162,11 @@ Questions, bugs and feedback all go to [Issues](https://github.com/vaduur/Libert
 
 ### Collecting information without a PC
 
+- **Crash reports (0.5.7.3 and newer).** When the game crashes, the launcher shows a red card,
+  *The game crashed - a crash report was saved*, the next time it opens. The report is in
+  `Android/data/com.libertyrecomp/files/crash_reports/crash-DATE.txt`. **Share report** sends it as
+  text to any app (Telegram, Discord, mail). Attach it to your issue. It contains the device and
+  driver details, where the game crashed (signal and backtrace) and the game's last log lines.
 - **`files/last_launch.txt`** is written at every start. It holds the device, the chip, the GPU,
   the Android version and which Vulkan driver was used, or why none could be. Attach it to your
   issue.

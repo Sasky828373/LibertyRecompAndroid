@@ -192,6 +192,18 @@ public class LibertyActivity extends SDLActivity {
             }
         }
         List<String> arguments = new ArrayList<>(Arrays.asList(readArguments(argsFile)));
+        // The runtime's own log (warnings and errors at the default level) goes
+        // to logcat and Liberty Recompiled/logs, and ends up in crash reports.
+        // Both switches together: categories without --diagnostics=true make
+        // the runtime refuse to start.
+        boolean diagnosticsSet = false;
+        for (String argument : arguments) {
+            if (argument.startsWith("--diagnostics")) diagnosticsSet = true;
+        }
+        if (!diagnosticsSet) {
+            arguments.add("--diagnostics=true");
+            arguments.add("--diagnostics_categories=logging");
+        }
         addInstallSources(new File(dataRoot, "install"), arguments);
         for (int i = arguments.size() - 1; i >= 0; --i) {
             String argument = arguments.get(i);

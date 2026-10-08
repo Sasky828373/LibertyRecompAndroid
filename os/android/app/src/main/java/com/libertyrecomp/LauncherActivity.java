@@ -128,6 +128,7 @@ public class LauncherActivity extends Activity {
         refreshDrivers();
         refreshStatus();
         if (mInstallerReady) refreshInstall();
+        refreshCrash();
     }
 
     @Override
@@ -176,6 +177,8 @@ public class LauncherActivity extends Activity {
         mStatus = text("", 15, R.color.picker_text);
         mStatus.setGravity(Gravity.CENTER);
         left.addView(mStatus, matchWrap(dp(14)));
+
+        left.addView(buildCrashCard(), matchWrap(dp(12)));
 
         mLastLaunch = text("", 13, R.color.picker_error);
         mLastLaunch.setGravity(Gravity.CENTER);
@@ -313,6 +316,78 @@ public class LauncherActivity extends Activity {
         }
         mLastLaunch.setText(result != null ? "Last launch failed: " + result : "");
         mLastLaunch.setVisibility(result != null ? View.VISIBLE : View.GONE);
+    }
+
+    // ---------------------------------------------------------------- crashes
+
+    private LinearLayout mCrashCard;
+    private TextView mCrashText;
+    private CrashReports.Report mCrash;
+
+    /** A red card that says where the last crash report was saved, with Share. */
+    private View buildCrashCard() {
+        mCrashCard = new LinearLayout(this);
+        mCrashCard.setOrientation(LinearLayout.VERTICAL);
+        mCrashCard.setPadding(dp(14), dp(10), dp(14), dp(10));
+        android.graphics.drawable.GradientDrawable background = rounded(0x33FF5A5A, dp(10));
+        background.setStroke(dp(2), 0xFFFF5A5A);
+        mCrashCard.setBackground(background);
+        TextView title = text("The game crashed - a crash report was saved", 15,
+                R.color.picker_text);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        mCrashCard.addView(title);
+        mCrashText = text("", 12, R.color.picker_muted);
+        mCrashCard.addView(mCrashText, matchWrap(dp(4)));
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        Button share = button("Share report", false);
+        share.setOnClickListener(v -> shareCrash());
+        actions.addView(share, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        Button dismiss = button("Dismiss", false);
+        dismiss.setOnClickListener(v -> {
+            if (mCrash != null) CrashReports.dismiss(this, mCrash);
+            mCrash = null;
+            mCrashCard.setVisibility(View.GONE);
+        });
+        LinearLayout.LayoutParams dismissParams = new LinearLayout.LayoutParams(dp(110), dp(44));
+        dismissParams.leftMargin = dp(10);
+        actions.addView(dismiss, dismissParams);
+        mCrashCard.addView(actions, matchWrap(dp(8)));
+        mCrashCard.setVisibility(View.GONE);
+        return mCrashCard;
+    }
+
+    private void refreshCrash() {
+        new Thread(() -> {
+            CrashReports.Report report = CrashReports.collect(this, mDataRoot);
+            mMain.post(() -> {
+                mCrash = report;
+                if (report == null) {
+                    mCrashCard.setVisibility(View.GONE);
+                    return;
+                }
+                mCrashText.setText(report.headline + "\n\nSaved to Android/data/" + getPackageName()
+                        + "/files/crash_reports/" + report.file.getName()
+                        + "\nPlease attach it to an issue on GitHub (vaduur/LibertyRecompAndroid), "
+                        + "or press Share report to send it from here.");
+                mCrashCard.setVisibility(View.VISIBLE);
+            });
+        }, "CrashReports").start();
+    }
+
+    private void shareCrash() {
+        if (mCrash == null) return;
+        String text = mCrash.text;
+        if (text.length() > 100000) text = text.substring(0, 100000) + "\n... (truncated)";
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_SUBJECT, "Liberty Recompiled crash report: " + mCrash.headline);
+        send.putExtra(Intent.EXTRA_TEXT, text);
+        try {
+            startActivity(Intent.createChooser(send, "Share crash report"));
+        } catch (Exception e) {
+            toast("No app to share with. The report is in " + mCrash.file.getAbsolutePath());
+        }
     }
 
     // ----------------------------------------------------------- installation

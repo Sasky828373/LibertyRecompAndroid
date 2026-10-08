@@ -256,6 +256,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.7 | The launcher installs the game, the title update and the episodes, with files picked anywhere on the device |
 | 0.5.7.1 | Launcher layout fixed on 20:9 and 21:9 screens; logo and Play button in the new typeface |
 | 0.5.7.2 | On-screen Xbox gamepad replaces the context touch layout; it hides while a controller is connected |
+| 0.5.7.3 | Crash reports: the launcher saves and shows every crash of the game process (signal, backtrace, last log lines) with a Share button; the runtime log is on by default |
 
 ## 7. What is left
 
