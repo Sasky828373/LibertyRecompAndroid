@@ -258,8 +258,8 @@ REXCVAR_DEFINE_UINT32(gta4_native_debug_force_depth_clamp, 0, "GTA IV/Graphics/N
     .range(0, 2);
 REXCVAR_DEFINE_UINT32(gta4_fps_guard, 3, "GTA IV/Performance",
                       "30 FPS guard: highest content reduction step it may take when frames miss "
-                      "the 30 Hz budget (0 = off; 1 = half shadow distance; 2 = shorter shadows; "
-                      "3 = also environment reflection every other frame)")
+                      "the 30 Hz budget (0 = off; 1-3 = environment reflection every other "
+                      "frame; shadows are never reduced)")
     .range(0, 3);
 REXCVAR_DEFINE_BOOL(gta4_native_resolve_swap, false, "GTA IV/Graphics/Native Renderer",
                     "Resolves that copy a whole surface into a same-format texture and then clear "
@@ -7990,17 +7990,6 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
                             (unsigned long long)command.hash, guarded->guarded_loops);
 #endif
 #if REX_PLATFORM_ANDROID
-      // TEMP: keep a few guarded modules for offline validation.
-      static std::atomic<uint32_t> dumped{0};
-      if (dumped.fetch_add(1) < 6) {
-        const auto path = rex::filesystem::GetUserFolder() /
-                          fmt::format("wd_{:016X}_{}.spv", command.hash,
-                                      command.stage == ShaderStage::kVertex ? "vs" : "ps");
-        if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
-          std::fwrite(guarded->words.data(), sizeof(uint32_t), guarded->words.size(), file);
-          std::fclose(file);
-        }
-      }
       static std::atomic<uint32_t> guarded_shaders{0}, guarded_loops{0};
       guarded_loops += guarded->guarded_loops;
       const uint32_t shaders = ++guarded_shaders;
@@ -8019,22 +8008,6 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
           spirv, vertex ? 0 : 1, vertex ? kVertexConstantsSize / 16 : kPixelConstantsSize / 16,
           kDescriptorSetCount, vertex ? 0 : 1);
       if (rewritten && rewritten->rewritten_loads) {
-#if REX_PLATFORM_ANDROID
-        // TEMP: keep a few before/after modules for offline validation.
-        static std::atomic<uint32_t> dumped{0};
-        if (dumped.fetch_add(1) < 6) {
-          const auto dump = [&](const std::vector<uint32_t>& words, const char* tag) {
-            const auto path = rex::filesystem::GetUserFolder() /
-                              fmt::format("spv_{:016X}_{}_{}.spv", command.hash, vertex ? "vs" : "ps", tag);
-            if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
-              std::fwrite(words.data(), sizeof(uint32_t), words.size(), file);
-              std::fclose(file);
-            }
-          };
-          dump(spirv, "in");
-          dump(rewritten->words, "out");
-        }
-#endif
         spirv = std::move(rewritten->words);
         ++ubo_rewritten_shaders_;
         ubo_rewritten_loads_ += rewritten->rewritten_loads;
