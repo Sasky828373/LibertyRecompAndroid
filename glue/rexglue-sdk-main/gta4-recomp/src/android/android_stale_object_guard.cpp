@@ -18,7 +18,7 @@
 
 REXCVAR_DEFINE_BOOL(gta4_stale_object_guard, true, "GTA IV/Stability",
                     "Treat an object whose pointers lead to unmapped memory as absent in "
-                    "sub_8296E480 instead of crashing");
+                    "sub_8296E480 and sub_8296E310 instead of crashing");
 
 namespace {
 
@@ -66,41 +66,51 @@ bool Readable(uint32_t address, uint32_t bytes) {
 
 }  // namespace
 
-extern "C" void sub_8296E480(PPCContext& ctx, uint8_t* base) {
-  if (REXCVAR_GET(gta4_stale_object_guard)) {
-    const uint32_t owner = ctx.r3.u32;
-    const uint32_t out = ctx.r4.u32;
-    bool valid = Readable(owner + 56, 4) && Readable(owner + 112, 4) && Readable(out, 64);
-    const uint32_t object = valid ? REX_LOAD_U32(owner + 56) : 0;
-    if (valid && object) {
-      // Matrix at +16..+79 and the link at +4; then link+12 and its type byte.
-      valid = Readable(object, 80);
-      const uint32_t link = valid ? REX_LOAD_U32(object + 4) : 0;
-      valid = valid && Readable(link + 12, 4);
-      const uint32_t typed = valid ? REX_LOAD_U32(link + 12) : 0;
-      valid = valid && Readable(typed + 4, 1);
-    }
-    if (!valid) {
-      const uint64_t count = g_stale_objects.fetch_add(1, std::memory_order_relaxed) + 1;
-      if (count <= 8 || !(count % 1024)) {
-        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
-                            "stale-object-guard: #%llu owner=%08X object=%08X out=%08X",
-                            static_cast<unsigned long long>(count), owner, object, out);
-      }
-      if (Readable(out, 64)) {
-        // The title's no-object path: identity rotation, zero translation,
-        // with its 1.0/0.0 constants read from the same addresses.
-        const uint32_t one = REX_LOAD_U32(0x81000000u + 3400);
-        const uint32_t zero = REX_LOAD_U32(0x81000000u + 2612);
-        const uint32_t layout[11][2] = {{0, one},  {4, zero},  {8, zero},  {16, zero},
-                                        {20, one}, {24, zero}, {32, zero}, {36, zero},
-                                        {40, one}, {48, 0},    {52, 0}};
-        for (const auto& [offset, bits] : layout) REX_STORE_U32(out + offset, bits);
-        REX_STORE_U32(out + 56, 0);
-        REX_STORE_U32(out + 60, 0);
-      }
-      return;
-    }
+// Both copy routines share one layout: owner+object_offset -> object (matrix
+// at +16, link at +4), link+12 -> typed object (type byte at +4), owner+
+// table_offset read for the skeleton query. Returns false (after writing the
+// title's no-object identity) when that chain no longer leads to mapped
+// memory; true when the original should run.
+static bool GuardedMatrixCopy(PPCContext& ctx, uint8_t* base, uint32_t object_offset,
+                       uint32_t table_offset, const char* name) {
+  if (!REXCVAR_GET(gta4_stale_object_guard)) return true;
+  const uint32_t owner = ctx.r3.u32;
+  const uint32_t out = ctx.r4.u32;
+  bool valid = Readable(owner + object_offset, 4) && Readable(owner + table_offset, 4) &&
+               Readable(out, 64);
+  const uint32_t object = valid ? REX_LOAD_U32(owner + object_offset) : 0;
+  if (valid && object) {
+    valid = Readable(object, 80);
+    const uint32_t link = valid ? REX_LOAD_U32(object + 4) : 0;
+    valid = valid && Readable(link + 12, 4);
+    const uint32_t typed = valid ? REX_LOAD_U32(link + 12) : 0;
+    valid = valid && Readable(typed + 4, 1);
   }
-  __imp__sub_8296E480(ctx, base);
+  if (valid) return true;
+  const uint64_t count = g_stale_objects.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (count <= 8 || !(count % 1024)) {
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                        "stale-object-guard: #%llu %s owner=%08X object=%08X out=%08X",
+                        static_cast<unsigned long long>(count), name, owner, object, out);
+  }
+  if (Readable(out, 64)) {
+    // The title's no-object path: identity rotation, zero translation, with
+    // its 1.0/0.0 constants read from the same addresses (lis -32256).
+    const uint32_t one = REX_LOAD_U32(0x82000000u + 3400);
+    const uint32_t zero = REX_LOAD_U32(0x82000000u + 2612);
+    const uint32_t layout[9][2] = {{0, one},  {4, zero},  {8, zero},  {16, zero}, {20, one},
+                                   {24, zero}, {32, zero}, {36, zero}, {40, one}};
+    for (const auto& [offset, bits] : layout) REX_STORE_U32(out + offset, bits);
+    for (uint32_t offset = 48; offset < 64; offset += 4) REX_STORE_U32(out + offset, 0);
+  }
+  return false;
+}
+
+extern "C" void sub_8296E480(PPCContext& ctx, uint8_t* base) {
+  if (GuardedMatrixCopy(ctx, base, 56, 112, "sub_8296E480")) __imp__sub_8296E480(ctx, base);
+}
+
+// Same routine for the object at owner+52 (table at owner+104).
+extern "C" void sub_8296E310(PPCContext& ctx, uint8_t* base) {
+  if (GuardedMatrixCopy(ctx, base, 52, 104, "sub_8296E310")) __imp__sub_8296E310(ctx, base);
 }
