@@ -7,6 +7,7 @@
 #include "native_pipeline_stats.h"
 #include "native_command_bytes.h"
 #include "native_owned_commands.h"
+#include "native_snapshot_resource.h"
 
 #include <array>
 #include <chrono>
@@ -1819,7 +1820,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
 
   std::mutex render_mutex_;
   std::condition_variable render_condition_;
-  std::pmr::synchronized_pool_resource snapshot_pool_;
+  NativeSnapshotResource snapshot_pool_;
   NativeCommandPool<NativeCommand> native_command_pool_;
   NativeOwnedCommands<NativeCommand, true> render_queue_;
   // Draws captured but not yet published to render_queue_ (guarded by
