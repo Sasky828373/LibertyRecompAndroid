@@ -78,4 +78,4 @@ Notes:
 
 `os/android/android_args/` holds the settings profiles used during development:
 `perf.txt` (older handheld profile), `debug.txt` (verbose logging) and `rewrite_off.txt`
-(disables the v5 renderer CPU changes).
+(disables the 0.5 renderer CPU changes).

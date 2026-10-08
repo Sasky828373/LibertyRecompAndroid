@@ -136,7 +136,7 @@ the big cores.
 
 Each item below sits behind its own cvar, so it can be disabled without a rebuild.
 [`android_args/rewrite_off.txt`](../../os/android/android_args/rewrite_off.txt) turns off the most
-recent batch.
+recent batch (0.5).
 
 - **Pipelining.** The worker assembles frames while the recorder records the previous one. Retired
   commands are released in the background. Worker wake-ups are batched, and captured draws are
@@ -228,12 +228,13 @@ because benchmarking was done at night, when shadows are not visible.
 
 | Version | Highlights |
 |---|---|
-| v2 | Turnip R6, FSR 1, dynamic draw distance, batched command queue, vblank from the display |
-| v3 | Light-volume GPU hang fixed, PGO, water draw merging |
-| v4 | Native 720p at 30 FPS with VSync, GPU-side cuts (early tests, lighting pass reuse, cheaper multiplies) |
-| v5 | Renderer CPU rewrite (command recycling, state coalescing, partial constants, caches): the far view holds 30 FPS at 720p |
-| v5.5 | 1080p output with FSR 1 quality as an alternative profile, crash guard for the freed-object race |
-| v5.6 | Shadow fix (console range and map size), indexed draw merging, second crash guard, native 720p defaults |
+| 0.2 | Turnip R6, FSR 1, dynamic draw distance, batched command queue, vblank from the display |
+| 0.3 | Light-volume GPU hang fixed, PGO, water draw merging |
+| 0.4 | Native 720p at 30 FPS with VSync, GPU-side cuts (early tests, lighting pass reuse, cheaper multiplies) |
+| 0.5 | Renderer CPU rewrite (command recycling, state coalescing, partial constants, caches): the far view holds 30 FPS at 720p |
+| 0.5.5 | 1080p output with FSR 1 quality as an alternative profile, crash guard for the freed-object race |
+| 0.5.6 | Shadow fix (console range and map size), indexed draw merging, second crash guard, native 720p defaults |
+| 0.5.6.1 | First public release: documentation, no debug shader dumps in the data folder |
 
 ## 7. What is left
 

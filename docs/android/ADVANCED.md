@@ -127,7 +127,7 @@ panel, with FSR's sharpening look.
 
 Every renderer feature added for Android sits behind its own setting, so a regression can be
 switched off without a rebuild. [`os/android/android_args/rewrite_off.txt`](../../os/android/android_args/rewrite_off.txt)
-turns off all of the renderer CPU optimizations from v5. If a new version misbehaves where an old
+turns off all of the renderer CPU optimizations from 0.5. If a new version misbehaves where an old
 one did not, append those lines to `args.txt`.
 
 ## Live tuning: `live_cvars.txt`
