@@ -1,0 +1,55 @@
+name: Build GTA IV Android ARM64 APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [android-arm64-apk-ci]
+
+jobs:
+  android:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Android SDK and NDK
+        shell: pwsh
+        run: |
+          $sdk = "$env:LOCALAPPDATA\Android\Sdk"
+          New-Item -ItemType Directory -Force -Path $sdk | Out-Null
+          $env:ANDROID_HOME = $sdk
+          $env:ANDROID_SDK_ROOT = $sdk
+          $sdkmanager = Get-ChildItem -Path "$env:ANDROID_HOME" -Filter sdkmanager.bat -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sdkmanager) { throw "sdkmanager.bat not found; install Android command-line tools on runner" }
+          & $sdkmanager --sdk_root="$sdk" "platforms;android-35" "build-tools;35.0.0" "platform-tools" "ndk;29.0.14206865"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare repo and native dependencies
+        run: |
+          python tools/setup_repo.py
+          bash os/android/scripts/build_driver_proxy.sh
+      - name: Compile native ARM64 Vulkan renderer
+        run: STRIP=1 bash os/android/scripts/build_native.sh 4
+      - name: Package APK
+        run: |
+          rm -f os/android/app/build/outputs/apk/debug/app-debug.apk
+          bash os/android/scripts/build_apk.sh
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GTA-IV-LibertyRecomp-Android-arm64
+          path: os/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
