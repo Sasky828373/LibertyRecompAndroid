@@ -49,8 +49,7 @@ Known problems:
   light volumes are missing as a result.
 - The episodes (The Lost and Damned, The Ballad of Gay Tony) and online multiplayer have not been
   tested on Android.
-- Upstream's touch controls (`--touch_controls`) have not been tested on Android. Play with a
-  gamepad.
+- The on-screen touch controls have not been tested on Android (see [Controls](#controls)).
 
 ## Device requirements
 
@@ -62,7 +61,7 @@ Known problems:
 | **Android** | Android 10 (API 29) or newer, 64-bit. |
 | **RAM** | 8 GB recommended. 6 GB is untested. |
 | **Storage** | About 7 GB for the installed game, plus room for the disc image while installing (about 15 GB free in total). |
-| **Controller** | Required. The built-in controls of a handheld, or a Bluetooth or USB gamepad. |
+| **Controller** | An XInput (Xbox-layout) gamepad is strongly recommended, see [Controls](#controls). |
 
 **Not supported:**
 
@@ -80,6 +79,29 @@ and nobody has run the renderer on their vendor drivers.
 with the system driver or a newer Turnip build (see [ADVANCED.md](docs/android/ADVANCED.md#driver-selection-drivertxt)),
 but this is untested. Low-end Adreno 6xx parts (610/618/619) should start, but expect them to be
 far too slow.
+
+## Controls
+
+**An XInput (Xbox-layout) gamepad is strongly recommended.** For example:
+
+- an Xbox controller over Bluetooth or USB;
+- any XInput-compatible pad;
+- the built-in controls of a gaming handheld (Retroid, AYN Odin, AYANEO and similar) in Xbox
+  mode.
+
+The game is the Xbox 360 version, so its controls and button prompts follow the Xbox layout one to
+one. Other controllers that Android recognizes (DualShock, DualSense, Switch Pro and so on) usually
+work through SDL. Their buttons are mapped by position, though, and they have seen much less
+testing.
+
+**On-screen touch controls: present, but untested on Android.** Upstream Liberty Recompiled has a
+context-sensitive touch overlay whose buttons change between on foot, driving, the phone and so on.
+In its default `auto` mode, the overlay appears only when **no** gamepad, keyboard or mouse is
+connected. Every handheld this port was developed on has a built-in gamepad, so the overlay has
+never been shown or tuned on Android. On a phone without a controller it should appear on its own.
+Expect rough edges, and treat it as a fallback rather than a way to play the game. Control it with
+`--touch_controls=auto|on|off` in `args.txt` (see [ADVANCED.md](docs/android/ADVANCED.md)) or with
+the touch controls option in the game's settings menu.
 
 ## Game files required
 

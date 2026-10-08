@@ -81,8 +81,10 @@ The game files are installed to the folder shown at the bottom
   back about 7.8 GB, and they are not needed again.
 - **The first minutes are slower.** Shaders are compiled the first time they are needed, so you
   will see some hitches. They are cached in `shader_cache/` and stay smooth on later runs.
-- **Controls.** Use the device's built-in controls or a connected gamepad. The layout is the Xbox
-  360 one.
+- **Controls.** An XInput (Xbox-layout) gamepad is strongly recommended: the built-in controls
+  of a handheld, or an Xbox controller over Bluetooth or USB. The on-screen touch controls appear
+  only when no controller is connected, and they are untested on Android (see
+  [Controls](../../README.md#controls)).
 
 ## Upgrading to a newer version
 
