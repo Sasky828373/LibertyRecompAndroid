@@ -23,7 +23,10 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.app.AlertDialog;
+import android.view.WindowManager;
 import android.widget.ImageView;
+import android.widget.ProgressBar;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -50,8 +53,8 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * The first screen of the app: game status, the Vulkan driver choice and
- * Play.
+ * The first screen of the app: game status and installation, the Vulkan
+ * driver choice and Play.
  *
  * <p>The driver has to be chosen before the game loads any native code
  * (DriverBridge sets it up once per process), so this is a plain Android
@@ -70,6 +73,16 @@ public class LauncherActivity extends Activity {
     private static final String GAME_PROCESS_SUFFIX = ":game";
     /** Largest driver package accepted, unpacked. */
     private static final long MAX_DRIVER_BYTES = 256L * 1024 * 1024;
+
+    /** Requests for the four installation sources: REQUEST_SOURCE + row index. */
+    private static final int REQUEST_SOURCE = 10;
+    private static final int SOURCE_GAME = 0;
+    private static final int SOURCE_UPDATE = 1;
+    private static final int SOURCE_TLAD = 2;
+    private static final int SOURCE_TBOGT = 3;
+    private static final String[] SOURCE_LABELS = {
+            "Base game (disc image .iso)", "Title Update 8", "The Lost and Damned (optional)",
+            "The Ballad of Gay Tony (optional)"};
 
     private File mDataRoot;
     private RadioGroup mDrivers;
@@ -97,6 +110,13 @@ public class LauncherActivity extends Activity {
         setContentView(buildLayout());
         hideSystemBars();
         mPlay.requestFocus();
+        new Thread(() -> {
+            boolean loaded = Installer.load(this);
+            mMain.post(() -> {
+                mInstallerReady = loaded;
+                refreshInstall();
+            });
+        }, "InstallerLoad").start();
         // `am start ... --ez play true` (the development scripts) goes
         // straight into the game with the current driver choice.
         if (savedInstanceState == null && getIntent().getBooleanExtra("play", false)) play();
@@ -107,6 +127,13 @@ public class LauncherActivity extends Activity {
         super.onResume();
         refreshDrivers();
         refreshStatus();
+        if (mInstallerReady) refreshInstall();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        mMain.removeCallbacksAndMessages(null);
     }
 
     @Override
@@ -202,8 +229,13 @@ public class LauncherActivity extends Activity {
                 + "falls back to the device's own driver.", 12, R.color.picker_muted),
                 matchWrap(dp(10)));
 
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.addView(buildInstallCard());
+        column.addView(right, matchWrap(dp(14)));
         ScrollView rightScroll = new ScrollView(this);
-        rightScroll.addView(right);
+        mRightScroll = rightScroll;
+        rightScroll.addView(column);
         LinearLayout.LayoutParams rightParams = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         rightParams.leftMargin = dp(20);
@@ -229,7 +261,10 @@ public class LauncherActivity extends Activity {
     private void refreshStatus() {
         File game = new File(mDataRoot, "LibertyRecomp/game");
         String[] installed = game.list();
-        if (installed != null && installed.length > 0) {
+        // The installer's own check once it is loaded; before that, a quick look.
+        boolean installedNow = mInstallerReady ? mInstalled
+                : installed != null && installed.length > 0;
+        if (installedNow) {
             mStatus.setText("Game installed. Press Play.");
         } else {
             File[] sources = new File(mDataRoot, "install").listFiles();
@@ -241,12 +276,10 @@ public class LauncherActivity extends Activity {
                 else update = true;
             }
             if (disc && update) {
-                mStatus.setText("Game files found. Press Play to install.");
+                mStatus.setText("Game files found in install/. Press Install on the right.");
             } else {
-                mStatus.setText("Game not installed. Copy the disc image (.iso) and Title "
-                        + "Update 8 into\nAndroid/data/" + getPackageName() + "/files/install/\n"
-                        + "then press Play." + (disc ? "\n(Title update missing)" : "")
-                        + (update ? "\n(Disc image missing)" : ""));
+                mStatus.setText("Game not installed. Choose the disc image and Title Update 8 "
+                        + "on the right and press Install.");
             }
         }
         String result = null;
@@ -265,6 +298,307 @@ public class LauncherActivity extends Activity {
         mLastLaunch.setVisibility(result != null ? View.VISIBLE : View.GONE);
     }
 
+    // ----------------------------------------------------------- installation
+
+    private boolean mInstallerReady;
+    private boolean mInstalled;
+    private boolean mExpanded;
+    private final String[] mSources = new String[SOURCE_LABELS.length];
+    private final TextView[] mSourceValues = new TextView[SOURCE_LABELS.length];
+    private Installer.Inspection mInspection;
+    private boolean mInspecting;
+    private TextView mInstallTitle;
+    private TextView mInstallNote;
+    private TextView mInspectionText;
+    private LinearLayout mInstallBody;
+    private LinearLayout mSourceRows;
+    private ScrollView mRightScroll;
+    private Button mExpand;
+    private Button mInstall;
+    private Button mCancelInstall;
+    private ProgressBar mProgress;
+    private TextView mProgressText;
+
+    private View buildInstallCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(12), dp(16), dp(12));
+        card.setBackground(rounded(color(R.color.picker_card), dp(10)));
+
+        mInstallTitle = text("Game", 18, R.color.picker_text);
+        mInstallTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(mInstallTitle);
+        mInstallNote = text("Checking the installation...", 12, R.color.picker_muted);
+        card.addView(mInstallNote, matchWrap(dp(2)));
+
+        mExpand = button("Reinstall or add episodes", false);
+        mExpand.setOnClickListener(v -> {
+            mExpanded = true;
+            refreshInstall();
+        });
+        card.addView(mExpand, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        ((LinearLayout.LayoutParams) mExpand.getLayoutParams()).topMargin = dp(10);
+
+        mInstallBody = new LinearLayout(this);
+        mInstallBody.setOrientation(LinearLayout.VERTICAL);
+        mSourceRows = new LinearLayout(this);
+        mSourceRows.setOrientation(LinearLayout.VERTICAL);
+        mInstallBody.addView(mSourceRows, matchWrap(0));
+        for (int i = 0; i < SOURCE_LABELS.length; ++i) {
+            final int index = i;
+            TextView label = text(SOURCE_LABELS[i], 14, R.color.picker_text);
+            mSourceRows.addView(label, matchWrap(dp(12)));
+            mSourceValues[i] = text("Not selected", 12, R.color.picker_muted);
+            mSourceRows.addView(mSourceValues[i], matchWrap(dp(2)));
+            if (i == SOURCE_GAME) {
+                mInspectionText = text("", 12, R.color.picker_muted);
+                mSourceRows.addView(mInspectionText, matchWrap(dp(2)));
+            }
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            Button choose = button("Choose file...", false);
+            choose.setOnClickListener(v -> chooseSource(index));
+            row.addView(choose, new LinearLayout.LayoutParams(0, dp(44), 1f));
+            Button clear = button("Clear", false);
+            clear.setOnClickListener(v -> setSource(index, null));
+            LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(dp(100), dp(44));
+            clearParams.leftMargin = dp(10);
+            row.addView(clear, clearParams);
+            mSourceRows.addView(row, matchWrap(dp(6)));
+        }
+
+        mProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        mProgress.setMax(1000);
+        mInstallBody.addView(mProgress, matchWrap(dp(14)));
+        mProgressText = text("", 12, R.color.picker_muted);
+        mInstallBody.addView(mProgressText, matchWrap(dp(2)));
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        mInstall = button("Install", true);
+        mInstall.setOnClickListener(v -> startInstall());
+        actions.addView(mInstall, new LinearLayout.LayoutParams(0, dp(52), 1f));
+        mCancelInstall = button("Cancel", false);
+        mCancelInstall.setOnClickListener(v -> {
+            Installer.cancel();
+            mProgressText.setText("Cancelling...");
+        });
+        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(dp(120), dp(52));
+        cancelParams.leftMargin = dp(10);
+        actions.addView(mCancelInstall, cancelParams);
+        mInstallBody.addView(actions, matchWrap(dp(12)));
+
+        mInstallBody.addView(text("Files can be picked anywhere on the device storage or an "
+                + "SD card (the app asks for file access once). Alternatively copy them into "
+                + "Android/data/" + getPackageName() + "/files/install/ - they are picked up "
+                + "automatically.", 12, R.color.picker_muted), matchWrap(dp(10)));
+        card.addView(mInstallBody, matchWrap(0));
+        return card;
+    }
+
+    /** Re-reads the installation state and the install/ folder, then redraws. */
+    private void refreshInstall() {
+        if (!mInstallerReady) {
+            mInstallTitle.setText("Game");
+            mInstallNote.setText(Installer.loadError() == null ? "Checking the installation..."
+                    : "The installer is unavailable (" + Installer.loadError() + "). The game "
+                    + "installs itself on Play from the install/ folder.");
+            mExpand.setVisibility(View.GONE);
+            mInstallBody.setVisibility(View.GONE);
+            return;
+        }
+        if (Installer.running()) {
+            showInstallProgress();
+            return;
+        }
+        new Thread(() -> {
+            String reason = Installer.installState(mDataRoot);
+            mMain.post(() -> {
+                mInstalled = reason == null;
+                preselectFromInstallFolder();
+                updateInstallViews(reason);
+                refreshStatus();
+            });
+        }, "InstallState").start();
+    }
+
+    private void updateInstallViews(String reason) {
+        boolean running = Installer.running();
+        mInstallTitle.setText(mInstalled ? "Game installed" : "Install the game");
+        mInstallNote.setText(mInstalled
+                ? "GTA IV with Title Update 8 is installed and ready."
+                : "You need your own USA disc image and Title Update 8 (0.0.8.5)."
+                        + (reason != null && !reason.equals("not installed")
+                        && new File(Installer.installRoot(mDataRoot), "game").exists()
+                        ? "\nCurrent installation: " + reason : ""));
+        boolean showBody = !mInstalled || mExpanded || running;
+        mExpand.setVisibility(showBody ? View.GONE : View.VISIBLE);
+        mInstallBody.setVisibility(showBody ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < SOURCE_LABELS.length; ++i) {
+            mSourceValues[i].setText(mSources[i] != null ? mSources[i] : "Not selected");
+        }
+        if (mInspecting) {
+            mInspectionText.setText("Checking the disc image...");
+            mInspectionText.setTextColor(0xFFFFC840);
+        } else if (mInspection != null && mSources[SOURCE_GAME] != null) {
+            mInspectionText.setText(mInspection.summary);
+            mInspectionText.setTextColor(mInspection.supported ? 0xFF5AE673 : 0xFFFF5A5A);
+        } else {
+            mInspectionText.setText("");
+        }
+        boolean gameReady = mSources[SOURCE_GAME] != null && mInspection != null
+                && mInspection.supported && mSources[SOURCE_UPDATE] != null;
+        boolean episodesOnly = mInstalled && mSources[SOURCE_GAME] == null
+                && mSources[SOURCE_UPDATE] == null
+                && (mSources[SOURCE_TLAD] != null || mSources[SOURCE_TBOGT] != null);
+        boolean canInstall = !running && !mInspecting && (gameReady || episodesOnly);
+        mInstall.setEnabled(canInstall);
+        mInstall.setAlpha(canInstall ? 1f : 0.4f);
+        mInstall.setText(episodesOnly ? "Install episodes" : "Install");
+        mCancelInstall.setVisibility(running ? View.VISIBLE : View.GONE);
+        mSourceRows.setVisibility(running ? View.GONE : View.VISIBLE);
+        mInstall.setVisibility(running ? View.GONE : View.VISIBLE);
+        mProgress.setVisibility(running ? View.VISIBLE : View.GONE);
+        if (!running) mProgressText.setText("");
+        mPlay.setAlpha(mInstalled && !running ? 1f : 0.5f);
+    }
+
+    /** Sources found in files/install/ fill empty rows: the first .iso and the largest other file. */
+    private void preselectFromInstallFolder() {
+        if (mSources[SOURCE_GAME] != null || mSources[SOURCE_UPDATE] != null) return;
+        File[] files = new File(mDataRoot, "install").listFiles();
+        if (files == null) return;
+        File disc = null;
+        File update = null;
+        for (File file : files) {
+            if (!file.isFile() || file.getName().startsWith(".")) continue;
+            if (file.getName().toLowerCase(Locale.ROOT).endsWith(".iso")) {
+                if (disc == null) disc = file;
+            } else if (update == null || file.length() > update.length()) {
+                update = file;
+            }
+        }
+        if (disc == null && update == null) return;
+        if (update != null) mSources[SOURCE_UPDATE] = update.getAbsolutePath();
+        if (disc != null) setSource(SOURCE_GAME, disc.getAbsolutePath());
+    }
+
+    private void setSource(int index, String path) {
+        mSources[index] = path;
+        if (index == SOURCE_GAME) {
+            mInspection = null;
+            if (path != null) {
+                mInspecting = true;
+                new Thread(() -> {
+                    Installer.Inspection inspection = Installer.inspect(path);
+                    mMain.post(() -> {
+                        if (path.equals(mSources[SOURCE_GAME])) {
+                            mInspection = inspection;
+                            mInspecting = false;
+                            updateInstallViews(null);
+                        }
+                    });
+                }, "InspectSource").start();
+            } else {
+                mInspecting = false;
+            }
+        }
+        updateInstallViews(null);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void chooseSource(int index) {
+        if (!Installer.hasFileAccess(this)) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Allow file access")
+                    .setMessage("To read the game files from anywhere on this device, Liberty "
+                            + "Recompiled needs access to all files. Android opens the setting "
+                            + "next; enable it and come back.\n\nWithout it, copy the files into "
+                            + "Android/data/" + getPackageName() + "/files/install/ instead.")
+                    .setPositiveButton("Open setting", (d, w) -> Installer.requestFileAccess(this, 2))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        try {
+            startActivityForResult(intent, REQUEST_SOURCE + index);
+        } catch (Exception e) {
+            toast("No file picker is available on this device.");
+        }
+    }
+
+    private void onSourcePicked(int index, Uri uri) {
+        String path = Installer.pathFromUri(this, uri);
+        if (path == null) {
+            toast("This file has no path on the device (cloud storage?). Pick it from the "
+                    + "device storage or an SD card.");
+            return;
+        }
+        if (!new File(path).canRead()) {
+            toast("Cannot read " + path + ". Check that file access is allowed.");
+            return;
+        }
+        setSource(index, path);
+    }
+
+    private void startInstall() {
+        boolean episodesOnly = mSources[SOURCE_GAME] == null;
+        if (!Installer.start(mSources[SOURCE_GAME], mSources[SOURCE_UPDATE], mSources[SOURCE_TLAD],
+                mSources[SOURCE_TBOGT], mDataRoot)) {
+            toast("An installation is already running.");
+            return;
+        }
+        Log.i(TAG, "installation started" + (episodesOnly ? " (episodes only)" : ""));
+        showInstallProgress();
+        mRightScroll.post(() -> mRightScroll.smoothScrollTo(0, 0));
+        mCancelInstall.requestFocus();
+    }
+
+    private void showInstallProgress() {
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        updateInstallViews(null);
+        mInstallTitle.setText("Installing...");
+        mInstallNote.setText("Keep the app open. This takes several minutes.");
+        long[] progress = Installer.progress();
+        long copied = progress[0];
+        long total = progress[1];
+        mProgress.setProgress(total > 0 ? (int) Math.min(1000, copied * 1000 / total) : 0);
+        mProgressText.setText(total > 0
+                ? String.format(Locale.ROOT, "%.1f of %.1f GB (%d%%)", copied / 1e9, total / 1e9,
+                copied * 100 / total)
+                : "Checking the sources...");
+        mStatus.setText(total > 0
+                ? String.format(Locale.ROOT, "Installing the game... %d%%", copied * 100 / total)
+                : "Installing the game...");
+        if (Installer.running()) {
+            mMain.postDelayed(this::showInstallProgress, 300);
+            return;
+        }
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        String result = Installer.takeResult();
+        if (result != null && result.isEmpty()) {
+            toast("Installation complete. Press Play.");
+            Arrays.fill(mSources, null);
+            mInspection = null;
+            mExpanded = false;
+            refreshInstall();
+            mPlay.requestFocus();
+        } else {
+            if (result != null) {
+                new AlertDialog.Builder(this)
+                        .setTitle("Installation failed")
+                        .setMessage(result)
+                        .setPositiveButton("OK", null)
+                        .show();
+            }
+            refreshInstall();
+        }
+    }
+
     // ---------------------------------------------------------------- drivers
 
     private File customRoot() {
@@ -274,6 +608,7 @@ public class LauncherActivity extends Activity {
     private void refreshDrivers() {
         String current = currentDriverMode();
         mDrivers.setOnCheckedChangeListener(null);
+        mDrivers.clearCheck();
         mDrivers.removeAllViews();
         mDriverModes.clear();
         addDriver(DriverBridge.TURNIP, "Turnip 26.3.0-R6 (bundled)",
@@ -387,6 +722,12 @@ public class LauncherActivity extends Activity {
     @SuppressWarnings("deprecation")
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode >= REQUEST_SOURCE && requestCode < REQUEST_SOURCE + SOURCE_LABELS.length) {
+            if (resultCode == RESULT_OK && data != null) {
+                onSourcePicked(requestCode - REQUEST_SOURCE, data.getData());
+            }
+            return;
+        }
         if (requestCode != REQUEST_DRIVER_ZIP || resultCode != RESULT_OK || data == null
                 || data.getData() == null) {
             return;
@@ -519,6 +860,14 @@ public class LauncherActivity extends Activity {
 
     private void play() {
         if (mBusy) return;
+        if (Installer.running()) {
+            toast("The game is being installed.");
+            return;
+        }
+        if (mInstallerReady && !mInstalled) {
+            toast("Install the game first (Game panel on the right).");
+            return;
+        }
         setBusy(true, "Starting...");
         new Thread(() -> {
             // A game process from an earlier session keeps the driver it
@@ -572,7 +921,11 @@ public class LauncherActivity extends Activity {
                     return true;
                 }
                 case KeyEvent.KEYCODE_BUTTON_B:
-                    finish();
+                    if (Installer.running()) {
+                        toast("The game is being installed.");
+                    } else {
+                        finish();
+                    }
                     return true;
                 default:
                     break;

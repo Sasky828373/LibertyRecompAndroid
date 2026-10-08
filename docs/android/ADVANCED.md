@@ -157,7 +157,7 @@ The game needs Vulkan 1.2. The APK bundles a Mesa Turnip build (StevenMXZ 26.3.0
 Adreno 6xx/7xx) and loads it through libadrenotools. Without root, this replaces the system driver
 for this app only.
 
-Since 0.5.6.3 the driver is chosen on the [launcher](INSTALL.md#the-launcher-0563-and-newer)
+Since 0.5.6.3 the driver is chosen on the [launcher](INSTALL.md#2-open-the-app-the-launcher)
 screen, which also imports driver zips. The launcher writes your choice to `driver.txt`, and the
 file can still be edited by hand. It holds a single line:
 

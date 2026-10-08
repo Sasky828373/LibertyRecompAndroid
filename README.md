@@ -50,9 +50,9 @@ On the Retroid Pocket 5 with the default settings:
 Known problems:
 
 - Occasional crashes to the home screen still happen. Save often.
-- The installer's **Select File / Select Folder** buttons do not work on Android: the system file
-  picker returns `content://` links the installer cannot read. Copy the files into the app's
-  `install` folder instead (see [INSTALL.md](docs/android/INSTALL.md)).
+- The in-game installer's **Select File / Select Folder** buttons do not work on Android. Install
+  from the launcher (0.5.7+) or through the app's `install` folder instead (see
+  [INSTALL.md](docs/android/INSTALL.md)).
 - One deferred light-volume shader is skipped, because it hangs the GPU under Turnip. A few
   light volumes are missing as a result.
 - The episodes (The Lost and Damned, The Ballad of Gay Tony) and online multiplayer have not been
@@ -140,25 +140,24 @@ console and disc.
 
 ## Quick start
 
-1. Install `LibertyRecompAndroid-*.apk` from the [Releases](../../releases) page, launch it once, then close it.
-   Since 0.5.6.3 the app opens on a launcher screen with the game status, the Vulkan driver choice
-   and a **Play** button (see [INSTALL.md](docs/android/INSTALL.md#the-launcher-0563-and-newer)).
-2. Copy your disc image (`*.iso`) and the Title Update 8 file into
-   `Android/data/com.libertyrecomp/files/install/`. A PC over USB is the easiest way.
+1. Install `LibertyRecompAndroid-*.apk` from the [Releases](../../releases) page and open it. The
+   app opens on a launcher with the game status, the installer, the Vulkan driver choice and
+   **Play** (see [INSTALL.md](docs/android/INSTALL.md#2-open-the-app-the-launcher)).
+2. In the **Game** panel (0.5.7 and newer), choose your disc image (`*.iso`) and the Title Update 8
+   file wherever they are on the device. The app asks once for *All files access*. On older
+   versions, or without that permission, copy both into
+   `Android/data/com.libertyrecomp/files/install/` instead (a PC over USB is the easiest way).
    The tested files ([details](#game-files-required)):
    - disc: `Grand Theft Auto IV (USA) (En,Fr,De,Es,It).iso`, MD5 `f0a046aed1520a913b2125f0a69ee7d0`
    - TU8: `TU_1A581VI_000000K000000.0000000000205`, MD5 `f041b5f6721d7ee578560bac21668826`
 
    The file names do not matter, as long as the disc image ends in `.iso`.
-3. Launch the app again (and press **Play** on 0.5.6.3 and newer). The installer picks up both
-   files and installs the game by itself.
+3. Press **Install**, wait for it to finish, then press **Play**.
 
-This is the installer screen on the first launch:
+![Installing from the launcher](docs/android/images/launcher_install.png)
 
-![The Liberty Recompiled installer on Android](docs/android/images/installer.png)
-
-Do not use its **Select File / Select Folder** buttons: they cannot read files picked through the
-Android file picker. The full walkthrough is in [INSTALL.md](docs/android/INSTALL.md).
+The full walkthrough, including the `install/` folder and older versions, is in
+[INSTALL.md](docs/android/INSTALL.md).
 
 ## Documentation
 

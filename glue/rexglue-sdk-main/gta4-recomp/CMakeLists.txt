@@ -388,6 +388,28 @@ elseif(ANDROID)
         src/android/android_frame_wait_hook.cpp
         src/android/android_stale_object_guard.cpp
         src/android/android_thread_pinning.cpp)
+    # The launcher's installer: the same source inspection and installation
+    # code as the in-game installer dialog, without the rest of the title, so
+    # the launcher process can install the game before it ever starts.
+    add_library(liberty_install SHARED
+        src/install/gta4_installer.cpp
+        src/install/gta4_rpf_extractor.cpp
+        src/install/gta4_source_inspector.cpp
+        src/android/android_install_jni.cpp
+        "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/crypto/rijndael-alg-fst.c"
+    )
+    target_include_directories(liberty_install PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/crypto
+    )
+    target_compile_definitions(liberty_install PRIVATE
+        GTA4_RECOMP_ASSET_XEX="${CMAKE_CURRENT_SOURCE_DIR}/assets/default_v8.xex"
+        GTA4_RPF_AES_KEY_SOURCE="${LIBERTY_RECOMP_WORKSPACE_ROOT}/LibertyRecompLib/aes_key.bin"
+    )
+    target_link_libraries(liberty_install PRIVATE rex::runtime xxHash::xxhash z log)
+    target_link_options(liberty_install PRIVATE "-Wl,-z,max-page-size=16384")
+    add_dependencies(LibertyRecomp liberty_install)
+
     if(LIBERTY_ANDROID_PGO STREQUAL "generate")
         target_compile_options(LibertyRecomp PRIVATE -fprofile-generate)
         target_link_options(LibertyRecomp PRIVATE -fprofile-generate)

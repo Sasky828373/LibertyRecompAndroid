@@ -169,7 +169,7 @@ public class LibertyActivity extends SDLActivity {
         mDataRoot = dataRoot;
         File resources = new File(getFilesDir(), RESOURCES);
         try {
-            syncResources(resources);
+            syncResources(this);
         } catch (IOException e) {
             Log.e(TAG, "copying bundled resources failed", e);
         }
@@ -299,25 +299,31 @@ public class LibertyActivity extends SDLActivity {
         }
     }
 
-    /** Re-copies the bundled resources whenever the installed APK changes. */
-    private void syncResources(File target) throws IOException {
+    /**
+     * Re-copies the bundled resources into files/Resources whenever the
+     * installed APK changes, and returns that folder. Shared with the
+     * launcher's installer, which needs the RPF key from it.
+     */
+    static synchronized File syncResources(Context context) throws IOException {
+        File target = new File(context.getFilesDir(), RESOURCES);
         String stamp;
         try {
-            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
             stamp = info.versionCode + ":" + info.lastUpdateTime;
         } catch (Exception e) {
             stamp = "unknown";
         }
         File stampFile = new File(target, RESOURCES_STAMP);
         if (stamp.equals(readFirstLine(stampFile))) {
-            return;
+            return target;
         }
         deleteRecursively(target);
-        copyAssetTree(getAssets(), RESOURCES, target);
+        copyAssetTree(context.getAssets(), RESOURCES, target);
         try (OutputStream out = new FileOutputStream(stampFile)) {
             out.write(stamp.getBytes(StandardCharsets.UTF_8));
         }
         Log.i(TAG, "bundled resources copied to " + target);
+        return target;
     }
 
     private static void copyAssetTree(AssetManager assets, String path, File target)

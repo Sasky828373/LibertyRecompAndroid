@@ -19,18 +19,60 @@ The MD5 and SHA-1 hashes of the tested files are listed in the
 2. Open it on the device and allow installing from this source when Android asks.
 3. The app appears as **Liberty Recompiled** (package `com.libertyrecomp`).
 
-## 2. Launch once to create the app folder
+## 2. Open the app: the launcher
 
-Start the app once. It creates its data folder. On 0.5.6.3 and newer it opens on the
-[launcher](#the-launcher-0563-and-newer), which shows where the files go. Older versions go
-straight to the installer. Close the app for now. The installer's **Select File / Select Folder**
-buttons do not work on Android (see the note below).
+![The launcher](images/launcher.png)
 
-The app keeps everything in its own external data folder, so it needs no storage permission:
+The app always opens on the launcher (0.5.6.3 and newer):
+
+- **Left:** the game status and **Play**. Play stays grey until the game is installed.
+- **Right, Game:** installing the game, the title update and the episodes (0.5.7 and newer).
+- **Right, Vulkan driver:** the driver choice, see [below](#the-vulkan-driver).
+
+Gamepad: the D-pad moves between the controls, **A** selects, **B** closes the app and **Start**
+plays.
+
+## 3. Install the game from the launcher (0.5.7 and newer)
+
+![Installing from the launcher](images/launcher_install.png)
+
+1. Under **Base game**, press **Choose file...** and pick your disc image (`.iso`). The first time,
+   the app asks for **All files access**. Android opens the setting; turn it on and come back. With
+   it, the files can stay anywhere on the device storage or an SD card: in Download, a games
+   folder, wherever. Nothing has to be copied first.
+2. The disc image is checked right away. A green line, such as *Detected: Grand Theft Auto IV — USA
+   — Retail 1.00 — Supported*, means it is the right disc. A red line says what is wrong (for
+   example, another region).
+3. Under **Title Update 8**, choose the title update (the STFS package or a raw `default.xexp`).
+4. Optionally choose **The Lost and Damned** and **The Ballad of Gay Tony**.
+5. Press **Install**. The progress is shown in the panel and on the left.
+
+![Installation progress](images/launcher_progress.png)
+
+Keep the app open until it finishes. On the Retroid Pocket 5 the whole installation took under a
+minute. Slower storage or an SD card can take several minutes. When it is done, Play turns white:
+press it.
+
+The game is installed into `Android/data/com.libertyrecomp/files/LibertyRecomp/game` (about
+6.5 GB). The disc image and the title update are only read, so you can delete them afterwards.
+
+**Without All files access.** Copy the two files into
+`Android/data/com.libertyrecomp/files/install/` instead, as described in the next section. The
+launcher fills them in by itself.
+
+**Episodes later.** Once the game is installed, the panel shows **Reinstall or add episodes**.
+Choose only the episode files and press **Install episodes**.
+
+## 4. Alternative: the `install/` folder
+
+This is the only way on versions older than 0.5.7, and it still works on all versions. It needs
+no permission.
+
+The app keeps everything in its own external data folder:
 
 ```
 Internal storage/Android/data/com.libertyrecomp/files/
-├── install/          <- put the disc image and the title update here
+├── install/          <- the disc image and the title update can go here
 ├── LibertyRecomp/
 │   ├── game/         the installed game (about 6.5 GB)
 │   ├── saves/        your save games
@@ -39,9 +81,8 @@ Internal storage/Android/data/com.libertyrecomp/files/
 └── ...
 ```
 
-## 3. Copy the game files into `install/`
-
-Copy both files into `Android/data/com.libertyrecomp/files/install/`:
+Start the app once so that the folder exists. Then copy into
+`Android/data/com.libertyrecomp/files/install/`:
 
 - the disc image, which must end in `.iso`;
 - the title update file under any other name. If several non-`.iso` files are there, the largest one
@@ -59,53 +100,32 @@ Ways to copy:
 - **On the device.** Since Android 11, most file managers cannot write into `Android/data`. Some
   can with extra setup, for example through Shizuku. If yours cannot, use a PC.
 
-## 4. Launch and install
+On 0.5.7 and newer, the launcher fills these files into the Game panel; press **Install**. On
+older versions, press **Play**, or just start the app on versions before 0.5.6.3. The game's own
+installer then picks the files up and installs by itself:
 
-Start the app again, and press **Play** on the launcher (0.5.6.3 and newer). It finds the files
-in `install/`, fills in **Base game** and **Title update v8**, checks the disc and starts the
-installation by itself. Installation takes
-several minutes. Leave the screen on and the app in the foreground until it finishes.
-
-This is the installer as it looks before any source is selected:
-
-![The Liberty Recompiled installer on Android](images/installer.png)
-
-The game files are installed to the folder shown at the bottom
-(`.../com.libertyrecomp/files/LibertyRecomp`). When the installation completes, the game starts.
+![The in-game installer](images/installer.png)
 
 > [!NOTE]
-> **Why not the Select File buttons?** On Android, the system file picker returns `content://`
-> links rather than file paths, and the installer cannot read those. The `install/` folder avoids
-> the picker completely. You can also point the installer at files somewhere else on the device:
-> add `--install_game_source=/full/path/to/game.iso` and `--install_update_source=/full/path/to/update`
-> to `args.txt`. The app needs read access to that location, and `Android/data` of this app always
-> works.
+> The **Select File / Select Folder** buttons of the in-game installer do not work on Android: the
+> system file picker returns `content://` links, which that installer cannot read. Use the
+> launcher (0.5.7+) or the `install/` folder.
 
-## The launcher (0.5.6.3 and newer)
+## The Vulkan driver
 
-![The launcher](images/launcher.png)
-
-The app always opens on this screen:
-
-- **Status.** Whether the game is installed. If it is not, the screen says whether the disc image
-  and the title update were found in `install/`. If the last start failed, the reason is shown.
-- **Play** starts the game (the **Start** button on a gamepad does the same). It always starts a
-  fresh game process with the driver selected on the right, so a driver change always applies.
-  If you leave the game with the Home button, the app icon takes you back to the running game,
-  not to the launcher.
-- **Vulkan driver.** Choose the bundled Turnip (default), the device's own driver, or a driver you
-  imported. **Import driver (.zip)** opens the system file picker. Pick an AdrenoTools/Turnip
-  driver zip (a `.so` and usually a `meta.json`), and it is unpacked, added to the list and
-  selected. **Remove** deletes an imported driver. The choice is saved in `driver.txt` (see
-  [ADVANCED.md](ADVANCED.md#driver-selection-drivertxt)).
-
-Gamepad: the D-pad moves between the controls, **A** selects, **B** closes the app and **Start**
-plays.
+Choose the bundled Turnip (default), the device's own driver, or a driver you imported.
+**Import driver (.zip)** opens the system file picker. Pick an AdrenoTools/Turnip driver zip (a
+`.so` and usually a `meta.json`), and it is unpacked, added to the list and selected. **Remove**
+deletes an imported driver. The choice is saved in `driver.txt` (see
+[ADVANCED.md](ADVANCED.md#driver-selection-drivertxt)). Play always starts a fresh game process
+with the selected driver. If you leave the game with the Home button, the app icon takes you back
+to the running game, not to the launcher.
 
 ## 5. After the installation
 
-- **Free the space.** Once the game runs, you can delete the two files in `install/`. That gives
-  back about 7.8 GB, and they are not needed again.
+- **Free the space.** Once the game runs, you can delete the disc image and the title update
+  (wherever they are, `install/` included). That gives back about 7.8 GB, and they are not needed
+  again.
 - **The first minutes are slower.** Shaders are compiled the first time they are needed, so you
   will see some hitches. They are cached in `shader_cache/` and stay smooth on later runs.
 - **Controls.** An XInput (Xbox-layout) gamepad is strongly recommended: the built-in controls

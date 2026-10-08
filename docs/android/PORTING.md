@@ -58,6 +58,14 @@ at 2.84 GHz, 3× A77, 4× A55), an Adreno 650, 8 GB of RAM and Android 13.
   (`:game`). Play ends a game process left over from an earlier session before starting a new one.
   A launcher opened from the app icon over a running game closes at once, so the icon returns to
   the game.
+- **Installer in the launcher** (0.5.7). `libliberty_install.so` contains the same inspection
+  and installation code as the in-game installer (`src/install`), without the rest of the
+  title, behind a small JNI layer (`src/android/android_install_jni.cpp`). The launcher checks the
+  disc image as soon as it is chosen, installs with a progress bar, and uses the installer's
+  `IsInstallReady` for its status. Sources are picked with the system file picker. The installer
+  maps disc images into memory by path, so the picked document is turned back into a file path,
+  which needs *All files access* (Android 11+) or legacy storage (Android 10). The RPF key reaches
+  it through the same `REX_RESOURCES_DIR` resources the game uses.
 - **Installer.** The SDL file picker returns `content://` URIs, which the installer cannot open.
   The activity therefore takes the disc image and the title update from `files/install/` and
   passes them as `--install_game_source` / `--install_update_source`. The install dialog gained
@@ -245,6 +253,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.6.2 | System-driver fallback when Turnip cannot drive the GPU, an error dialog instead of a silent exit, `last_launch.txt` report, settings files tolerate a byte-order mark |
 | 0.5.6.3 | Launcher screen with Play and a Vulkan driver picker that imports driver zips; the game runs in its own process so the chosen driver always applies |
 | 0.5.6.4 | Custom and bundled Turnip drivers are accepted on Android 10 to 12, whose platform Vulkan loader reports only version 1.1 |
+| 0.5.7 | The launcher installs the game, the title update and the episodes, with files picked anywhere on the device |
 
 ## 7. What is left
 
