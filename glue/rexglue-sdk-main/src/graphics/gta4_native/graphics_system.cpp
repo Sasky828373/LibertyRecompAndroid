@@ -27087,12 +27087,20 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
                       source_copy_height == content_source->height &&
                       destination_copy_width == mip_width && destination_copy_height == mip_height;
     NoteResolveKind(fmt::format(
-        "R:{}{}{}{}{} {}x{} f{}->{} s{}",
+        "R:{}{}{}{}{} {}x{} f{}->{} s{} why{:02X}",
         operation_index < 5 ? kOperationNames[operation_index] : "?", depth ? ":depth" : "",
         full ? ":full" : ":part", (resolve.flags & (1u << 8)) ? ":clrC" : "",
         (resolve.flags & (1u << 9)) ? ":clrD" : "", destination_copy_width, destination_copy_height,
         uint32_t(content_source->format), uint32_t(destination->format),
-        uint32_t(content_source->samples)));
+        uint32_t(content_source->samples),
+        // Why a color resolve took the shader path: 1 exponent, 2 scale,
+        // 4 content in another surface, 8 host MSAA, 10 guest MSAA,
+        // 20 high-precision destination.
+        (color_resolve_exponent != 0 ? 0x01u : 0u) | (scale_conversion ? 0x02u : 0u) |
+            (content_source != source ? 0x04u : 0u) |
+            (content_source->samples != VK_SAMPLE_COUNT_1_BIT ? 0x08u : 0u) |
+            (requested_view.msaa_samples != xenos::MsaaSamples::k1X ? 0x10u : 0u) |
+            (high_precision_conversion_requested ? 0x20u : 0u)));
   }
   NativeResolveReuseKey resolve_reuse_key{};
   if (REXCVAR_GET(gta4_native_lossless_resolve_optimization) && color_resolve &&
