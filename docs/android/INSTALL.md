@@ -12,7 +12,7 @@ You need two files from your own copy of the game:
 
 ## 1. Install the APK
 
-1. Download the latest `LibertyRecomp-Android-*.apk` from the [Releases](../../../../releases) page.
+1. Download the latest `LibertyRecompAndroid-*.apk` from the [Releases](../../../../releases) page.
 2. Open it on the device and allow installing from this source when Android asks.
 3. The app appears as **Liberty Recompiled** (package `com.libertyrecomp`).
 
