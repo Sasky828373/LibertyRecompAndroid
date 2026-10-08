@@ -539,6 +539,8 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     mutable std::array<uint64_t, kProtectedGenerationCapacity> protected_generations;
     mutable uint8_t protected_generation_count = 0;
     mutable bool protected_generations_overflow = false;
+    // Filled before the queue lock is taken (CollectTextureProtection).
+    mutable bool protected_generations_collected = false;
   };
 
   struct NativeUploadBuffer {
@@ -1619,6 +1621,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     VisitNativeCommandTextureGenerations(command, visit);
   }
   void QueueTextureProtection(const NativeCommand& command, bool retain);
+  static void CollectTextureProtection(const NativeCommand& command);
   void AppendQueuedTextureProtection(std::unordered_set<uint64_t>& generations) const;
   void ClearNativeFrameCommands();
   static void AddProtectedTextureGenerations(const NativeCommand& command,

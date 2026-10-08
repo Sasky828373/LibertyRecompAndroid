@@ -3753,6 +3753,10 @@ bool Gta4NativeGraphicsSystem::SubmitTitleCommand(uint32_t title_id, uint32_t ab
   const bool stageable = native_command.type != CommandType::kPresent &&
                          native_command.type != CommandType::kDeviceCreated &&
                          native_command.type != CommandType::kDeviceDestroyed;
+  // Chasing every texture slot's resource happens here, before render_mutex_
+  // (which the worker also needs) is taken; the queue then retains from the
+  // dense generation array.
+  CollectTextureProtection(native_command);
   if (stageable && !phone_envelope && !tv_envelope && !fire_envelope && !profile_transport &&
       REXCVAR_GET(gta4_native_stage_draw_commands)) {
     staged_draw_commands_.push_back(std::move(native_command_owner));
@@ -19200,25 +19204,28 @@ void Gta4NativeGraphicsSystem::AddProtectedTextureGenerations(
   VisitProtectedTextureGenerations(command, [&](uint64_t generation) { if (generation) generations.insert(generation); });
 }
 
+void Gta4NativeGraphicsSystem::CollectTextureProtection(const NativeCommand& command) {
+  command.protected_generation_count = 0;
+  command.protected_generations_overflow = false;
+  VisitProtectedTextureGenerations(command, [&](uint64_t generation) {
+    if (command.protected_generation_count < NativeCommand::kProtectedGenerationCapacity) {
+      command.protected_generations[command.protected_generation_count++] = generation;
+    } else {
+      command.protected_generations_overflow = true;
+    }
+  });
+  command.protected_generations_collected = true;
+}
+
 void Gta4NativeGraphicsSystem::QueueTextureProtection(const NativeCommand& command, bool retain) {
   auto apply = [&](uint64_t generation) {
     const bool ok = retain ? queued_texture_protection_.Retain(generation)
                            : queued_texture_protection_.Release(generation);
     if (!ok) REXLOG_ERROR("gta4-native-protection: queue reference invariant failed generation={} retain={}; using scan fallback", generation, retain);
   };
-  if (retain) {
-    command.protected_generation_count = 0;
-    command.protected_generations_overflow = false;
-    VisitProtectedTextureGenerations(command, [&](uint64_t generation) {
-      if (command.protected_generation_count < NativeCommand::kProtectedGenerationCapacity) {
-        command.protected_generations[command.protected_generation_count++] = generation;
-      } else {
-        command.protected_generations_overflow = true;
-      }
-      apply(generation);
-    });
-    return;
-  }
+  // Retain and release walk the same generations: the dense array, or every
+  // texture slot again when it overflowed.
+  if (retain && !command.protected_generations_collected) CollectTextureProtection(command);
   if (command.protected_generations_overflow) {
     VisitProtectedTextureGenerations(command, apply);
     return;
