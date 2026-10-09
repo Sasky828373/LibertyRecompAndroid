@@ -155,6 +155,19 @@ public class LibertyActivity extends SDLActivity {
         return mArguments;
     }
 
+    /**
+     * SDL re-requests the orientation when it creates its window. It reads the
+     * SDL_ORIENTATIONS hint from application-level SDL_ENV.* metadata only, so
+     * the manifest's activity-level entry never reached it: with no hint and a
+     * resizable window it asked for FULL_USER, and phones held upright turned
+     * the game to portrait (seen on a moto edge 30 fusion and a Samsung).
+     * The game is landscape only, in either direction.
+     */
+    @Override
+    public void setOrientationBis(int w, int h, boolean resizable, String hint) {
+        super.setOrientationBis(w, h, resizable, "LandscapeLeft LandscapeRight");
+    }
+
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
