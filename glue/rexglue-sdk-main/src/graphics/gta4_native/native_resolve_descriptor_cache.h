@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <unordered_map>
 
 namespace rex::graphics::gta4_native {
@@ -21,7 +22,7 @@ class NativeResolveDescriptorCache {
       Reset(); command_buffer_ = command_buffer; pool_ = pool;
     }
   }
-  void Reset() { entries_.clear(); command_buffer_ = pool_ = 0; }
+  void Reset() { entries_.clear(); insertion_order_.clear(); command_buffer_ = pool_ = 0; }
   Descriptor Find(const Key& key) {
     if (Valid(key)) {
       const auto found = entries_.find(key);
@@ -31,8 +32,16 @@ class NativeResolveDescriptorCache {
   }
   void Insert(const Key& key, Descriptor descriptor) {
     if (!descriptor || !Valid(key)) return;
-    if (entries_.size() >= kCapacity) entries_.clear();
-    if (entries_.emplace(key, descriptor).second) ++statistics_.inserts;
+    // Retain hot descriptors when the bounded cache fills. Clearing the entire
+    // cache caused a burst of misses and descriptor allocations at capacity.
+    if (entries_.contains(key)) return;
+    if (entries_.size() >= kCapacity) {
+      entries_.erase(insertion_order_.front());
+      insertion_order_.pop_front();
+    }
+    entries_.emplace(key, descriptor);
+    insertion_order_.push_back(key);
+    ++statistics_.inserts;
   }
   const Statistics& statistics() const { return statistics_; }
   size_t size() const { return entries_.size(); }
@@ -51,6 +60,7 @@ class NativeResolveDescriptorCache {
     }
   };
   std::unordered_map<Key, Descriptor, Hash> entries_;
+  std::deque<Key> insertion_order_;
   uint64_t command_buffer_ = 0, pool_ = 0;
   Statistics statistics_;
 };
