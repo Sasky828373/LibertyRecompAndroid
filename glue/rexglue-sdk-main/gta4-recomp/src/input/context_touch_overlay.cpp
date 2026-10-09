@@ -27,10 +27,13 @@ void ContextTouchOverlay::SetIconResolver(ContextTouchIconResolver resolver, voi
 
 bool ContextTouchOverlay::ResolveIcon(void* context, std::string_view id, ContextTouchIcon* icon) {
   auto& self = *static_cast<ContextTouchOverlay*>(context);
-  if (!icon || !self.immediate_ || self.icon_directory_.empty() || id.empty() ||
-      !std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; })) return false;
+  if (!icon || !self.immediate_ || self.icon_directory_.empty() || id.empty()) return false;
   auto found = self.icons_.find(id);
   if (found == self.icons_.end()) {
+    // Existing cache keys were validated before insertion; only validate misses.
+    if (!std::all_of(id.begin(), id.end(), [](unsigned char c) {
+          return std::isalnum(c) || c == '_';
+        })) return false;
     if (self.icons_.size() >= 256) return false;
     std::unique_ptr<rex::ui::ImmediateTexture> texture;
     std::ifstream file(self.icon_directory_ / (std::string(id) + ".png"), std::ios::binary | std::ios::ate);
