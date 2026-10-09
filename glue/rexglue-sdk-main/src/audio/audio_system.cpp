@@ -33,13 +33,19 @@
 #include <rex/system/thread_state.h>
 #include <rex/thread.h>
 #include <rex/cvar.h>
+#include <rex/platform.h>
 
 #if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
 #include <pthread/qos.h>
 #endif
 
+// Each guest audio block is 256 samples (~5.3 ms at 48 kHz) and the queue
+// runs full, so the depth is the audio latency: 64 blocks lagged ~340 ms
+// behind the picture on Android. 32 (~170 ms) removes the noticeable delay;
+// 16 (~85 ms) was lower still but stuttered briefly with the game's frame
+// hitches, on the Retroid Pocket 5 and on a Snapdragon 8 Elite phone.
 REXCVAR_DEFINE_INT32(
-    audio_maxqframes, 64, "Audio",
+    audio_maxqframes, REX_PLATFORM_ANDROID ? 32 : 64, "Audio",
     "Maximum buffered guest audio blocks (range 1-64). The backend selects the initial depth.");
 
 // As with normal Microsoft, there are like twelve different ways to access

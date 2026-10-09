@@ -118,6 +118,7 @@ panel, with FSR's sharpening look.
 | `--gta4_stale_object_guard=true` | Default on. Prevents a crash when the game frees an object another thread still uses (see [PORTING.md](PORTING.md#5-stability)). |
 | `--gta4_native_skip_pixel_shaders=2673E2AF` | Default. Draws using these pixel shader hashes are skipped. `2673E2AF` is a deferred light-volume shader that hangs the GPU under Turnip. Set it to an empty value to test it on another driver. |
 | `--install_game_source=PATH` / `--install_update_source=PATH` | Installation sources, instead of the `install/` folder. |
+| `--audio_maxqframes=32` | Audio blocks queued ahead of playback (1-64, each ~5.3 ms), which is also the audio delay. Default 32 (~170 ms) on Android since 0.5.7.7; it was 64 (~340 ms behind the picture). 16 (~85 ms) is tighter but can stutter during frame hitches on slower devices; raise it if the sound crackles. *Restart.* |
 | `--touch_controls=auto` | On-screen controls. `auto` shows them whenever no gamepad is connected, `on` always shows them, `off` never does. |
 | `--gta4_touch_layout=gamepad` | `gamepad` (default): a fixed on-screen Xbox 360 controller with floating sticks. `context`: upstream's context-sensitive touch layout. |
 | `--touch_controls_controller_only=true` | Default on Android. In `auto` mode, only a game controller hides the touch controls. Keyboards and mice are ignored, because handhelds report their built-in buttons as both. |
