@@ -119,7 +119,7 @@ public class LauncherActivity extends Activity {
         }, "InstallerLoad").start();
         // `am start ... --ez play true` (the development scripts) goes
         // straight into the game with the current driver choice.
-        if (savedInstanceState == null && getIntent().getBooleanExtra("play", false)) play();
+        if (savedInstanceState == null && getIntent().getBooleanExtra("play", false)) play(false);
     }
 
     @Override
@@ -129,6 +129,62 @@ public class LauncherActivity extends Activity {
         refreshStatus();
         if (mInstallerReady) refreshInstall();
         refreshCrash();
+        mMain.removeCallbacks(mStopDebugLog);
+        mMain.postDelayed(mStopDebugLog, 10000);
+    }
+
+    // Only once the game process is gone: a running game keeps recording.
+    private final Runnable mStopDebugLog = () -> new Thread(() -> {
+        if (!gameProcessRunning()) DebugLog.stopLeftovers(mDataRoot);
+    }, "DebugLogStop").start();
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        mMain.removeCallbacks(mStopDebugLog);
+    }
+
+    private boolean gameProcessRunning() {
+        ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        List<ActivityManager.RunningAppProcessInfo> processes =
+                manager != null ? manager.getRunningAppProcesses() : null;
+        if (processes == null) return false;
+        String game = getPackageName() + GAME_PROCESS_SUFFIX;
+        for (ActivityManager.RunningAppProcessInfo info : processes) {
+            if (game.equals(info.processName)) return true;
+        }
+        return false;
+    }
+
+    /** A small GitHub mark and the author's name, opening the project page. */
+    private View buildGithubFooter() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        row.setPadding(dp(8), dp(4), dp(8), dp(4));
+        ImageView mark = new ImageView(this);
+        mark.setImageResource(R.drawable.ic_github);
+        row.addView(mark, new LinearLayout.LayoutParams(dp(16), dp(16)));
+        TextView name = text("vaduur", 13, R.color.picker_muted);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nameParams.leftMargin = dp(6);
+        row.addView(name, nameParams);
+        row.setFocusable(true);
+        row.setBackground(focusBackground(Color.TRANSPARENT));
+        row.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://github.com/vaduur/LibertyRecompAndroid")));
+            } catch (Exception e) {
+                toast("github.com/vaduur/LibertyRecompAndroid");
+            }
+        });
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setGravity(Gravity.CENTER);
+        wrapper.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return wrapper;
     }
 
     @Override
@@ -195,14 +251,28 @@ public class LauncherActivity extends Activity {
         mPlay.setBackground(focusBackground(0xFFE6E6E6));
         mPlay.setContentDescription("Play");
         mPlay.setFocusable(true);
-        mPlay.setOnClickListener(v -> play());
+        mPlay.setOnClickListener(v -> play(false));
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(dp(260), dp(72));
         playParams.topMargin = dp(18);
         left.addView(mPlay, playParams);
 
+        Button debugPlay = button("Play (Debug Log)", false);
+        debugPlay.setOnClickListener(v -> play(true));
+        LinearLayout.LayoutParams debugParams = new LinearLayout.LayoutParams(dp(260), dp(44));
+        debugParams.topMargin = dp(10);
+        left.addView(debugPlay, debugParams);
+
+        TextView debugNote = text("The debug log is saved to Android/data/" + getPackageName()
+                + "/files/" + DebugLog.DIRECTORY + "/. Attach the newest one when you open an issue "
+                + "on GitHub.", 11, R.color.picker_muted);
+        debugNote.setGravity(Gravity.CENTER);
+        left.addView(debugNote, matchWrap(dp(6)));
+
         TextView hint = text("A: select   B: back   Start: play", 12, R.color.picker_muted);
         hint.setGravity(Gravity.CENTER);
         left.addView(hint, matchWrap(dp(10)));
+
+        left.addView(buildGithubFooter(), matchWrap(dp(16)));
 
         ScrollView leftScroll = new ScrollView(this);
         leftScroll.addView(left);
@@ -950,7 +1020,7 @@ public class LauncherActivity extends Activity {
 
     // ------------------------------------------------------------------- play
 
-    private void play() {
+    private void play(boolean debugLog) {
         if (mBusy) return;
         if (Installer.running()) {
             toast("The game is being installed.");
@@ -965,9 +1035,11 @@ public class LauncherActivity extends Activity {
             // A game process from an earlier session keeps the driver it
             // started with; end it so this launch uses the current choice.
             stopGameProcess();
+            DebugLog.stopLeftovers(mDataRoot);
             mMain.post(() -> {
                 setBusy(false, null);
                 Intent intent = new Intent(this, LibertyActivity.class);
+                if (debugLog) intent.putExtra(LibertyActivity.EXTRA_DEBUG_LOG, true);
                 startActivity(intent);
             });
         }, "LaunchGame").start();
@@ -1005,7 +1077,7 @@ public class LauncherActivity extends Activity {
         if (event.getAction() == KeyEvent.ACTION_UP) {
             switch (event.getKeyCode()) {
                 case KeyEvent.KEYCODE_BUTTON_START:
-                    play();
+                    play(false);
                     return true;
                 case KeyEvent.KEYCODE_BUTTON_A: {
                     View focused = getCurrentFocus();

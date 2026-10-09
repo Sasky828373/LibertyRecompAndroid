@@ -162,6 +162,10 @@ Questions, bugs and feedback all go to [Issues](https://github.com/vaduur/Libert
 
 ### Collecting information without a PC
 
+- **Play (Debug Log) (0.5.7.8 and newer).** The smaller button under **Play** starts the game with
+  detailed logging and records the game's whole log (the game, the Vulkan driver, crashes) into
+  `Android/data/com.libertyrecomp/files/debug_logs/debug-DATE.log`. Reproduce the problem, then
+  attach the newest file to your issue. The last five logs are kept, up to 16 MB each.
 - **Crash reports (0.5.7.3 and newer).** When the game crashes, the launcher shows a red card,
   *The game crashed - a crash report was saved*, the next time it opens. The report is in
   `Android/data/com.libertyrecomp/files/crash_reports/crash-DATE.txt`. **Share report** sends it as

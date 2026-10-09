@@ -261,6 +261,7 @@ because benchmarking was done at night, when shadows are not visible.
 | 0.5.7.5 | The game picks a landscape output even when its window is still portrait at startup (phones whose natural orientation is portrait got a narrow strip in the middle of the screen) |
 | 0.5.7.6 | The game window stays landscape: SDL never saw the manifest's orientation hint (activity-level metadata) and allowed any orientation, so phones held upright turned the game to portrait |
 | 0.5.7.7 | Audio delay cut from up to ~340 ms to ~170 ms: the guest audio queue defaults to 32 blocks on Android instead of 64 (16 stuttered during frame hitches) |
+| 0.5.7.8 | Launcher: Play (Debug Log) records the game process's logcat into files/debug_logs/; GitHub link in the footer |
 
 ## 7. What is left
 

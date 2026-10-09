@@ -64,6 +64,10 @@ public class LibertyActivity extends SDLActivity {
     private String mDriverText;
     private File mDataRoot;
     private static final String LAUNCH_REPORT = "last_launch.txt";
+    /** Intent extra from the launcher's "Play (Debug Log)". */
+    static final String EXTRA_DEBUG_LOG = "debug_log";
+    private boolean mDebugLog;
+    private File mDebugLogFile;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -130,6 +134,11 @@ public class LibertyActivity extends SDLActivity {
                 .append(mDriverText == null ? "(none)" : "\"" + mDriverText + "\"")
                 .append(" -> ").append(mDriverMode).append('\n');
         report.append("driver status: ").append(driverStatus).append('\n');
+        if (mDebugLog) {
+            report.append("debug log: ")
+                    .append(mDebugLogFile != null ? mDebugLogFile.getAbsolutePath() : "could not start")
+                    .append('\n');
+        }
         report.append("result: ").append(problem == null ? "driver usable, starting the game"
                 : "cannot start: " + problem.replace('\n', ' ')).append('\n');
         try (OutputStream out = new FileOutputStream(new File(mDataRoot, LAUNCH_REPORT))) {
@@ -212,6 +221,15 @@ public class LibertyActivity extends SDLActivity {
         boolean diagnosticsSet = false;
         for (String argument : arguments) {
             if (argument.startsWith("--diagnostics")) diagnosticsSet = true;
+        }
+        // "Play (Debug Log)" from the launcher: the runtime logs at info level
+        // and the whole process log is recorded into files/debug_logs/.
+        mDebugLog = getIntent() != null && getIntent().getBooleanExtra(EXTRA_DEBUG_LOG, false);
+        if (mDebugLog) {
+            arguments.removeIf(a -> a.startsWith("--diagnostics") || a.startsWith("--log_level"));
+            diagnosticsSet = false;
+            arguments.add("--log_level=info");
+            mDebugLogFile = DebugLog.start(dataRoot);
         }
         if (!diagnosticsSet) {
             arguments.add("--diagnostics=true");
