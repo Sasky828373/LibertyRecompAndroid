@@ -64,7 +64,7 @@ Known problems:
 
 | | Requirement |
 |---|---|
-| **GPU** | **Qualcomm Adreno 6xx or 7xx** (Snapdragon). Tested on the Adreno 650 only. |
+| **GPU** | **Qualcomm Adreno 6xx or 7xx** (Snapdragon). Developed and tested on the Adreno 650. **Adreno 8xx: experimental since 0.5.7.5**, see below. |
 | **SoC** | Snapdragon 865 class or faster recommended (SD 865/870/888, 8 Gen 1/2/3, 8s Gen 3, …). |
 | **CPU** | arm64 with ARMv8.2-A (the build uses LSE atomics). ARMv8.0 chips such as the Snapdragon 835 crash on start. |
 | **Android** | Android 10 (API 29) or newer, 64-bit. |
@@ -84,10 +84,12 @@ Vulkan driver, and it exists only for Adreno GPUs. The stock Qualcomm driver on 
 (including the Adreno 650) exposes only Vulkan 1.1. On other GPUs the bundled driver cannot load,
 and nobody has run the renderer on their vendor drivers.
 
-**Adreno 8xx** (Snapdragon 8 Elite) is not supported by the bundled Turnip build. It *might* work
-with the system driver or a newer Turnip build (see [ADVANCED.md](docs/android/ADVANCED.md#driver-selection-drivertxt)),
-but this is untested. Low-end Adreno 6xx parts (610/618/619) should start, but expect them to be
-far too slow.
+**Adreno 8xx (Snapdragon 8 Elite and newer): experimental, since 0.5.7.5.** The game has been
+started on an Adreno 840 (Samsung, Android 17). The bundled Turnip build does not support Adreno
+8xx, so import a Turnip build for it on the launcher (**Import driver (.zip)**), such as the Gen8
+Turnip builds made for emulators. This is how it was tested. Expect rough edges, and please report
+how it runs in [Issues](https://github.com/vaduur/LibertyRecompAndroid/issues). Low-end Adreno
+6xx parts (610/618/619) should start, but expect them to be far too slow.
 
 Since 0.5.6.2, when the bundled Turnip cannot drive the GPU, the app falls back to the device's own
 Vulkan driver if that driver offers Vulkan 1.2. This is untested on any GPU. If no usable driver
