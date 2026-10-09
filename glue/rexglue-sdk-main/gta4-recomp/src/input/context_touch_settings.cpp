@@ -28,7 +28,7 @@ ContextTouchPreferences g_preferences;
 std::vector<Placement> g_placements;
 std::filesystem::path g_path;
 std::atomic<bool> g_editor{false};
-bool g_dirty = false;
+std::atomic<bool> g_dirty{false};
 
 float Bounded(float value, float low, float high, float fallback) {
   return std::isfinite(value) ? std::clamp(value, low, high) : fallback;
@@ -137,6 +137,8 @@ void SetContextTouchPreferences(ContextTouchPreferences p) noexcept {
 }
 
 bool FlushContextTouchSettings() noexcept {
+  // Called from the draw path: avoid taking a mutex every frame if unchanged.
+  if (!g_dirty.load(std::memory_order_acquire)) return true;
   try {
     std::lock_guard lock(g_mutex);
     if (!g_dirty) return true;

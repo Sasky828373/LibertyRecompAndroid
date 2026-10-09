@@ -47,6 +47,9 @@
 #include <cctype>
 #include <dlfcn.h>
 #include <fstream>
+#include <poll.h>
+#include <sys/inotify.h>
+#include <unistd.h>
 #endif
 
 REXCVAR_DEFINE_STRING(gta4_multiplayer_backend, "community", "GTA IV/Multiplayer",
@@ -797,9 +800,29 @@ namespace {
 // still need a restart; per-frame ones (draw distance, density) apply live.
 void StartLiveCvarWatcher(std::filesystem::path path) {
   std::thread([path = std::move(path)] {
+    // Watch the parent directory: editors often replace the file atomically.
+    // Polling every second needlessly wakes the CPU for the entire game session.
+    const int notify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    const int watch = notify_fd >= 0
+        ? inotify_add_watch(notify_fd, path.parent_path().c_str(),
+                            IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ATTRIB)
+        : -1;
+    if (notify_fd >= 0 && watch < 0) close(notify_fd);
+    const bool has_watch = watch >= 0;
     std::filesystem::file_time_type applied{};
     for (;;) {
-      std::this_thread::sleep_for(std::chrono::seconds(1));
+      if (has_watch) {
+        struct pollfd descriptor { notify_fd, POLLIN, 0 };
+        const int ready = poll(&descriptor, 1, 5000);
+        if (ready > 0 && (descriptor.revents & POLLIN)) {
+          alignas(struct inotify_event) char events[4096];
+          // Drain notifications so a burst of file edits causes one reload.
+          while (read(notify_fd, events, sizeof(events)) > 0) {}
+        }
+      } else {
+        // Fallback on filesystems that do not support directory notifications.
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+      }
       std::error_code error;
       const auto stamp = std::filesystem::last_write_time(path, error);
       if (error || stamp == applied) {

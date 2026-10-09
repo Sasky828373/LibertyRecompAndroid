@@ -27,14 +27,16 @@ void ContextTouchOverlay::SetIconResolver(ContextTouchIconResolver resolver, voi
 
 bool ContextTouchOverlay::ResolveIcon(void* context, std::string_view id, ContextTouchIcon* icon) {
   auto& self = *static_cast<ContextTouchOverlay*>(context);
-  if (!icon || !self.immediate_ || self.icon_directory_.empty() || id.empty() ||
-      !std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; })) return false;
-  const std::string key(id);
-  auto found = self.icons_.find(key);
+  if (!icon || !self.immediate_ || self.icon_directory_.empty() || id.empty()) return false;
+  auto found = self.icons_.find(id);
   if (found == self.icons_.end()) {
+    // Existing cache keys were validated before insertion; only validate misses.
+    if (!std::all_of(id.begin(), id.end(), [](unsigned char c) {
+          return std::isalnum(c) || c == '_';
+        })) return false;
     if (self.icons_.size() >= 256) return false;
     std::unique_ptr<rex::ui::ImmediateTexture> texture;
-    std::ifstream file(self.icon_directory_ / (key + ".png"), std::ios::binary | std::ios::ate);
+    std::ifstream file(self.icon_directory_ / (std::string(id) + ".png"), std::ios::binary | std::ios::ate);
     if (file) {
       const auto length = file.tellg();
       if (length > 0 && length <= 4194304) {
@@ -52,7 +54,7 @@ bool ContextTouchOverlay::ResolveIcon(void* context, std::string_view id, Contex
         }
       }
     }
-    found = self.icons_.emplace(key, std::move(texture)).first;
+    found = self.icons_.emplace(std::string(id), std::move(texture)).first;
   }
   if (!found->second) return false;
   icon->texture = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(found->second.get()));

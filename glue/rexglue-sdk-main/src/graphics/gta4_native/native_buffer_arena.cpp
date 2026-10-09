@@ -66,8 +66,13 @@ NativeBufferArenaResult NativeBufferArena::Reserve(uint64_t size) {
           best_block = &block;
           best_range_index = range_index;
           best_waste = waste;
+          // A perfect fit cannot be improved. Blocks are visited in ascending
+          // ID order and free ranges in ascending offset order, so the first
+          // exact fit also wins the existing deterministic tie-breakers.
+          if (best_waste == 0) break;
         }
       }
+      if (best_waste == 0) break;
     }
   }
 
