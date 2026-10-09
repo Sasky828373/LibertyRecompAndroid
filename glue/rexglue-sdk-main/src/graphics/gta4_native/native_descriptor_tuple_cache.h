@@ -58,9 +58,18 @@ class NativeDescriptorTupleCache {
       return;
     }
     const size_t desired = std::min(required.size(), capacity_);
+    // Persistent cache is capped; the caller's required set may contain many
+    // transient tuples. Walk the smaller side to avoid redundant hash lookups.
     size_t present = 0;
-    for (const auto& key : required) {
-      present += entries_.contains(key);
+    if (required.size() < entries_.size()) {
+      for (const auto& key : required) {
+        present += entries_.contains(key);
+      }
+    } else {
+      for (const auto& [key, bundle] : entries_) {
+        (void)bundle;
+        present += required.contains(key);
+      }
     }
     size_t missing = desired > present ? desired - present : 0;
     for (auto it = entries_.begin(); it != entries_.end() &&
