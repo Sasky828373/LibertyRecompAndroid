@@ -20782,6 +20782,16 @@ bool Gta4NativeGraphicsSystem::TransitionRenderingTarget(VkCommandBuffer command
   auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
   const auto& dfn = vulkan_provider->vulkan_device()->functions();
   const bool skip_same_layout = REXCVAR_GET(gta4_native_skip_attachment_barriers);
+
+  // All transitions happen before the same render scope, with no intervening
+  // commands. A single barrier containing each distinct attachment transition
+  // preserves the Vulkan image layout and access dependencies but avoids up to
+  // kRenderTargetCount + 1 separate driver/command-encoder calls per scope.
+  // Keep individual layouts and source access masks on their own image entries.
+  std::array<VkImageMemoryBarrier, kRenderTargetCount + 1> barriers{};
+  uint32_t barrier_count = 0;
+  VkPipelineStageFlags source_stages = 0;
+  VkPipelineStageFlags destination_stages = 0;
   for (uint32_t index = 0; index < kRenderTargetCount; ++index) {
     if ((target.color_attachment_mask & (1u << index)) == 0) {
       continue;
@@ -20795,7 +20805,7 @@ bool Gta4NativeGraphicsSystem::TransitionRenderingTarget(VkCommandBuffer command
     }
     const NativeImageLayoutSynchronization source_synchronization =
         ImageLayoutSynchronization(image->layout, image->aspect);
-    VkImageMemoryBarrier barrier{};
+    VkImageMemoryBarrier& barrier = barriers[barrier_count++];
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.srcAccessMask = source_synchronization.access;
     barrier.dstAccessMask =
@@ -20807,9 +20817,8 @@ bool Gta4NativeGraphicsSystem::TransitionRenderingTarget(VkCommandBuffer command
     barrier.image = image->resource.image;
     barrier.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (GTA4_NATIVE_COUNT_SITE(g_barrier_sites, __LINE__), dfn.vkCmdPipelineBarrier)(command_buffer, source_synchronization.stages,
-                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &barrier); });
+    source_stages |= source_synchronization.stages;
+    destination_stages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     image->layout = barrier.newLayout;
   }
   if (target.depth_stencil_attachment_active && target.depth_surface &&
@@ -20818,7 +20827,7 @@ bool Gta4NativeGraphicsSystem::TransitionRenderingTarget(VkCommandBuffer command
     NativeSurfaceImage& image = *target.depth_surface;
     const NativeImageLayoutSynchronization source_synchronization =
         ImageLayoutSynchronization(image.layout, image.aspect);
-    VkImageMemoryBarrier barrier{};
+    VkImageMemoryBarrier& barrier = barriers[barrier_count++];
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.srcAccessMask = source_synchronization.access;
     barrier.dstAccessMask =
@@ -20830,11 +20839,17 @@ bool Gta4NativeGraphicsSystem::TransitionRenderingTarget(VkCommandBuffer command
     barrier.image = image.resource.image;
     barrier.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(image.aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (GTA4_NATIVE_COUNT_SITE(g_barrier_sites, __LINE__), dfn.vkCmdPipelineBarrier)(
-        command_buffer, source_synchronization.stages,
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
-        0, nullptr, 0, nullptr, 1, &barrier); });
+    source_stages |= source_synchronization.stages;
+    destination_stages |=
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     image.layout = barrier.newLayout;
+  }
+  if (barrier_count) {
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] {
+      GTA4_NATIVE_COUNT_SITE(g_barrier_sites, __LINE__);
+      dfn.vkCmdPipelineBarrier(command_buffer, source_stages, destination_stages, 0,
+                               0, nullptr, 0, nullptr, barrier_count, barriers.data());
+    });
   }
   return true;
 }
