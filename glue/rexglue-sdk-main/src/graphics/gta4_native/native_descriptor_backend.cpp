@@ -323,8 +323,7 @@ NativeDescriptorEpochTable::NativeDescriptorEpochTable(const NativeDescriptorEpo
 }
 
 bool NativeDescriptorEpochTable::HasPendingBatch() const {
-  return std::any_of(pending_batches_.begin(), pending_batches_.end(),
-                     [](const PendingBatch& batch) { return batch.id != 0; });
+  return active_pending_batch_count_ != 0;
 }
 
 NativeDescriptorStatus NativeDescriptorEpochTable::ValidateLiveHandle(
@@ -511,6 +510,7 @@ NativeDescriptorWriteBatch NativeDescriptorEpochTable::BeginFrameCopyWrites(uint
 
   PendingBatch& pending = pending_batches_[frame_copy];
   pending.id = result.batch_id;
+  ++active_pending_batch_count_;
   pending.writes = result.writes;
   return result;
 }
@@ -549,6 +549,7 @@ NativeDescriptorStatus NativeDescriptorEpochTable::CommitFrameCopyWrites(
   }
   dirty_slots.resize(retained_dirty_count);
   pending = {};
+  --active_pending_batch_count_;
   return NativeDescriptorStatus::kSuccess;
 }
 
@@ -565,6 +566,7 @@ NativeDescriptorStatus NativeDescriptorEpochTable::CancelFrameCopyWrites(
     return NativeDescriptorStatus::kInvalidWriteBatch;
   }
   pending = {};
+  --active_pending_batch_count_;
   return NativeDescriptorStatus::kSuccess;
 }
 
