@@ -53,3 +53,8 @@
 --gta4_native_descriptor_backend=auto
 --gta4_native_state_transport=delta
 --gta4_native_pipeline_telemetry=false
+
+# Additional already-implemented image-preserving GPU workload reductions.
+--gta4_native_merge_indexed_draws=true
+--gta4_native_skip_invisible_draws=true
+--gta4_native_clear_skips_materialization=true
