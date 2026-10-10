@@ -33700,38 +33700,6 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     // A setup shader has no color outputs or texture reads, so retaining the
     // current color bindings cannot add a feedback hazard. Do not materialize
     // its inactive guest color descriptors: only borrow already-live bindings.
-    if (rendering && IsLocalStencilSetup(command.lighting) && draw_command) {
-      // TEMP: first failing reuse condition (perf investigation).
-      uint32_t fail = 0;
-      if (!REXCVAR_GET(gta4_native_reuse_lighting_passes)) fail = 1;
-      else if (!command.pipeline_state->vertex_shader_resource) fail = 2;
-      else if (command.pipeline_state->pixel_shader_resource) fail = 3;
-      else if (command.pipeline_state->vertex_shader_resource->used_texture_mask || command.pipeline_state->vertex_shader_resource->override_used_texture_mask) fail = 4;
-      else if (!command.fixed_function_state.depth_enable) fail = 5;
-      else if (command.fixed_function_state.depth_write_enable) fail = 6;
-      else if (!command.fixed_function_state.stencil_enable) fail = 7;
-      else if (diagnostic_frame || legacy_diagnostics || diagnostic_variants_enabled || force_content_probe || fire_images_) fail = 8;
-      else if (PhoneTraceConfig().enabled) fail = 9;
-      else if (postfx_scheduler.scene_capture_pending()) fail = 10;
-      else if (!target.depth_surface) fail = 11;
-      else if (!HasCurrentPlacementContent(*target.depth_surface, command.pipeline_state->depth_stencil, true, submitted_frame)) fail = 12;
-      else {
-        NativeRenderingTarget probe = target;
-        fail = ReuseNativeLightingAttachments(active_target, probe) ? 0 : 13;
-        if (fail == 13) {
-          if (!active_target.color_attachment_mask) fail = 14;
-          else if (target.color_attachment_mask) fail = 15;
-          else if (target.color_write_mask) fail = 16;
-          else if (!active_target.depth_stencil_attachment_active || !target.depth_stencil_attachment_active) fail = 17;
-          else if (active_target.depth_view != target.depth_view) fail = 18;
-          else if (active_target.samples != target.samples || active_target.guest_samples != target.guest_samples) fail = 19;
-          else if (active_target.width != target.width || active_target.height != target.height ||
-                   active_target.logical_width != target.logical_width || active_target.logical_height != target.logical_height) fail = 20;
-          else if (active_target.is_reflection || target.is_reflection || active_target.uses_presenter || target.uses_presenter) fail = 21;
-        }
-      }
-      ++g_light_reuse_failures[fail];
-    }
     // NOTE: upstream gates this on the diagnostic_* shader pointers, which are
     // null outside diagnostic frames, so the reuse never runs in normal play.
     // Using the command's real shaders enables it, but then distant light
@@ -33768,22 +33736,6 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     }
     if (!rendering || !targets_equal(active_target, target)) {
       if (rendering) {
-        // TEMP: classify why consecutive draws split the rendering scope.
-        uint32_t why = 0;
-        why |= active_target.color_views != target.color_views ? 1u : 0u;
-        why |= active_target.depth_view != target.depth_view ? 2u : 0u;
-        why |= (active_target.color_formats != target.color_formats ||
-                active_target.depth_format != target.depth_format) ? 4u : 0u;
-        why |= active_target.samples != target.samples ? 8u : 0u;
-        why |= (active_target.width != target.width || active_target.height != target.height) ? 16u : 0u;
-        why |= active_target.color_attachment_mask != target.color_attachment_mask ? 32u : 0u;
-        why |= active_target.depth_stencil_attachment_active != target.depth_stencil_attachment_active ? 64u : 0u;
-        why |= active_target.uses_presenter != target.uses_presenter ? 128u : 0u;
-        why |= IsLocalStencilSetup(command.lighting) ? 256u : 0u;
-        why |= diagnostic_pixel_shader ? 512u : 0u;
-        why |= (!target.color_attachment_mask && active_target.color_attachment_mask) ? 1024u : 0u;
-        why |= (target.color_attachment_mask && !active_target.color_attachment_mask) ? 2048u : 0u;
-        ++g_rendering_split_reasons[why & 4095u];
         end_rendering(__LINE__);
       }
       bool content_ready = true;
