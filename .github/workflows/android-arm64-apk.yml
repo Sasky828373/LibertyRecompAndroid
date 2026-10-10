@@ -43,6 +43,8 @@ jobs:
       - name: Export Git Bash SDK and JDK paths
         run: |
           echo "ANDROID_HOME=$(cygpath -u 'C:\Android\android-sdk')" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$(cygpath -u 'C:\Android\android-sdk\ndk\29.0.14206865')" >> "$GITHUB_ENV"
+          echo "NDK_VER=29.0.14206865" >> "$GITHUB_ENV"
           echo "JAVA_HOME=$(cygpath -u "$JAVA_HOME")" >> "$GITHUB_ENV"
       - name: Setup repository
         run: python tools/setup_repo.py
