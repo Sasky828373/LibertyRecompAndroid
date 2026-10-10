@@ -62,9 +62,18 @@ bool NativeSubmissionLifetime::StageQueuedReference(FrameToken token, ResourceKe
   if (resource == resources_.end()) {
     return false;
   }
-  const auto total_staged = GetStagedReferenceCountLocked(key);
-  if (!total_staged || *total_staged > resource->second.queued_reference_count ||
-      count > resource->second.queued_reference_count - *total_staged) {
+  // A frame has only two slots; use the other slot's staged references and
+  // the current slot's existing count directly, avoiding optional construction
+  // and a map lookup through the current slot for each draw resource.
+  const auto& current_staged = slot.staged_references;
+  const auto existing = current_staged.find(key);
+  const uint64_t own_count = existing == current_staged.end() ? 0 : existing->second;
+  const FrameSlot& other = frame_slots_[token.slot ^ 1u];
+  const auto other_it = other.staged_references.find(key);
+  const uint64_t other_count = other_it == other.staged_references.end() ? 0 : other_it->second;
+  const uint64_t queued = resource->second.queued_reference_count;
+  if (other_count > queued || own_count > queued - other_count ||
+      count > queued - other_count - own_count) {
     return false;
   }
   uint64_t& staged_count = slot.staged_references[key];
