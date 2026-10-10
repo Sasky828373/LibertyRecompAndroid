@@ -11,6 +11,9 @@
 #pragma once
 
 #include <charconv>
+#include <cerrno>
+#include <cstdlib>
+#include <type_traits>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -133,8 +136,23 @@ inline T fpfs(const std::string_view value, bool force_hex) {
     }
     std::memcpy(&result, &pun, sizeof(PUN));
   } else {
+#if defined(__ANDROID__)
+    // NDK libc++ lacks the floating-point from_chars overload. Use the
+    // C-library conversion only on Android; preserve the existing error path.
+    const std::string number(range);
+    char* end_ptr = nullptr;
+    errno = 0;
+    if constexpr (std::is_same_v<T, float>) {
+      result = std::strtof(number.c_str(), &end_ptr);
+    } else {
+      result = std::strtod(number.c_str(), &end_ptr);
+    }
+    const auto error = (end_ptr == number.c_str() || errno == ERANGE)
+                           ? std::errc::invalid_argument : std::errc{};
+#else
     auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
                                       std::chars_format::general);
+#endif
     // TODO(gibbed): do something more with errors?
     if (error != std::errc()) {
       assert_always();
@@ -253,12 +271,25 @@ inline vec128_t from_string<vec128_t>(const std::string_view value, bool force_h
         assert_always();
         return vec128_t();
       }
+#if defined(__ANDROID__)
+      // Copy only the unparsed tail so strtof has a terminating NUL.
+      const std::string tail(p, end);
+      char* tail_end = nullptr;
+      errno = 0;
+      v.f32[i] = std::strtof(tail.c_str(), &tail_end);
+      if (tail_end == tail.c_str() || errno == ERANGE) {
+        assert_always();
+        return vec128_t();
+      }
+      p += tail_end - tail.c_str();
+#else
       auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
       if (result.ec != std::errc()) {
         assert_always();
         return vec128_t();
       }
       p = result.ptr;
+#endif
     }
   }
   return v;
