@@ -7,6 +7,8 @@
 #include <bit>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <type_traits>
 #include <mutex>
 #include <memory>
 #include <new>
@@ -127,6 +129,7 @@ struct Event {
   uint32_t bytes = 0;
   uint64_t value = 0;
 };
+static_assert(std::is_trivially_copyable_v<Event>);
 std::mutex records_mutex;
 std::array<Record, kInvalidEntry> records{};
 std::array<Event, kTraceCapacity> events{};
@@ -313,7 +316,13 @@ static void FlushTraceLocked(size_t maximum_count) {
     }
     ++written_events;
   }
-  std::move(events.begin() + count, events.begin() + event_count, events.begin());
+  // Events are trivially copyable. Shift the unflushed tail in one bounded
+  // bulk operation rather than invoking assignment for each Event; this
+  // only runs when an explicit streaming trace is enabled.
+  if (count != 0 && count < event_count) {
+    std::memmove(events.data(), events.data() + count,
+                 (event_count - count) * sizeof(Event));
+  }
   event_count -= count;
   if (trace.file && std::fflush(trace.file) != 0) {
     REXLOG_WARN("gta4-streaming: trace flush failed; recording stopped");
