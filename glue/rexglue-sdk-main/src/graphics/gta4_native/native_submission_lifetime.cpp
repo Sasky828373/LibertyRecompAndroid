@@ -115,11 +115,19 @@ bool NativeSubmissionLifetime::CommitSubmission(FrameToken token, SubmissionSeri
   }
 
   // Validate the complete transaction before changing the first resource.
+  // Validate both frame-slot journals with a single lookup per slot/key.
+  // This avoids the repeated generic frame-slot traversal in the hot path.
   for (const auto& [key, count] : slot.staged_references) {
     const auto resource = resources_.find(key);
-    const auto total_staged = GetStagedReferenceCountLocked(key);
-    if (resource == resources_.end() || !total_staged || *total_staged < count ||
-        resource->second.queued_reference_count < *total_staged) {
+    if (resource == resources_.end()) {
+      return false;
+    }
+    const FrameSlot& other = frame_slots_[token.slot ^ 1u];
+    const auto other_it = other.staged_references.find(key);
+    const uint64_t other_count =
+        other_it == other.staged_references.end() ? 0 : other_it->second;
+    const uint64_t queued = resource->second.queued_reference_count;
+    if (other_count > queued || count > queued - other_count) {
       return false;
     }
   }
@@ -155,11 +163,19 @@ bool NativeSubmissionLifetime::AbandonFrame(FrameToken token) {
   if (slot.state != FrameSlotState::kRecording && slot.state != FrameSlotState::kPrepared) {
     return false;
   }
+  // Validate both frame-slot journals with a single lookup per slot/key.
+  // This avoids the repeated generic frame-slot traversal in the hot path.
   for (const auto& [key, count] : slot.staged_references) {
     const auto resource = resources_.find(key);
-    const auto total_staged = GetStagedReferenceCountLocked(key);
-    if (resource == resources_.end() || !total_staged || *total_staged < count ||
-        resource->second.queued_reference_count < *total_staged) {
+    if (resource == resources_.end()) {
+      return false;
+    }
+    const FrameSlot& other = frame_slots_[token.slot ^ 1u];
+    const auto other_it = other.staged_references.find(key);
+    const uint64_t other_count =
+        other_it == other.staged_references.end() ? 0 : other_it->second;
+    const uint64_t queued = resource->second.queued_reference_count;
+    if (other_count > queued || count > queued - other_count) {
       return false;
     }
   }
