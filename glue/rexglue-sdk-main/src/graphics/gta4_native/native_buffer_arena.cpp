@@ -67,6 +67,13 @@ NativeBufferArenaResult NativeBufferArena::Reserve(uint64_t size) {
           best_range_index = range_index;
           best_waste = waste;
         }
+        // Free ranges are ordered by offset. Once a block yields an exact
+        // fit, no later range in the same block can beat its zero waste or
+        // smaller offset. Continue with other blocks to preserve the
+        // deterministic lowest-block-ID tie break.
+        if (waste == 0) {
+          break;
+        }
       }
     }
   }
