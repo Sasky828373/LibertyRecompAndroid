@@ -153,30 +153,33 @@ NativeBufferArenaStatus NativeBufferArena::Commit(uint64_t allocation_id) {
 }
 
 void NativeBufferArena::InsertAndCoalesce(Block& block, Range range) {
+  auto& ranges = block.free_ranges;
   const auto insertion = std::lower_bound(
-      block.free_ranges.begin(), block.free_ranges.end(), range.offset,
+      ranges.begin(), ranges.end(), range.offset,
       [](const Range& candidate, uint64_t offset) { return candidate.offset < offset; });
-  size_t insertion_index = static_cast<size_t>(insertion - block.free_ranges.begin());
-  block.free_ranges.insert(insertion, range);
-  if (insertion_index != 0) {
-    const size_t previous_index = insertion_index - 1;
-    Range& previous = block.free_ranges[previous_index];
-    const Range& inserted = block.free_ranges[insertion_index];
-    if (previous.offset + previous.size == inserted.offset) {
-      previous.size += inserted.size;
-      block.free_ranges.erase(block.free_ranges.begin() + insertion_index);
-      insertion_index = previous_index;
+  const size_t index = static_cast<size_t>(insertion - ranges.begin());
+
+  // In the common case a release is adjacent to an existing free range.
+  // Extend it in place instead of inserting and then erasing a vector entry.
+  const bool merge_previous =
+      index != 0 && ranges[index - 1].offset + ranges[index - 1].size == range.offset;
+  const bool merge_next =
+      index < ranges.size() && range.offset + range.size == ranges[index].offset;
+  if (merge_previous) {
+    Range& previous = ranges[index - 1];
+    previous.size += range.size;
+    if (merge_next) {
+      previous.size += ranges[index].size;
+      ranges.erase(ranges.begin() + index);
     }
+    return;
   }
-  const size_t next_index = insertion_index + 1;
-  if (next_index < block.free_ranges.size()) {
-    Range& inserted = block.free_ranges[insertion_index];
-    const Range& next = block.free_ranges[next_index];
-    if (inserted.offset + inserted.size == next.offset) {
-      inserted.size += next.size;
-      block.free_ranges.erase(block.free_ranges.begin() + next_index);
-    }
+  if (merge_next) {
+    ranges[index].offset = range.offset;
+    ranges[index].size += range.size;
+    return;
   }
+  ranges.insert(insertion, range);
 }
 
 NativeBufferArenaRelease NativeBufferArena::ReleaseRecord(
