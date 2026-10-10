@@ -76,14 +76,17 @@ bool NativeSubmissionLifetime::StageQueuedReference(FrameToken token, ResourceKe
       count > queued - other_count - own_count) {
     return false;
   }
-  uint64_t& staged_count = slot.staged_references[key];
-  if (count > std::numeric_limits<uint64_t>::max() - staged_count) {
-    if (!staged_count) {
-      slot.staged_references.erase(key);
-    }
+  // Avoid inserting a zero-valued tree node for a rejected operation.
+  // Most draw resources already have a staged entry, so use the iterator
+  // obtained during validation instead of performing a second tree search.
+  if (count > std::numeric_limits<uint64_t>::max() - own_count) {
     return false;
   }
-  staged_count += count;
+  if (existing == current_staged.end()) {
+    slot.staged_references.emplace(key, count);
+  } else {
+    existing->second += count;
+  }
   return true;
 }
 
