@@ -75,6 +75,12 @@ NativeBufferArenaResult NativeBufferArena::Reserve(uint64_t size) {
           break;
         }
       }
+      // blocks_ is an ordered map (ascending block ID). Once an exact fit
+      // is found, no subsequent block can improve zero waste or win the
+      // lowest-ID tie break. Stop both search levels immediately.
+      if (best_block && best_waste == 0) {
+        break;
+      }
     }
   }
 
