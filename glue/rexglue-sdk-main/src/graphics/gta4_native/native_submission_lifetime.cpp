@@ -237,9 +237,10 @@ NativeSubmissionLifetime::GetDescriptorTombstones(uint32_t slot_index,
   const FrameSlot& slot = frame_slots_[slot_index];
   std::vector<DescriptorTombstone> result;
   auto tombstone = descriptor_tombstones_.upper_bound(slot.applied_descriptor_epoch);
-  while (tombstone != descriptor_tombstones_.end() && tombstone->first <= target_epoch) {
+  const auto end = descriptor_tombstones_.upper_bound(target_epoch);
+  result.reserve(static_cast<size_t>(std::distance(tombstone, end)));
+  for (; tombstone != end; ++tombstone) {
     result.push_back({tombstone->second, tombstone->first});
-    ++tombstone;
   }
   return result;
 }
