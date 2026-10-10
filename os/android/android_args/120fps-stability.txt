@@ -1,0 +1,29 @@
+# 120 Hz / 120 FPS stability baseline for high-end Adreno devices.
+# Applies no deliberate quality reductions relative to the Android default.
+# TEST PROFILE; copy to args.txt and retain a backup of your current settings.
+# Not intended for Snapdragon 865 or 60 Hz displays.
+--log_level=warn
+--gta4_frame_limit=120
+--gta4_present_mode=vsync
+--gta4_native_max_queued_frames=3
+--gta4_fps_guard=0
+# The existing dynamic draw-distance controller is documented around a
+# 30 FPS miss budget. Disable it while measuring 120 FPS to avoid introducing
+# unrelated view-distance changes; fix its timing budget in code separately.
+--gta4_dynamic_draw_distance=false
+--gta4_draw_distance_scale=1.0
+--gta4_shadow_map_base_size=256
+--gta4_shadow_distance_scale=1.0
+--gta4_reflection_resolution=original
+--gta4_reflection_capture_distance=near
+--gta4_native_upscaler=native
+--gta4_native_anti_aliasing=fxaa
+--gta4_reflection_aa=off
+--gta4_motion_blur=false
+--gta4_traffic_density_scale=0.4
+--gta4_parked_car_density_scale=0.4
+--gta4_ped_density_scale=0.4
+--gta4_scenario_ped_density_scale=0.4
+--gta4_profile_native_detailed_cpu=false
+--gta4_profile_native_detailed_gpu=false
+--gta4_output_height_cap=720
