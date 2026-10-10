@@ -1,0 +1,90 @@
+name: Android ARM64 Vulkan Performance APK
+
+on:
+  push:
+    branches:
+      - perf/120fps-efficiency-bundle-20261010
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    name: Android ARM64 APK
+    runs-on: windows-2022
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: CMake 3.29+ and Ninja
+        run: |
+          python -m pip install --upgrade "cmake>=3.29,<5" ninja
+          cmake --version
+          ninja --version
+
+      - name: Locate Android SDK and install NDK r29
+        run: |
+          set -euo pipefail
+          export ANDROID_HOME="$(cygpath -u "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-C:\\Android\\android-sdk}}")"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "NDK_VER=29.0.14206865" >> "$GITHUB_ENV"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat"
+          test -f "$SDKMANAGER" || { echo "::error::Missing Android SDK command-line tools"; exit 1; }
+          "$SDKMANAGER" --install "ndk;29.0.14206865" "platforms;android-35"
+          test -d "$ANDROID_HOME/ndk/29.0.14206865"
+
+      - name: Resolve and patch pinned dependencies
+        run: python tools/setup_repo.py
+
+      - name: Build Android Vulkan driver proxy
+        run: bash os/android/scripts/build_driver_proxy.sh
+
+      - name: Compile native GTA IV ARM64 renderer and game
+        run: STRIP=1 BUILD_TYPE=Release bash os/android/scripts/build_native.sh 4
+
+      - name: Build Android APK using existing Gradle script
+        run: bash os/android/scripts/build_apk.sh debug
+
+      - name: Publish APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta4-android-vulkan-perf-arm64
+          path: os/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Publish build logs if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-perf-build-diagnostics
+          path: |
+            out/build/android-arm64-release/CMakeCache.txt
+            out/build/android-arm64-release/CMakeFiles/CMakeConfigureLog.yaml
+            os/android/app/build/reports/**
+          if-no-files-found: ignore
