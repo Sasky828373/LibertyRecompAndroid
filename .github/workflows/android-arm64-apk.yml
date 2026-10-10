@@ -31,12 +31,19 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - name: Install Android SDK and NDK
         shell: pwsh
         run: |
-          & sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.14206865"
+          $sdk = "C:\Android\android-sdk"
+          $sdkmanager = Get-ChildItem "$sdk\cmdline-tools" -Recurse -Filter sdkmanager.bat |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sdkmanager) { throw "sdkmanager.bat not found in $sdk" }
+          & $sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.14206865"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Export Git Bash SDK and JDK paths
+        run: |
+          echo "ANDROID_HOME=$(cygpath -u 'C:\Android\android-sdk')" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=$(cygpath -u "$JAVA_HOME")" >> "$GITHUB_ENV"
       - name: Setup repository
         run: python tools/setup_repo.py
       - name: Build Vulkan driver
