@@ -22157,29 +22157,7 @@ bool Gta4NativeGraphicsSystem::BindUboConstantBanks(VkCommandBuffer command_buff
   dfn.vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
                               kDescriptorSetCount, 1, &set, uint32_t(offsets.size()),
                               offsets.data());
-#if REX_PLATFORM_ANDROID
-  {
-    // TEMP: per-frame binding trace for the first frames after enabling.
-    static uint32_t traced_frames = 0;
-    static uint32_t last_frame = 0;
-    static uint32_t binds = 0;
-    if (diagnostic_submitted_frame_ != last_frame) {
-      if (last_frame && traced_frames < 12) {
-        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "ubo-trace: frame=%u binds=%u", last_frame, binds);
-        ++traced_frames;
-      }
-      last_frame = diagnostic_submitted_frame_;
-      binds = 0;
-      if (traced_frames < 12)
-        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
-                            "ubo-trace: frame=%u slot=%u set=%p arena=%p cap=%llu cb=%p layout=%p first-offsets=%u/%u",
-                            diagnostic_submitted_frame_, active_frame_slot_, (void*)set,
-                            (void*)arena.storage.buffer, (unsigned long long)arena.storage.capacity,
-                            (void*)command_buffer, (void*)layout, offsets[0], offsets[1]);
-    }
-    ++binds;
-  }
-#endif
+
   ubo_bound_layout_ = layout;
   ubo_bound_set_ = set;
   ubo_bound_offsets_ = offsets;
