@@ -335,6 +335,25 @@ if(REXGLUE_USE_VULKAN)
     if(TARGET rexglue_fidelityfx_vulkan)
         target_link_libraries(rexgpu-gta4-native PRIVATE rexglue_fidelityfx_vulkan)
     endif()
+    # ThinLTO inside the renderer plugin (recorder and render worker).
+    if(ANDROID)
+        option(LIBERTY_ANDROID_RENDERER_THINLTO "ThinLTO for the native renderer on Android" ON)
+        if(LIBERTY_ANDROID_RENDERER_THINLTO)
+            target_compile_options(rexgpu-gta4-native PRIVATE -flto=thin)
+            target_link_options(rexgpu-gta4-native PRIVATE -flto=thin "-Wl,--thinlto-jobs=8"
+                "-Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/thinlto-cache-renderer")
+        endif()
+    endif()
+    # The function order libmain uses (gta4-recomp/CMakeLists.txt).
+    if(ANDROID)
+        set(_renderer_symbol_order "${CMAKE_CURRENT_SOURCE_DIR}/../../gta4-recomp/android_symbol_order.txt")
+        if(EXISTS "${_renderer_symbol_order}")
+            target_link_options(rexgpu-gta4-native PRIVATE
+                "-Wl,--symbol-ordering-file=${_renderer_symbol_order}"
+                "-Wl,--no-warn-symbol-ordering")
+            set_property(TARGET rexgpu-gta4-native APPEND PROPERTY LINK_DEPENDS "${_renderer_symbol_order}")
+        endif()
+    endif()
     # Same switch as libmain (gta4-recomp/CMakeLists.txt): "generate" records
     # files/pgo/rexgpu-*.profraw, a .profdata path optimizes with it.
     if(ANDROID AND LIBERTY_ANDROID_PGO)

@@ -8,6 +8,10 @@
 
 #define REX_CONFIG_H_INCLUDED
 
+#define REX_CONFIG_CTR_AS_LOCAL
+#define REX_CONFIG_XER_AS_LOCAL
+#define REX_CONFIG_CR_AS_LOCAL
+#define REX_CONFIG_NON_VOLATILE_AS_LOCAL
 
 #define REX_IMAGE_BASE 0x82000000ull
 #define REX_IMAGE_SIZE 0x1300000ull
@@ -98,6 +102,25 @@ extern PPCFuncMapping PPCFuncMappings[];
 #else
 #define REX_FUNC_PROLOGUE() ((void)0)
 #endif
+#endif
+
+//=============================================================================
+// Memory Barriers
+//=============================================================================
+
+// sync/eieio are full barriers, lwsync orders everything but store-to-load,
+// isync completes earlier loads before later ones. x86-64 needs no instruction
+// for any of them; AArch64 does.
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define REX_PPC_SYNC() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define REX_PPC_LWSYNC() __atomic_thread_fence(__ATOMIC_ACQ_REL)
+#define REX_PPC_EIEIO() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define REX_PPC_ISYNC() __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#else
+#define REX_PPC_SYNC() ((void)0)
+#define REX_PPC_LWSYNC() ((void)0)
+#define REX_PPC_EIEIO() ((void)0)
+#define REX_PPC_ISYNC() ((void)0)
 #endif
 
 //=============================================================================
@@ -1437,6 +1460,7 @@ DECLARE_REX_FUNC(sub_82194698);
 DECLARE_REX_FUNC(sub_82194708);
 DECLARE_REX_FUNC(sub_82194770);
 DECLARE_REX_FUNC(sub_82194830);
+DECLARE_REX_FUNC(sub_82194838);
 DECLARE_REX_FUNC(sub_82194840);
 DECLARE_REX_FUNC(sub_82194848);
 DECLARE_REX_FUNC(sub_82194860);

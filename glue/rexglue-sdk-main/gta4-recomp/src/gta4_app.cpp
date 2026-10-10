@@ -2,6 +2,7 @@
 #include "gta4_present_mode_policy.h"
 #include "gta4_streaming_hooks.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include <rex/graphics/gta4_native/hdr_policy.h>
 #include <rex/graphics/gta4_native/supersampling_policy.h>
 #include <rex/graphics/video_mode_util.h>
+#include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
@@ -45,8 +47,13 @@
 #if REX_PLATFORM_ANDROID
 #include <android/log.h>
 #include <cctype>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fstream>
+#include <sched.h>
+#include <sstream>
+#include <thread>
+#include <unordered_map>
 #endif
 
 REXCVAR_DEFINE_STRING(gta4_multiplayer_backend, "community", "GTA IV/Multiplayer",
@@ -790,7 +797,136 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
 }
 
 #if REX_PLATFORM_ANDROID
+// Off by default: on the Adreno 650 handheld it made the pinned threads faster
+// but not the frame rate (the GPU and the recorder bound it).
+REXCVAR_DEFINE_BOOL(android_pin_hot_threads, false, "GTA IV/Performance",
+                    "Keep the busiest threads (renderer stages, game logic) on the big CPU cores");
+
+REXCVAR_DEFINE_BOOL(android_thermal_log, true, "GTA IV/Performance",
+                    "Log the GPU thermal level, clocks and temperature and the CPU clock limits "
+                    "every 5 seconds");
+
 namespace {
+
+// Handhelds throttle the GPU on junction temperature, and the frame rate then
+// follows its clock ceiling, not the scene (seen in skate3-android). Logging
+// the kgsl and cpufreq state shows whether a slower session is the device
+// heating up rather than the game.
+void StartThermalLog() {
+  std::thread([] {
+    const auto read = [](const char* path) {
+      std::ifstream file(path);
+      std::string value;
+      std::getline(file, value);
+      return value.empty() ? std::string("?") : value;
+    };
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+      if (!REXCVAR_GET(android_thermal_log)) continue;
+      const std::string kgsl = "/sys/class/kgsl/kgsl-3d0/";
+      std::string cpu_limits;
+      for (int cpu : {0, 4, 7}) {
+        cpu_limits += read(("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                            "/cpufreq/scaling_max_freq").c_str());
+        cpu_limits += cpu == 7 ? "" : "/";
+      }
+      // Guest threads spinning on yields (pinyon-shift found a title loop that
+      // gave up after 1000 of them, which return at once on the host).
+      const std::string yields = rex::kernel::xboxkrnl::TakeYieldCountSummary(4);
+      __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                          "thermal: gpu-level=%s gpu-max=%s gpu-clk=%s gpu-busy=%s gpu-temp=%s "
+                          "cpu-max-khz=%s yields/spins-5s=%s",
+                          read((kgsl + "thermal_pwrlevel").c_str()).c_str(),
+                          read((kgsl + "max_gpuclk").c_str()).c_str(),
+                          read((kgsl + "gpuclk").c_str()).c_str(),
+                          read((kgsl + "gpu_busy_percentage").c_str()).c_str(),
+                          read((kgsl + "temp").c_str()).c_str(), cpu_limits.c_str(),
+                          yields.empty() ? "none" : yields.c_str());
+    }
+  }).detach();
+}
+
+// The scheduler often places the renderer's pipeline stages and the game
+// threads on the little cores for a while, and the slowest stage holds up the
+// others. Once a second the busiest threads (at most one per big core) are
+// limited to the big cores; the rest keep every core.
+void StartHotThreadPinning() {
+  std::thread([] {
+    std::vector<uint64_t> max_frequency;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+      std::ifstream file("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                         "/cpufreq/cpuinfo_max_freq");
+      uint64_t frequency = 0;
+      if (!(file >> frequency)) break;
+      max_frequency.push_back(frequency);
+    }
+    if (max_frequency.empty()) return;
+    const uint64_t slowest = *std::min_element(max_frequency.begin(), max_frequency.end());
+    cpu_set_t big{}, all{};
+    size_t big_count = 0;
+    for (size_t cpu = 0; cpu < max_frequency.size(); ++cpu) {
+      CPU_SET(cpu, &all);
+      if (max_frequency[cpu] > slowest) {
+        CPU_SET(cpu, &big);
+        ++big_count;
+      }
+    }
+    if (!big_count) return;  // No big.LITTLE.
+
+    // CPU ticks (100 Hz) per second a thread needs to be pinned, or to stay.
+    constexpr uint64_t kPinTicks = 30, kKeepTicks = 20;
+    std::unordered_map<pid_t, uint64_t> last_ticks;
+    std::unordered_set<pid_t> pinned;
+    const auto set_affinity = [](pid_t tid, const cpu_set_t& set) {
+      sched_setaffinity(tid, sizeof(set), &set);
+    };
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      if (!REXCVAR_GET(android_pin_hot_threads)) {
+        for (pid_t tid : pinned) set_affinity(tid, all);
+        pinned.clear();
+        last_ticks.clear();
+        continue;
+      }
+      std::vector<std::pair<uint64_t, pid_t>> busy;
+      std::unordered_map<pid_t, uint64_t> ticks;
+      if (DIR* tasks = opendir("/proc/self/task")) {
+        while (const dirent* entry = readdir(tasks)) {
+          if (!std::isdigit(static_cast<unsigned char>(entry->d_name[0]))) continue;
+          const pid_t tid = pid_t(std::atoi(entry->d_name));
+          std::ifstream stat_file(std::string("/proc/self/task/") + entry->d_name + "/stat");
+          std::string stat((std::istreambuf_iterator<char>(stat_file)), {});
+          const size_t name_end = stat.rfind(')');
+          if (name_end == std::string::npos) continue;
+          // Fields after the name start at 3 (state); utime is 14, stime 15.
+          std::istringstream fields(stat.substr(name_end + 2));
+          std::string field;
+          uint64_t utime = 0, stime = 0;
+          for (int index = 3; index <= 15 && fields >> field; ++index) {
+            if (index == 14) utime = std::strtoull(field.c_str(), nullptr, 10);
+            if (index == 15) stime = std::strtoull(field.c_str(), nullptr, 10);
+          }
+          ticks[tid] = utime + stime;
+          const auto last = last_ticks.find(tid);
+          if (last != last_ticks.end()) busy.emplace_back(utime + stime - last->second, tid);
+        }
+        closedir(tasks);
+      }
+      last_ticks = std::move(ticks);
+      std::sort(busy.begin(), busy.end(), std::greater<>());
+      std::unordered_set<pid_t> hot;
+      for (const auto& [delta, tid] : busy) {
+        if (hot.size() == big_count) break;
+        if (delta >= kPinTicks || (delta >= kKeepTicks && pinned.contains(tid))) hot.insert(tid);
+      }
+      for (pid_t tid : pinned)
+        if (!hot.contains(tid) && last_ticks.contains(tid)) set_affinity(tid, all);
+      for (pid_t tid : hot)
+        if (!pinned.contains(tid)) set_affinity(tid, big);
+      pinned = std::move(hot);
+    }
+  }).detach();
+}
 
 // Tuning without a relaunch: files/live_cvars.txt is re-read whenever it
 // changes, one --name=value per line. Settings the title latches at startup
@@ -844,6 +980,8 @@ void StartLiveCvarWatcher(std::filesystem::path path) {
 void GTA4App::OnPostSetup() {
 #if REX_PLATFORM_ANDROID
   StartLiveCvarWatcher(rex::filesystem::GetUserFolder() / "live_cvars.txt");
+  StartHotThreadPinning();
+  StartThermalLog();
 #endif
   gta4::presentation::InitializeOptions();
   rex::graphics::gta4_native::InitializeAntiAliasingController();

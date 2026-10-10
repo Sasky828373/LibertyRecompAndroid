@@ -40,8 +40,10 @@ fi
 
 # Calls between unhooked recompiled functions bypass the weak sub_X aliases so
 # the compiler can inline them (idempotent; a new codegen loses the rewrite).
-# Off by default: no measurable gain on the device, and the first build with it
-# crashed in game code (SIGSEGV after deeper inlining). DIRECT_CALLS=1 enables.
+# Off by default: no measurable gain at the bridge, neither before registers
+# became C++ locals nor after (2026-10-10, with functions named by address in
+# the sources kept indirect as nfsmw-android does), and the first build with
+# them crashed in game code. DIRECT_CALLS_ENABLE=1 turns them on.
 DIRECT_CALLS="$REPO/glue/rexglue-sdk-main/gta4-recomp/tools/direct_calls.py"
 if [ "${DIRECT_CALLS_ENABLE:-0}" = "1" ]; then
   python "$(cygpath -m "$DIRECT_CALLS")" apply

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "native_triangle_fan.h"
+#include "native_vertex_cache.h"
 #include "native_deferred_release.h"
 #include "native_flat_set.h"
 #include "native_gpu_counters.h"
@@ -335,11 +336,18 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     mutable std::vector<uint8_t> host_index16_payload;
     mutable std::vector<uint8_t> host_index32_payload;
     mutable NativeTriangleFanCache triangle_fan_cache;
-    // Recorder-only: host-endian index ranges reordered for the vertex cache,
-    // keyed by start << 32 | count (null = not reorderable).
-    mutable std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>>
+    // Recorder-only: host-endian index ranges reordered for the vertex cache
+    // (NativeVertexCacheOptimizer), keyed by start << 32 | count.
+    mutable std::unordered_map<uint64_t, std::shared_ptr<NativeVertexCacheRange>>
         vertex_cache_ranges;
     mutable NativeOwnerRetirementWatch<NativePersistentBufferEntry> persistent_retirement;
+    // Recorder-only: the persistent buffer entry this resource resolved to
+    // last (GetOrCreatePersistentBuffer), with its key's bytes and the map's
+    // clear epoch. Entries are erased only after their owner expired, so the
+    // pointer stays valid while this resource exists.
+    mutable std::array<uint64_t, 6> persistent_memo_key{};
+    mutable NativePersistentBufferEntry* persistent_memo_entry = nullptr;
+    mutable uint64_t persistent_memo_epoch = 0;
   };
 
   enum class NativeTextureOrigin : uint8_t {
@@ -379,6 +387,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     // Render worker only: the assembly epoch in which this resource's
     // generations were last added to assembly_texture_protection_.
     mutable uint32_t assembly_protection_epoch = 0;
+    // The latest assembly epoch whose commands read this resource, written by
+    // the render worker (atomic_ref) and read by the recorder; never decreases.
+    mutable uint32_t assembly_read_epoch = 0;
   };
 
   struct SynchronousCommand {
@@ -471,8 +482,6 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t temporal_scene_stage = UINT32_MAX;
     std::shared_ptr<NativeCommand> temporal_prefilter;
     uint8_t temporal_composite_mode = 0;
-    GpuPassOrigin gpu_pass_origin{};
-    profile::CommandTransport profile_transport;
     std::shared_ptr<const FireTraceContext> fire_trace;
     std::shared_ptr<const BulbSourceSnapshot> bulb_trace;
     std::shared_ptr<PhoneTraceContext> phone_trace;
@@ -483,9 +492,6 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t light_trace_technique = 0xFFFFFFFFu;
     uint32_t light_trace_mode = 0;
     NativeCommandBytes bytes;
-    std::vector<uint8_t> payload;
-    NativeDeviceSnapshot device_snapshot;
-    NativeShaderConstantDelta shader_constant_delta;
     std::shared_ptr<const NativeShaderState> shader_state;
     std::array<std::shared_ptr<const NativeBufferResource>, kVertexStreamCount> vertex_buffers{};
     std::shared_ptr<const NativeBufferResource> index_buffer;
@@ -493,8 +499,6 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     std::array<xenos::xe_gpu_texture_fetch_t, kTextureStageCount> texture_fetches{};
     uint32_t used_texture_mask = 0;
     std::array<NativeBindingRealization, kTextureStageCount> binding_realization{};
-    // Diagnostic-only heap sidecar captured by normal descriptor realization.
-    std::shared_ptr<std::vector<NativeRoomLightInputBinding>> room_light_input_bindings;
     uint32_t realized_image_mask = 0;
     uint32_t realized_sampler_mask = 0;
     uint32_t guest_null_texture_mask = 0;
@@ -510,8 +514,6 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     std::shared_ptr<const NativeTextureResource> depth_handoff_source;
     std::shared_ptr<const NativeTextureResource> present_source;
     std::shared_ptr<const EnvironmentalDataV2> environmental_data;
-    std::array<SurfaceDescriptor, kRenderTargetCount> snapshot_render_targets{};
-    SurfaceDescriptor snapshot_depth_stencil{};
     std::array<VkDescriptorSet, 1> draw_descriptor_sets{};
     std::array<uint32_t, kTextureStageCount> texture_descriptor_indices{};
     std::array<uint32_t, kTextureStageCount> sampler_descriptor_indices{};
@@ -531,6 +533,12 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t render_phase_object = 0;
     uint64_t vertex_constants_hash = 0;
     uint64_t pixel_constants_hash = 0;
+    // Hash of the constant prefix this draw uploads, taken on the render
+    // worker so the recorder (the slowest stage) need not; 0 bytes: none.
+    uint64_t vertex_constants_upload_hash = 0;
+    uint64_t pixel_constants_upload_hash = 0;
+    uint32_t vertex_constants_upload_bytes = 0;
+    uint32_t pixel_constants_upload_bytes = 0;
     DirtyStateComponentMask dirty_components = 0;
     uint64_t released_texture_generation = 0;
     // Diagnostic-only producer identity. These fields are native sidecars,
@@ -548,6 +556,17 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     mutable bool protected_generations_overflow = false;
     // Filled before the queue lock is taken (CollectTextureProtection).
     mutable bool protected_generations_collected = false;
+    // Fields the recorder does not read for every draw, kept after the ones it
+    // does: a command is ~3 KB and recording is bound by its first touches.
+    GpuPassOrigin gpu_pass_origin{};
+    profile::CommandTransport profile_transport;
+    std::vector<uint8_t> payload;
+    NativeDeviceSnapshot device_snapshot;
+    NativeShaderConstantDelta shader_constant_delta;
+    // Diagnostic-only heap sidecar captured by normal descriptor realization.
+    std::shared_ptr<std::vector<NativeRoomLightInputBinding>> room_light_input_bindings;
+    std::array<SurfaceDescriptor, kRenderTargetCount> snapshot_render_targets{};
+    SurfaceDescriptor snapshot_depth_stencil{};
     // Raw title state commands (Set* bytes, each with its header) submitted
     // since the previous queued command. The worker applies them, in order,
     // before this command, exactly as if each had been queued on its own.
@@ -1391,7 +1410,7 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   bool CoalesceStateCommand(const void* command, size_t command_size);
   void RegisterVectorFontTexture(uint32_t texture, uint32_t vector_font_id);
   bool ApplyShaderConstantDelta(NativeCommand& command, uint32_t device);
-  bool SnapshotDrawConstants(const NativeCommand& command, uint32_t device);
+  bool SnapshotDrawConstants(NativeCommand& command, uint32_t device);
   // Why the next PrepareSurfaceContent may materialize (statistics only):
   // 0 draw scope, 1 clear scope, 2 resolve clear, 3 other.
   uint32_t materialize_trigger_ = 3;
@@ -1650,8 +1669,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   void ClearNativeFrameCommands();
   static void AddProtectedTextureGenerations(const NativeCommand& command,
                                              std::unordered_set<uint64_t>& generations);
-  std::unordered_set<uint64_t> CollectProtectedTextureGenerations(
-      const std::shared_ptr<const NativeTextureResource>& present_source);
+  void CollectProtectedTextureGenerations(
+      const std::shared_ptr<const NativeTextureResource>& present_source,
+      std::unordered_set<uint64_t>& generations);
   NativeTextureHeapBudgets QueryNativeTextureHeapBudgets() const;
   bool AllocateNativeTextureImage(const VkImageCreateInfo& image_info, NativeTextureImage& image);
   void EvictNativeTextureImages(uint32_t submitted_frame, bool allocation_recovery);
@@ -1875,6 +1895,14 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   uint64_t zero_dof_skips_=0,postfx_direct_writes_=0;
   std::shared_ptr<const NativePipelineState> last_pipeline_snapshot_;
   std::shared_ptr<const NativeShaderState> last_shader_snapshot_;
+  // Render worker: the last prefix hashed per bank (vertex, pixel), reused
+  // while consecutive draws upload the same version.
+  struct ConstantUploadHashMemo {
+    std::shared_ptr<const ConstantStateVersion> version;
+    uint32_t bytes = 0;
+    uint64_t hash = 0;
+  };
+  std::array<ConstantUploadHashMemo, 2> constant_upload_hash_memo_{};
   std::shared_ptr<const NativePipelineState> SnapshotPipeline(const NativeCommand&, bool);
   NativeOwnedCommands<NativeCommand> current_frame_;
   DirtyStateDelta producer_dirty_delta_;     // command_capture_mutex_
@@ -1899,6 +1927,10 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
     uint32_t resolves = 0;
     uint32_t depth_handoffs = 0;
     std::vector<uint64_t> packed_alias_generations;  // Distinct.
+    // RecordNativeFrame's scans: a draw with a water-surface shader, and the
+    // epoch stamped on every texture the frame reads (assembly_read_epoch).
+    bool has_water = false;
+    uint32_t read_epoch = 0;
     bool valid = false;
   };
   NativeConstantBound assembly_constant_bound_;  // Render worker.
@@ -1997,7 +2029,11 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   double dynamic_draw_distance_published_ = 1.0;
   double dynamic_draw_distance_interval_ms_ = 33.3;
   uint64_t dynamic_draw_distance_last_tick_ = 0;
-  uint32_t dynamic_draw_distance_stable_frames_ = 0;
+  // One-second windows of presented frames; the controller steps once per window.
+  uint32_t dynamic_draw_distance_window_frames_ = 0;
+  double dynamic_draw_distance_window_ms_ = 0.0;
+  std::array<double, 3> dynamic_draw_distance_window_fps_{30.0, 30.0, 30.0};
+  uint32_t dynamic_draw_distance_windows_since_drop_ = 1000;
   // B1 30 FPS guard: a ladder of content reductions above the draw distance.
   void UpdateFpsGuard(double interval_ms, uint64_t now, uint64_t frequency);
   void ApplyFpsGuardLevel(uint32_t level);
@@ -2125,6 +2161,9 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   std::unordered_map<NativePersistentBufferKey, NativePersistentBufferEntry,
                      NativePersistentBufferKeyHash>
       persistent_buffers_;
+  // Bumped when persistent_buffers_ is cleared; owners' memos of older epochs
+  // are ignored (NativeBufferResource::persistent_memo_entry).
+  uint64_t persistent_buffer_epoch_ = 1;
   std::array<NativeFrameConstantArena, NativeFrameContextRing::kSlotCount> frame_constant_arenas_{};
   uint64_t persistent_buffer_hits_ = 0;
   uint64_t persistent_buffer_misses_ = 0;

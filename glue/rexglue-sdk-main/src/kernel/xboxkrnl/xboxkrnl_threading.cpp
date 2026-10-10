@@ -16,7 +16,13 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
+
+#if defined(__ANDROID__) || defined(__linux__)
+#include <pthread.h>
+#endif
 
 #include <rex/chrono/clock.h>
 #include <rex/dbg.h>
@@ -401,7 +407,70 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
   return result;
 }
 
+namespace {
+
+// Per-thread yield counts for TakeYieldCountSummary. A thread's counter is
+// created on its first yield and kept for the process lifetime (threads that
+// yield are few), so the summary never races a thread's exit.
+struct YieldCounter {
+  std::atomic<uint64_t> yields{0};
+  std::atomic<uint64_t> spins{0};
+  uint64_t reported_yields = 0;
+  uint64_t reported_spins = 0;
+  char name[16] = "?";
+};
+
+std::mutex g_yield_counters_mutex;
+std::vector<YieldCounter*> g_yield_counters;
+
+YieldCounter& CurrentYieldCounter() {
+  thread_local YieldCounter* counter = [] {
+    auto* created = new YieldCounter();
+#if defined(__ANDROID__) || defined(__linux__)
+    pthread_getname_np(pthread_self(), created->name, sizeof(created->name));
+#endif
+    std::lock_guard lock(g_yield_counters_mutex);
+    g_yield_counters.push_back(created);
+    return created;
+  }();
+  return *counter;
+}
+
+}  // namespace
+
+std::string TakeYieldCountSummary(size_t max_threads) {
+  struct Delta {
+    const char* name;
+    uint64_t yields;
+    uint64_t spins;
+  };
+  std::vector<Delta> deltas;
+  {
+    std::lock_guard lock(g_yield_counters_mutex);
+    for (YieldCounter* counter : g_yield_counters) {
+      const uint64_t yields = counter->yields.load(std::memory_order_relaxed);
+      const uint64_t spins = counter->spins.load(std::memory_order_relaxed);
+      Delta delta{counter->name, yields - counter->reported_yields,
+                  spins - counter->reported_spins};
+      counter->reported_yields = yields;
+      counter->reported_spins = spins;
+      if (delta.yields || delta.spins) deltas.push_back(delta);
+    }
+  }
+  std::sort(deltas.begin(), deltas.end(), [](const Delta& a, const Delta& b) {
+    return a.yields + a.spins > b.yields + b.spins;
+  });
+  std::string summary;
+  for (size_t i = 0; i < deltas.size() && i < max_threads; ++i) {
+    if (!summary.empty()) summary += ' ';
+    summary += deltas[i].name;
+    summary += '=' + std::to_string(deltas[i].yields) + '/' + std::to_string(deltas[i].spins);
+  }
+  return summary;
+}
+
 u32 NtYieldExecution_entry() {
+  CurrentYieldCounter().yields.fetch_add(1, std::memory_order_relaxed);
   rex::thread::MaybeYield();
   return X_STATUS_SUCCESS;
 }
@@ -982,6 +1051,7 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock, bool change_i
   const uint32_t self = rex::byte_swap(pcr_addr);
   assert_true(lock->prcb_of_owner.value != self);  // self-deadlock detection
   while (!rex::thread::atomic_cas(0u, self, &lock->prcb_of_owner.value)) {
+    CurrentYieldCounter().spins.fetch_add(1, std::memory_order_relaxed);
     rex::thread::MaybeYield();
   }
   return old_irql;

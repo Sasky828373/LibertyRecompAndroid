@@ -59,11 +59,15 @@ fi
 export SERIAL="${SERIAL:-}"
 # Git Bash rewrites arguments that look like POSIX paths (/sdcard/...) into
 # Windows paths; adb must see them unchanged.
+# ADB_TIMEOUT (seconds, optional) ends an adb call that hangs - run-as shells
+# occasionally never return while the game is busy.
 adbs() {
+  local limit=()
+  [ -n "${ADB_TIMEOUT:-}" ] && limit=(timeout "$ADB_TIMEOUT")
   if [ -n "$SERIAL" ]; then
-    MSYS_NO_PATHCONV=1 adb -s "$SERIAL" "$@"
+    MSYS_NO_PATHCONV=1 "${limit[@]}" adb -s "$SERIAL" "$@"
   else
-    MSYS_NO_PATHCONV=1 adb "$@"
+    MSYS_NO_PATHCONV=1 "${limit[@]}" adb "$@"
   fi
 }
 # Local file arguments for adbs (push/install) in a form adb.exe understands.

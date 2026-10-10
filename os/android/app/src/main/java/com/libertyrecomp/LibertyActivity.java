@@ -23,6 +23,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -213,6 +214,7 @@ public class LibertyActivity extends SDLActivity {
                 Log.e(TAG, "writing default args failed", e);
             }
         }
+        migrateArguments(argsFile);
         List<String> arguments = new ArrayList<>(Arrays.asList(readArguments(argsFile)));
         // The runtime's own log (warnings and errors at the default level) goes
         // to logcat and Liberty Recompiled/logs, and ends up in crash reports.
@@ -426,6 +428,39 @@ public class LibertyActivity extends SDLActivity {
      */
     private static String cleanLine(String line) {
         return line.replace("\uFEFF", "").trim();
+    }
+
+    /**
+     * Earlier defaults replaced in args.txt files copied by older versions.
+     * Only the exact old line is rewritten; edited values are left alone.
+     */
+    private static final String[][] ARGUMENT_MIGRATIONS = {
+            // 0.5.7.9: dynamic draw distance floor 0.80 (0.75 broke dynamic
+            // shadows; 0.85 was an interim default of test builds).
+            {"--gta4_dynamic_draw_distance_min=0.75", "--gta4_dynamic_draw_distance_min=0.80"},
+            {"--gta4_dynamic_draw_distance_min=0.85", "--gta4_dynamic_draw_distance_min=0.80"},
+    };
+
+    private static void migrateArguments(File file) {
+        if (!file.isFile()) return;
+        try {
+            List<String> lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
+            boolean changed = false;
+            for (int i = 0; i < lines.size(); ++i) {
+                for (String[] migration : ARGUMENT_MIGRATIONS) {
+                    if (cleanLine(lines.get(i)).equals(migration[0])) {
+                        lines.set(i, migration[1]);
+                        changed = true;
+                    }
+                }
+            }
+            if (changed) {
+                Files.write(file.toPath(), lines, StandardCharsets.UTF_8);
+                Log.i(TAG, "updated old defaults in " + file);
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "cannot update " + file, e);
+        }
     }
 
     /** One argument per line; blank lines and lines starting with '#' are skipped. */
