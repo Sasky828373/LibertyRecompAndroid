@@ -335,6 +335,17 @@ if(REXGLUE_USE_VULKAN)
     if(TARGET rexglue_fidelityfx_vulkan)
         target_link_libraries(rexgpu-gta4-native PRIVATE rexglue_fidelityfx_vulkan)
     endif()
+    # Optimize the native Vulkan renderer independently from the lifted guest
+    # code. CMake RelWithDebInfo uses -O2; the renderer's hot draw/record paths
+    # benefit from the additional loop and vectorization passes at -O3.
+    # Keep an explicit switch for A/B profiling if a driver/device regresses.
+    if(ANDROID)
+        option(LIBERTY_ANDROID_RENDERER_O3
+            "Use Clang -O3 for native Vulkan renderer CPU hotpaths" ON)
+        if(LIBERTY_ANDROID_RENDERER_O3)
+            target_compile_options(rexgpu-gta4-native PRIVATE -O3)
+        endif()
+    endif()
     # ThinLTO inside the renderer plugin (recorder and render worker).
     if(ANDROID)
         option(LIBERTY_ANDROID_RENDERER_THINLTO "ThinLTO for the native renderer on Android" ON)
