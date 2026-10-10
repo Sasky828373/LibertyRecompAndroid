@@ -1,0 +1,53 @@
+name: Android ARM64 APK
+
+on:
+  push:
+    branches:
+      - perf/android-120fps-frametime-baseline
+  pull_request:
+    paths:
+      - '.github/workflows/android-arm64-apk.yml'
+      - 'os/android/**'
+      - 'glue/**'
+      - 'CMakeLists.txt'
+  workflow_dispatch:
+
+jobs:
+  android-apk:
+    runs-on: windows-2022
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        shell: pwsh
+        run: |
+          & sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.14206865"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Setup repository
+        run: python tools/setup_repo.py
+      - name: Build Vulkan driver
+        run: bash os/android/scripts/build_driver_proxy.sh
+      - name: Build native ARM64 libraries
+        run: STRIP=1 bash os/android/scripts/build_native.sh 3
+      - name: Assemble Android debug APK
+        run: bash os/android/scripts/build_apk.sh debug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibertyRecompAndroid-arm64-debug
+          path: os/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
