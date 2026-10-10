@@ -23214,7 +23214,7 @@ bool Gta4NativeGraphicsSystem::RecordPrimitiveUp(VkCommandBuffer command_buffer,
       profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { if (!REXCVAR_GET(gta4_native_debug_gpu_attribution) || REXCVAR_GET(gta4_native_debug_gpu_attribution) == 1) dfn.vkCmdDraw(command_buffer, 4, 1, rectangle * 4, 0); });
     }
   } else if (draw.primitive_type == uint32_t(xenos::PrimitiveType::kQuadList)) {
-    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return if (native_draw_state_cache_.UpdateIndexBuffer(
+    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { if (native_draw_state_cache_.UpdateIndexBuffer(
       NativeVulkanHandleIdentity(command_buffer), NativeVulkanHandleIdentity(quad_list_indices.buffer),
       uint64_t(quad_list_indices.offset), uint32_t(VK_INDEX_TYPE_UINT32)))
       dfn.vkCmdBindIndexBuffer(command_buffer, quad_list_indices.buffer, quad_list_indices.offset, VK_INDEX_TYPE_UINT32); });
@@ -23373,7 +23373,7 @@ bool Gta4NativeGraphicsSystem::RecordPrimitive(VkCommandBuffer command_buffer,
       *(indices++) = vertex + 2;
       *(indices++) = vertex + 3;
     }
-    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return if (native_draw_state_cache_.UpdateIndexBuffer(
+    profile::CpuCall(profile::CpuOp::kDriverBind, [&] { if (native_draw_state_cache_.UpdateIndexBuffer(
       NativeVulkanHandleIdentity(command_buffer), NativeVulkanHandleIdentity(indices_allocation.buffer),
       uint64_t(indices_allocation.offset), uint32_t(VK_INDEX_TYPE_UINT32)))
       dfn.vkCmdBindIndexBuffer(command_buffer, indices_allocation.buffer, indices_allocation.offset, VK_INDEX_TYPE_UINT32); });
@@ -23972,7 +23972,7 @@ bool Gta4NativeGraphicsSystem::RecordIndexedPrimitive(VkCommandBuffer command_bu
     }
   }
 
-  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { return if (native_draw_state_cache_.UpdateIndexBuffer(
+  profile::CpuCall(profile::CpuOp::kDriverBind, [&] { if (native_draw_state_cache_.UpdateIndexBuffer(
       NativeVulkanHandleIdentity(command_buffer), NativeVulkanHandleIdentity(host_index_buffer),
       uint64_t(host_index_offset), uint32_t(bound_index_type)))
       dfn.vkCmdBindIndexBuffer(command_buffer, host_index_buffer, host_index_offset, bound_index_type); });
