@@ -511,7 +511,9 @@ NativeDescriptorWriteBatch NativeDescriptorEpochTable::BeginFrameCopyWrites(uint
 
   PendingBatch& pending = pending_batches_[frame_copy];
   pending.id = result.batch_id;
-  pending.writes = result.writes;
+  // Reuse the pending batch's allocation across frames. The returned batch
+  // owns its separate vector, so validation and cancellation stay unchanged.
+  pending.writes.assign(result.writes.begin(), result.writes.end());
   return result;
 }
 
