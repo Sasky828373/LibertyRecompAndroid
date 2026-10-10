@@ -511,7 +511,9 @@ NativeDescriptorWriteBatch NativeDescriptorEpochTable::BeginFrameCopyWrites(uint
 
   PendingBatch& pending = pending_batches_[frame_copy];
   pending.id = result.batch_id;
-  pending.writes = result.writes;
+  // Reuse the pending batch's allocation across frames. The returned batch
+  // owns its separate vector, so validation and cancellation stay unchanged.
+  pending.writes.assign(result.writes.begin(), result.writes.end());
   return result;
 }
 
@@ -548,7 +550,10 @@ NativeDescriptorStatus NativeDescriptorEpochTable::CommitFrameCopyWrites(
     dirty_slot_membership_[AppliedEpochOffset(batch.frame_copy, slot_index)] = 0;
   }
   dirty_slots.resize(retained_dirty_count);
-  pending = {};
+  // Keep vector capacity across frames: descriptor write batches are rebuilt
+  // every frame and repeatedly releasing their backing would cause churn.
+  pending.id = 0;
+  pending.writes.clear();
   return NativeDescriptorStatus::kSuccess;
 }
 
@@ -564,7 +569,10 @@ NativeDescriptorStatus NativeDescriptorEpochTable::CancelFrameCopyWrites(
   if (!batch.batch_id || pending.id != batch.batch_id) {
     return NativeDescriptorStatus::kInvalidWriteBatch;
   }
-  pending = {};
+  // Keep vector capacity across frames: descriptor write batches are rebuilt
+  // every frame and repeatedly releasing their backing would cause churn.
+  pending.id = 0;
+  pending.writes.clear();
   return NativeDescriptorStatus::kSuccess;
 }
 

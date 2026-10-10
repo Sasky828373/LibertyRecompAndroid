@@ -7,6 +7,8 @@
 #include <bit>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <type_traits>
 #include <mutex>
 #include <memory>
 #include <new>
@@ -127,6 +129,7 @@ struct Event {
   uint32_t bytes = 0;
   uint64_t value = 0;
 };
+static_assert(std::is_trivially_copyable_v<Event>);
 std::mutex records_mutex;
 std::array<Record, kInvalidEntry> records{};
 std::array<Event, kTraceCapacity> events{};
@@ -138,6 +141,8 @@ uint64_t reloads = 0;
 uint64_t state_changes = 0;
 uint64_t world_requests = 0;
 std::atomic<bool> trace_enabled{false};
+// Avoid taking the trace mutex every game frame when no diagnostic batch exists.
+std::atomic<bool> trace_has_events{false};
 struct TraceFile {
   std::FILE* file = nullptr;
   bool attempted = false;
@@ -149,6 +154,7 @@ void EventLocked(Event event) {
   if (event_count == events.size()) { ++dropped_events; return; }
   event.epoch = epoch.load(std::memory_order_relaxed);
   events[event_count++] = event;
+  trace_has_events.store(true, std::memory_order_release);
 }
 
 // Bind side data to the current guest table before publishing/consuming ranks.
@@ -184,7 +190,7 @@ void Tick(uint8_t* base, uint32_t view) {
   frame_time = Now();
   motion.Update(view, frame, frame_time, Vector(base, view + 2304));
   if (trace_enabled.load(std::memory_order_relaxed)) {
-    FlushTrace();
+    if (trace_has_events.load(std::memory_order_acquire)) FlushTrace();
     if (!last_log || frame_time - last_log >= 2000000000ULL) {
       last_log = frame_time;
       uint64_t changes, requests, cycles, dropped;
@@ -313,8 +319,15 @@ static void FlushTraceLocked(size_t maximum_count) {
     }
     ++written_events;
   }
-  std::move(events.begin() + count, events.begin() + event_count, events.begin());
+  // Events are trivially copyable. Shift the unflushed tail in one bounded
+  // bulk operation rather than invoking assignment for each Event; this
+  // only runs when an explicit streaming trace is enabled.
+  if (count != 0 && count < event_count) {
+    std::memmove(events.data(), events.data() + count,
+                 (event_count - count) * sizeof(Event));
+  }
   event_count -= count;
+  trace_has_events.store(event_count != 0, std::memory_order_release);
   if (trace.file && std::fflush(trace.file) != 0) {
     REXLOG_WARN("gta4-streaming: trace flush failed; recording stopped");
     std::fclose(trace.file);
@@ -333,13 +346,14 @@ void FinishTrace() {
   std::lock_guard lock(records_mutex);
   trace_enabled.store(false, std::memory_order_relaxed);
   classification_cache.reset();
-  if (!trace.file) { event_count = 0; return; }
+  if (!trace.file) { event_count = 0; trace_has_events.store(false, std::memory_order_release); return; }
   FlushTraceLocked(events.size());
   if (trace.file) {
     std::fclose(trace.file);
     trace.file = nullptr;
   }
   event_count = 0;
+  trace_has_events.store(false, std::memory_order_release);
 }
 
 void Initialize(uint8_t* base) {

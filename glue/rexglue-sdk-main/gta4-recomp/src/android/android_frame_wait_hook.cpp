@@ -11,6 +11,7 @@
 // fewer pending frames lets the title run that many frames further ahead; the
 // renderer's own queue still bounds the total.
 #include <time.h>
+#include <cerrno>
 
 #include <rex/cvar.h>
 
@@ -21,6 +22,12 @@
 // changing the main thread's timing can expose game-side races.
 REXCVAR_DEFINE_BOOL(gta4_frame_wait_sleep, false, "GTA IV/Performance",
                     "Sleep instead of spinning while the title waits for a frame slot");
+// Short, configurable sleeps trade CPU spin time against wakeup latency.
+// 50 us is the experimental 120 Hz baseline; no sleep is enabled by default.
+REXCVAR_DEFINE_UINT32(gta4_frame_wait_sleep_us, 50, "GTA IV/Performance",
+                      "Sleep duration per pending-frame poll, in microseconds")
+    .range(10, 250);
+
 REXCVAR_DEFINE_UINT32(gta4_extra_frames_in_flight, 0, "GTA IV/Performance",
                       "Frames the title may run ahead beyond its own limit of two pending "
                       "frames (more throughput, one frame of input latency each)")
@@ -37,7 +44,10 @@ extern "C" void sub_82A46D70(PPCContext& ctx, uint8_t* base) {
     REX_STORE_U32(out + 8, pending);
   }
   if (pending >= 2 && REXCVAR_GET(gta4_frame_wait_sleep)) {
-    const timespec delay{0, 250 * 1000};
+    const uint32_t microseconds = REXCVAR_GET(gta4_frame_wait_sleep_us);
+    const timespec delay{0, static_cast<long>(microseconds) * 1000L};
+    // Deliberately return on EINTR: this is a latency-sensitive polling
+    // loop, not a request to guarantee sleeping for the full duration.
     nanosleep(&delay, nullptr);
   }
 }
