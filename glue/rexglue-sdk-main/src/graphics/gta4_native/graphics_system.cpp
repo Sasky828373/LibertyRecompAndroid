@@ -174,11 +174,17 @@ REXCVAR_DEFINE_BOOL(gta4_native_dump_shaders, false, "GTA IV/Diagnostics",
                     "TEMP: write every registered stock shader's SPIR-V to spv/ in the user folder");
 REXCVAR_DEFINE_UINT32(gta4_native_water_reflection_interval, 1, "GTA IV/Graphics/Reflections",
                       "Re-render the water reflection every N frames (1 = every frame); in between "
-                      "the previous reflection is reused");
+                      "the previous reflection is reused. 0 = off: only the clear remains")
+    .range(0, 4);
+REXCVAR_DEFINE_UINT32(gta4_native_shadow_interval, 1, "GTA IV/Graphics/Shadows",
+                      "Redraw the sun shadow map every N frames (1 = every frame); skipped "
+                      "frames keep the previous map, so fast movers' shadows may lag. 0 = off: "
+                      "the map is only cleared, so nothing casts a sun shadow")
+    .range(0, 4);
 REXCVAR_DEFINE_UINT32(gta4_native_environment_reflection_interval, 1, "GTA IV/Graphics/Reflections",
                       "Re-render the environment (vehicle) reflection every N frames; the cubemap "
-                      "keeps its previous capture in between")
-    .range(1, 4);
+                      "keeps its previous capture in between. 0 = off: only the clear remains")
+    .range(0, 4);
 REXCVAR_DEFINE_BOOL(gta4_native_stage_draw_commands, true, "GTA IV/Graphics/Native Renderer",
                     "Publish captured title commands to the render worker in batches (one "
                     "render queue lock per batch instead of per command)");
@@ -7109,6 +7115,11 @@ void Gta4NativeGraphicsSystem::UpdateFpsGuard(double interval_ms, uint64_t now, 
   } else {
     fps_guard_slow_since_tick_ = 0;
     fps_guard_fast_since_tick_ = 0;
+  }
+  // A disabled guard leaves the reflection intervals to the user's settings:
+  // applying its level 0 at start reset them to every frame.
+  if (!maximum && (fps_guard_applied_level_ == UINT32_MAX || fps_guard_applied_level_ == 0)) {
+    return;
   }
   uint32_t level = std::min(fps_guard_level_, maximum);
   const bool can_change = !fps_guard_changed_tick_ || seconds_since(fps_guard_changed_tick_) >= 5.0;
@@ -30179,6 +30190,25 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       diagnostic_frame ? 0u : REXCVAR_GET(gta4_native_shadow_min_indices);
   const bool skip_environment_reflection =
       environment_reflection_interval > 1 && submitted_frame % environment_reflection_interval != 0;
+  // Interval 0 turns a pass off: its draws are dropped every frame but its
+  // clears and resolves still run, so its texture holds the cleared value
+  // (no sun shadow, a plain reflection) instead of stale or undefined data.
+  const bool water_reflection_off = water_reflection_interval == 0 && !diagnostic_frame;
+  const bool environment_reflection_off = environment_reflection_interval == 0 && !diagnostic_frame;
+  // The shadow pass is about half of the draws at the bridge; on skipped
+  // frames its draws, clears and resolves are dropped like a reflection's.
+  const uint32_t shadow_interval = diagnostic_frame ? 1u : REXCVAR_GET(gta4_native_shadow_interval);
+  const bool skip_shadows = shadow_interval > 1 && submitted_frame % shadow_interval != 0;
+  const bool shadows_off = shadow_interval == 0;
+  // The pass tag (kRetailWarpShadow) reaches the renderer only while the
+  // profiler is on. Outside it the shadow pass is recognized by its target:
+  // the only depth-only draws into a square surface of 512 and up go to the
+  // sun shadow map (1280x1280 at the stock size).
+  const auto shadow_map_draw = [](const NativeCommand& command) {
+    const SurfaceDescriptor& depth = command.snapshot_depth_stencil;
+    return command.snapshot_render_targets[0].width == 0 && depth.handle &&
+           depth.width >= 512 && depth.width == depth.height;
+  };
   const bool lazy_resolves = REXCVAR_GET(gta4_native_lazy_resolves) && !diagnostic_frame &&
                              !fire_frame_ && !force_content_probe;
   {
@@ -30290,7 +30320,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     }
     // Draws, clears and resolves of the water reflection capture: the reflection
     // texture keeps the previous capture on skipped frames.
-    if ((skip_water_reflection || skip_environment_reflection) &&
+    if ((skip_water_reflection || skip_environment_reflection || skip_shadows) &&
         (queued_command.type == CommandType::kDrawPrimitive ||
          queued_command.type == CommandType::kDrawPrimitiveUp ||
          queued_command.type == CommandType::kDrawIndexedPrimitive ||
@@ -30298,7 +30328,20 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       // One classification serves both checks.
       const performance::GpuRange range = performance_range_for_command(queued_command);
       if ((skip_water_reflection && range == performance::GpuRange::kWaterReflections) ||
-          (skip_environment_reflection && range == performance::GpuRange::kEnvironmentReflections)) {
+          (skip_environment_reflection && range == performance::GpuRange::kEnvironmentReflections) ||
+          (skip_shadows && range == performance::GpuRange::kRetailWarpShadow)) {
+        continue;
+      }
+    }
+    if ((water_reflection_off || environment_reflection_off || shadows_off) &&
+        (queued_command.type == CommandType::kDrawPrimitive ||
+         queued_command.type == CommandType::kDrawPrimitiveUp ||
+         queued_command.type == CommandType::kDrawIndexedPrimitive)) {
+      const performance::GpuRange range = performance_range_for_command(queued_command);
+      if ((water_reflection_off && range == performance::GpuRange::kWaterReflections) ||
+          (environment_reflection_off && range == performance::GpuRange::kEnvironmentReflections) ||
+          (shadows_off && (range == performance::GpuRange::kRetailWarpShadow ||
+                           shadow_map_draw(queued_command)))) {
         continue;
       }
     }
