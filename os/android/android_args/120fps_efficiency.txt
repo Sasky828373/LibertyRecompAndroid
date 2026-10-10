@@ -36,3 +36,20 @@
 --gta4_native_vertex_cache_order=true
 # FPS guard targets 30 FPS in this source version, so don't use it for a 120 FPS test.
 --gta4_fps_guard=0
+
+# Existing lossless Vulkan/GPU fast paths: preserve scene fidelity.
+--gta4_native_pipeline_prewarm=true
+--gta4_native_persistent_buffers=true
+--gta4_native_lossless_resolve_optimization=true
+--gta4_native_merge_up_draws=true
+--gta4_native_merge_up_max=16
+--gta4_native_water_reflection_on_demand=true
+--gta4_native_fast_legacy_mul=true
+--gta4_native_stage_draw_commands=true
+--gta4_native_async_constant_release=true
+--gta4_native_fast_capacity=true
+--gta4_native_batched_worker_wake=true
+--gta4_native_sparse_capacity_plan=true
+--gta4_native_descriptor_backend=auto
+--gta4_native_state_transport=delta
+--gta4_native_pipeline_telemetry=false
