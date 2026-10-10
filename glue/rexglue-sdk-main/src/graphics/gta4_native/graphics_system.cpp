@@ -34030,13 +34030,6 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
             command_buffer, command_index, target, depth_attachment, stencil_attachment,
             producer_depth_resolve_scan);
       }
-      // TEMP: load ops of rendering scopes, split by colorless (light setup) scopes.
-      if (target.depth_stencil_attachment_active) {
-        const uint32_t key = (color_attachment_count ? 0u : 4u) |
-                             (depth_attachment.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 2u : 0u) |
-                             (stencil_attachment.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? 1u : 0u);
-        ++g_light_reuse_failures[16 + key];
-      }
       gpu_labels::BeginSceneScope(vulkan_provider->vulkan_device(), command_buffer, rendering_info, native_gpu_scope_summary_, submitted_frame, uint32_t(command_index));
       profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdBeginRendering(command_buffer, &rendering_info); });
       // A load-op clear is itself a complete attachment write. Record it
