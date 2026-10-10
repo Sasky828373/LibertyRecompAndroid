@@ -46,6 +46,28 @@ jobs:
           echo "ANDROID_NDK=$(cygpath -u 'C:\Android\android-sdk\ndk\29.0.14206865')" >> "$GITHUB_ENV"
           echo "NDK_VER=29.0.14206865" >> "$GITHUB_ENV"
           echo "JAVA_HOME=$(cygpath -u "$JAVA_HOME")" >> "$GITHUB_ENV"
+      - name: Install compiler cache
+        shell: pwsh
+        run: |
+          choco install ccache --version=4.13.6 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path 'C:\ProgramData\chocolatey\bin\ccache.exe')) {
+            throw 'ccache.exe not found after installation'
+          }
+      - name: Configure compiler cache
+        run: |
+          echo "CCACHE_LAUNCHER=$(cygpath -m 'C:\ProgramData\chocolatey\bin\ccache.exe')" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$(pwd)/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$(pwd)" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+      - name: Restore compiled object cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ndk29-arm64-ccache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-ndk29-arm64-ccache-
       - name: Setup repository
         run: python tools/setup_repo.py
       - name: Build Vulkan driver
@@ -60,3 +82,16 @@ jobs:
           name: LibertyRecompAndroid-arm64-debug
           path: os/android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+      - name: Compiler cache statistics
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${CCACHE_LAUNCHER:-}" ]; then
+            "${CCACHE_LAUNCHER}" --show-stats || true
+          fi
+      - name: Preserve compiled object cache even after failure
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ndk29-arm64-ccache-${{ github.run_id }}-${{ github.run_attempt }}
