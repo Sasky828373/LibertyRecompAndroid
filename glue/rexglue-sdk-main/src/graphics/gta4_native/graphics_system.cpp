@@ -18803,6 +18803,9 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     draw_count = frame_constant_bound_.all_draws;
     resolve_count = frame_constant_bound_.resolves;
     depth_handoff_count = frame_constant_bound_.depth_handoffs;
+    // The assembly worker already knows the unique packed-depth aliases.
+    // Avoid hash-table growth and repeated rehashing in the render thread.
+    packed_alias_generations.reserve(frame_constant_bound_.packed_alias_generations.size());
     packed_alias_generations.insert(frame_constant_bound_.packed_alias_generations.begin(),
                                     frame_constant_bound_.packed_alias_generations.end());
   } else {
