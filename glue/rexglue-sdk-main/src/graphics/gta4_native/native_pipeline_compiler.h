@@ -82,6 +82,7 @@ class NativePipelineCompiler {
       return std::nullopt;
     }
     Result result = std::move(*job->result);
+    --completed_count_;
     jobs_.erase(key);
     return result;
   }
@@ -89,9 +90,12 @@ class NativePipelineCompiler {
   std::vector<std::pair<Key, Result>> TakeCompleted() {
     std::lock_guard lock(mutex_);
     std::vector<std::pair<Key, Result>> completed;
+    if (!completed_count_) return completed;
+    completed.reserve(completed_count_);
     for (auto it = jobs_.begin(); it != jobs_.end();) {
       if (it->second->result) {
         completed.emplace_back(it->first, std::move(*it->second->result));
+        --completed_count_;
         it = jobs_.erase(it);
       } else {
         ++it;
@@ -146,6 +150,7 @@ class NativePipelineCompiler {
       }
       lock.lock();
       job->result = std::move(result);
+      ++completed_count_;
       job->compile = {};
       active_ = false;
       changed_.notify_all();
@@ -169,6 +174,8 @@ class NativePipelineCompiler {
   std::condition_variable changed_;
   bool stopping_ = false;
   bool active_ = false;
+  // Guarded by mutex_; avoid scanning the job map when nothing finished.
+  size_t completed_count_ = 0;
   std::deque<Key> queue_;
   std::unordered_map<Key, std::shared_ptr<Job>, Hash> jobs_;
   std::thread thread_;
