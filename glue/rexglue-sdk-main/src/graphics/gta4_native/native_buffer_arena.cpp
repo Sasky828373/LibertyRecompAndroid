@@ -66,7 +66,16 @@ NativeBufferArenaResult NativeBufferArena::Reserve(uint64_t size) {
           best_block = &block;
           best_range_index = range_index;
           best_waste = waste;
+          // A zero-waste match cannot be improved. Both maps and free-range
+          // vectors are visited in their deterministic order, so the first
+          // exact fit is already the original best-fit choice.
+          if (waste == 0) {
+            break;
+          }
         }
+      }
+      if (best_waste == 0) {
+        break;
       }
     }
   }

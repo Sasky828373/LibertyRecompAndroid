@@ -10,6 +10,7 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
 import android.view.View;
+import android.view.Surface;
 import android.view.WindowManager;
 
 import org.libsdl.app.SDLActivity;
@@ -61,6 +62,7 @@ public class LibertyActivity extends SDLActivity {
     private static final String SURFACE_ARGUMENT = "--android_surface=";
     private int mSurfaceWidth;
     private int mSurfaceHeight;
+    private SDLSurface mGameSurface;
     private String mDriverMode = DriverBridge.TURNIP;
     /** driver.txt as found, for the launch report. */
     private String mDriverText;
@@ -161,6 +163,7 @@ public class LibertyActivity extends SDLActivity {
     @Override
     protected SDLSurface createSDLSurface(Context context) {
         SDLSurface surface = super.createSDLSurface(context);
+        mGameSurface = surface;
         if (mSurfaceWidth > 0 && mSurfaceHeight > 0) {
             surface.getHolder().setFixedSize(mSurfaceWidth, mSurfaceHeight);
             Log.i(TAG, "fixed surface " + mSurfaceWidth + "x" + mSurfaceHeight);
@@ -191,6 +194,27 @@ public class LibertyActivity extends SDLActivity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             hideSystemBars();
+            request120HzSurfaceRate();
+        }
+    }
+
+    /** Hint only: Android may decline the 120 Hz rate based on display policy. */
+    private void request120HzSurfaceRate() {
+        if (Build.VERSION.SDK_INT < 30 || mGameSurface == null) return;
+        boolean wants120 = false;
+        for (String arg : mArguments) {
+            if ("--gta4_frame_limit=120".equals(arg)) {
+                wants120 = true;
+                break;
+            }
+        }
+        if (!wants120) return;
+        Surface surface = mGameSurface.getHolder().getSurface();
+        if (surface == null || !surface.isValid()) return;
+        try {
+            surface.setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            Log.w(TAG, "120 Hz surface hint rejected", e);
         }
     }
 
