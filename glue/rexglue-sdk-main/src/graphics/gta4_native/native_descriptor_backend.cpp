@@ -310,9 +310,6 @@ NativeDescriptorEpochTable::NativeDescriptorEpochTable(const NativeDescriptorEpo
   }
 
   slots_.resize(slot_count);
-  // All descriptor slots are populated at initialization. Reserve once so
-  // the free-list never reallocates while preparing a graphics frame.
-  free_slots_.reserve(slot_count);
   applied_epochs_.resize(frame_count * slot_count);
   dirty_slots_by_copy_.resize(frame_count);
   dirty_slot_membership_.resize(frame_count * slot_count);
