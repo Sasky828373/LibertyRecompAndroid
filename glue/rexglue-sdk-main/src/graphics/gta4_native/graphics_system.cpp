@@ -9014,7 +9014,7 @@ bool Gta4NativeGraphicsSystem::GetOrCreatePersistentBuffer(
     barrier.buffer = block.buffer;
     barrier.offset = VkDeviceSize(reserved.offset);
     barrier.size = size;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1, &barrier, 0,
                              nullptr); });
   }
@@ -14177,7 +14177,7 @@ bool Gta4NativeGraphicsSystem::RecordContentProbeImage(
   image_barrier.image = image;
   image_barrier.subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(barrier_aspect, mip_level, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, previous_synchronization.stages,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, previous_synchronization.stages,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                            &image_barrier); });
 
@@ -14232,7 +14232,7 @@ bool Gta4NativeGraphicsSystem::RecordContentProbeImage(
   image_barrier.dstAccessMask = previous_synchronization.access;
   image_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   image_barrier.newLayout = layout;
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            previous_synchronization.stages, 0, 0, nullptr, 0, nullptr, 1,
                            &image_barrier); });
   return true;
@@ -14799,7 +14799,7 @@ bool Gta4NativeGraphicsSystem::RecordLightStencilHistogramProbe(
   to_copy.image = image.resource.image;
   to_copy.subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(image.aspect, 0, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, previous_synchronization.stages,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, previous_synchronization.stages,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_copy); });
 
   VkBufferImageCopy copy{};
@@ -14830,7 +14830,7 @@ bool Gta4NativeGraphicsSystem::RecordLightStencilHistogramProbe(
   host_read.buffer = probe.buffer;
   host_read.offset = offset;
   host_read.size = copy_size;
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            previous_synchronization.stages | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
                            nullptr, 1, &host_read, 1, &restore); });
 
@@ -14967,7 +14967,7 @@ bool Gta4NativeGraphicsSystem::RecordLightColorDeltaProbe(VkCommandBuffer comman
   to_copy.image = image.resource.image;
   to_copy.subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, previous_synchronization.stages,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, previous_synchronization.stages,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_copy); });
 
   VkBufferImageCopy copy{};
@@ -14998,7 +14998,7 @@ bool Gta4NativeGraphicsSystem::RecordLightColorDeltaProbe(VkCommandBuffer comman
   host_read.buffer = probe.buffer;
   host_read.offset = offset;
   host_read.size = copy_size;
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            previous_synchronization.stages | VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
                            nullptr, 1, &host_read, 1, &restore); });
 
@@ -15247,7 +15247,7 @@ bool Gta4NativeGraphicsSystem::RecordContentProbe(
       buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       buffer_barrier.buffer = content_probe_buffer_.buffer;
       buffer_barrier.size = VK_WHOLE_SIZE;
-      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &buffer_barrier, 0,
                                nullptr); });
     } else if (!content_probe_buffer_.room_light_inputs) {
@@ -15368,7 +15368,7 @@ bool Gta4NativeGraphicsSystem::RecordContentProbe(
     buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     buffer_barrier.buffer = content_probe_buffer_.buffer;
     buffer_barrier.size = VK_WHOLE_SIZE;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &buffer_barrier, 0,
                              nullptr); });
   } else if (!content_probe_buffer_.room_light_inputs) {
@@ -17456,7 +17456,7 @@ bool Gta4NativeGraphicsSystem::RecordNullImageInitialization(VkCommandBuffer com
     barrier.subresourceRange = ui::vulkan::util::InitializeSubresourceRange(
         VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layer_counts[index]);
   }
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
                            uint32_t(barriers.size()), barriers.data()); });
 
@@ -17476,7 +17476,7 @@ bool Gta4NativeGraphicsSystem::RecordNullImageInitialization(VkCommandBuffer com
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
       nullptr, uint32_t(barriers.size()), barriers.data()); });
@@ -17807,7 +17807,7 @@ void Gta4NativeGraphicsSystem::FlushTextureUploads(VkCommandBuffer command_buffe
       [&](VkPipelineStageFlags source, VkPipelineStageFlags destination,
           std::span<const VkImageMemoryBarrier> barriers) {
         profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] {
-          (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, source, destination, 0, 0, nullptr,
+          dfn.vkCmdPipelineBarrier(command_buffer, source, destination, 0, 0, nullptr,
                                    0, nullptr, uint32_t(barriers.size()), barriers.data());
         });
       },
@@ -18168,7 +18168,7 @@ Gta4NativeGraphicsSystem::NativeTextureImage* Gta4NativeGraphicsSystem::GetOrCre
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image->resource.image;
     barrier.subresourceRange = initialization_range;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                              &barrier); });
 
@@ -18188,7 +18188,7 @@ Gta4NativeGraphicsSystem::NativeTextureImage* Gta4NativeGraphicsSystem::GetOrCre
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
         0, nullptr, 1, &barrier); });
@@ -20795,7 +20795,7 @@ bool Gta4NativeGraphicsSystem::TransitionRenderingTarget(VkCommandBuffer command
     barrier.image = image->resource.image;
     barrier.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, source_synchronization.stages,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, source_synchronization.stages,
                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
                              nullptr, 1, &barrier); });
     image->layout = barrier.newLayout;
@@ -20818,7 +20818,7 @@ bool Gta4NativeGraphicsSystem::TransitionRenderingTarget(VkCommandBuffer command
     barrier.image = image.resource.image;
     barrier.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(image.aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer, source_synchronization.stages,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
         0, nullptr, 0, nullptr, 1, &barrier); });
@@ -24599,7 +24599,7 @@ bool Gta4NativeGraphicsSystem::RecordPackedDepthAlias(
   barriers[1].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
   barriers[1].subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(destination.aspect, 0, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
       0, 0, nullptr, 0, nullptr, uint32_t(barriers.size()), barriers.data()); });
 
@@ -24630,7 +24630,7 @@ bool Gta4NativeGraphicsSystem::RecordPackedDepthAlias(
   constants.flags = destination.source->fetch.swizzle;
   profile::CpuCall(profile::CpuOp::kDriverDynamic, [&] { return dfn.vkCmdPushConstants(command_buffer, resolve_conversion_pipeline_layout_,
       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants); });
-  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdDraw)(command_buffer, 3, 1, 0, 0); });
+  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, 3, 1, 0, 0); });
   profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdEndRendering(command_buffer); });
   gpu_labels::End(vulkan_device, command_buffer);
   auto& ready = barriers[1];
@@ -24638,7 +24638,7 @@ bool Gta4NativeGraphicsSystem::RecordPackedDepthAlias(
   ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
   ready.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   ready.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
       0, 0, nullptr, 0, nullptr, 1, &ready); });
   source.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -24830,7 +24830,7 @@ bool Gta4NativeGraphicsSystem::RecordResolveConversion(
     barriers[2].subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
   }
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, source_synchronization.stages | destination_synchronization.stages |
                           mirror_synchronization.stages,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
@@ -24951,7 +24951,7 @@ bool Gta4NativeGraphicsSystem::RecordResolveConversion(
   }
   profile::CpuCall(profile::CpuOp::kDriverDynamic, [&] { return dfn.vkCmdPushConstants(command_buffer, resolve_conversion_pipeline_layout_,
                          VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants); });
-  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdDraw)(command_buffer, 3, 1, 0, 0); });
+  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, 3, 1, 0, 0); });
   profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdEndRendering(command_buffer); });
   gpu_labels::End(vulkan_device, command_buffer);
 
@@ -24973,7 +24973,7 @@ bool Gta4NativeGraphicsSystem::RecordResolveConversion(
     destination_barriers[1].subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
   }
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
       nullptr, hdr_mirror ? 2 : 1, destination_barriers.data()); });
@@ -25389,7 +25389,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthResolveConversion(
       barriers[1].image = destination.resource.image;
       barriers[1].subresourceRange = ui::vulkan::util::InitializeSubresourceRange(
           destination.aspect, destination_level, 1, 0, 1);
-      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
           command_buffer, source_synchronization.stages | destination_synchronization.stages,
           kNativeDepthStencilResolveStages, 0,
           0, nullptr, 0, nullptr, uint32_t(barriers.size()), barriers.data()); });
@@ -25432,7 +25432,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthResolveConversion(
       read_barriers[1].image = destination.resource.image;
       read_barriers[1].subresourceRange = ui::vulkan::util::InitializeSubresourceRange(
           destination.aspect, destination_level, 1, 0, 1);
-      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
           command_buffer,
           kNativeDepthStencilResolveStages,
           VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
@@ -25525,7 +25525,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthResolveConversion(
   barriers[1].image = destination.resource.image;
   barriers[1].subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(destination.aspect, destination_level, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, source_synchronization.stages | destination_synchronization.stages,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
@@ -25590,7 +25590,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthResolveConversion(
   constants.sample_select = uint32_t(sample_select);
   profile::CpuCall(profile::CpuOp::kDriverDynamic, [&] { return dfn.vkCmdPushConstants(command_buffer, resolve_conversion_pipeline_layout_,
                          VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants); });
-  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdDraw)(command_buffer, 3, 1, 0, 0); });
+  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, 3, 1, 0, 0); });
   profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdEndRendering(command_buffer); });
   gpu_labels::End(vulkan_device, command_buffer);
 
@@ -25605,7 +25605,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthResolveConversion(
   destination_barrier.image = destination.resource.image;
   destination_barrier.subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(destination.aspect, destination_level, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer,
       VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
@@ -25793,7 +25793,7 @@ bool Gta4NativeGraphicsSystem::RecordSurfaceMaterialization(
   barriers[1].image = destination.resource.image;
   barriers[1].subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, source_synchronization.stages | destination_synchronization.stages,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
       nullptr, 0, nullptr, uint32_t(barriers.size()), barriers.data()); });
@@ -25852,7 +25852,7 @@ bool Gta4NativeGraphicsSystem::RecordSurfaceMaterialization(
   }
   profile::CpuCall(profile::CpuOp::kDriverDynamic, [&] { return dfn.vkCmdPushConstants(command_buffer, resolve_conversion_pipeline_layout_,
                          VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants); });
-  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdDraw)(command_buffer, 3, 1, 0, 0); });
+  profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, 3, 1, 0, 0); });
   profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdEndRendering(command_buffer); });
   gpu_labels::End(vulkan_device, command_buffer);
 
@@ -26126,7 +26126,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     barriers[1].image = destination->resource.image;
     barriers[1].subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(destination->aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer, source_synchronization.stages | destination_synchronization.stages,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
             VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
@@ -26174,7 +26174,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
       profile::CpuCall(profile::CpuOp::kDriverDynamic, [&] { return dfn.vkCmdPushConstants(command_buffer, resolve_conversion_pipeline_layout_,
                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float24), &float24); });
     }
-    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdDraw)(command_buffer, 3, 1, 0, 0); });
+    profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, 3, 1, 0, 0); });
     profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdEndRendering(command_buffer); });
     gpu_labels::End(vulkan_device, command_buffer);
 
@@ -26274,7 +26274,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     preserve_buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     preserve_buffer_barrier.buffer = destination->depth_handoff_stencil_scratch_buffer;
     preserve_buffer_barrier.size = destination->depth_handoff_stencil_scratch_size;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer,
                              destination_synchronization.stages | VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
                              &preserve_buffer_barrier, 1, &preserve_image_barrier); });
@@ -26307,7 +26307,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     preserved_buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     preserved_buffer_barrier.buffer = destination->depth_handoff_stencil_scratch_buffer;
     preserved_buffer_barrier.size = destination->depth_handoff_stencil_scratch_size;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
             VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -26336,7 +26336,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     destination_barrier.image = destination->resource.image;
     destination_barrier.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(destination->aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer, destination_synchronization.stages,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
         0, nullptr, 0, nullptr, 1, &destination_barrier); });
@@ -26372,7 +26372,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     stencil_to_resolve.image = destination->resource.image;
     stencil_to_resolve.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(destination->aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
@@ -26408,7 +26408,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
   depth_copy_barriers[1].image = destination->resource.image;
   depth_copy_barriers[1].subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(destination->aspect, 0, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, source_copy_synchronization.stages | destination_copy_synchronization.stages,
       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
       uint32_t(depth_copy_barriers.size()), depth_copy_barriers.data()); });
@@ -26436,7 +26436,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
   source_post_barrier.image = source_texture->resource.image;
   source_post_barrier.subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(source_texture->aspect, 0, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                            &source_post_barrier); });
   source_texture->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -26454,7 +26454,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     destination_to_restore.image = destination->resource.image;
     destination_to_restore.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(destination->aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                              &destination_to_restore); });
     destination->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -26479,7 +26479,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     destination_restored.image = destination->resource.image;
     destination_restored.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(destination->aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
         0, nullptr, 0, nullptr, 1, &destination_restored); });
@@ -26504,7 +26504,7 @@ bool Gta4NativeGraphicsSystem::RecordDepthSurfaceHandoff(VkCommandBuffer command
     destination_post_barrier.image = destination->resource.image;
     destination_post_barrier.subresourceRange =
         ui::vulkan::util::InitializeSubresourceRange(destination->aspect, 0, 1, 0, 1);
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
         command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
         0, nullptr, 0, nullptr, 1, &destination_post_barrier); });
@@ -26732,7 +26732,7 @@ bool Gta4NativeGraphicsSystem::RecordResolveClears(VkCommandBuffer command_buffe
       barrier.image = surface->resource.image;
       barrier.subresourceRange =
           ui::vulkan::util::InitializeSubresourceRange(surface->aspect, 0, 1, 0, 1);
-      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, surface_synchronization.stages,
+      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, surface_synchronization.stages,
                                depth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                                            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
                                      : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -27639,7 +27639,7 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
   destination_barrier.image = destination->resource.image;
   destination_barrier.subresourceRange = ui::vulkan::util::InitializeSubresourceRange(
       destination->aspect, resolve.destination_level, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer,
                            source_synchronization.stages | destination_synchronization.stages,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
                            uint32_t(barriers.size()), barriers.data()); });
@@ -27711,7 +27711,7 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
   destination_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
   destination_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   destination_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
       nullptr, 1, &destination_barrier); });
@@ -27875,7 +27875,7 @@ bool Gta4NativeGraphicsSystem::RecordPresent(
       source_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       source_barrier.image = shader_source_image;
       source_barrier.subresourceRange = ui::vulkan::util::InitializeSubresourceRange();
-      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, source_synchronization.stages,
+      profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, source_synchronization.stages,
                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                &source_barrier); });
 
@@ -27991,7 +27991,7 @@ bool Gta4NativeGraphicsSystem::RecordPresent(
       }
       profile::CpuCall(profile::CpuOp::kDriverDynamic, [&] { return dfn.vkCmdPushConstants(command_buffer, resolve_conversion_pipeline_layout_,
                              VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants), &constants); });
-      profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdDraw)(command_buffer, 3, 1, 0, 0); });
+      profile::CpuCall(profile::CpuOp::kDriverDraw, [&] { return dfn.vkCmdDraw(command_buffer, 3, 1, 0, 0); });
       profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdEndRendering(command_buffer); });
       gpu_labels::End(vulkan_device, command_buffer);
       FireImage(command_buffer, "present-output", nullptr, nullptr, nullptr,
@@ -28060,7 +28060,7 @@ bool Gta4NativeGraphicsSystem::RecordPresent(
   destination_barrier.image = presenter_image;
   destination_barrier.subresourceRange =
       ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer,
                            source_synchronization.stages | destination_synchronization.stages,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
                            uint32_t(barriers.size()), barriers.data()); });
@@ -28080,7 +28080,7 @@ bool Gta4NativeGraphicsSystem::RecordPresent(
   source_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
   source_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   source_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(
       command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
       nullptr, 1, &source_barrier); });
@@ -28242,7 +28242,7 @@ bool Gta4NativeGraphicsSystem::ReadbackTextureToGuest(const TextureLockCommand& 
   image_barrier.image = image.resource.image;
   image_barrier.subresourceRange = ui::vulkan::util::InitializeSubresourceRange(
       VK_IMAGE_ASPECT_COLOR_BIT, command.level, 1, 0, 1);
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(readback_command_buffer, previous_synchronization.stages,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(readback_command_buffer, previous_synchronization.stages,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                            &image_barrier); });
 
@@ -28266,7 +28266,7 @@ bool Gta4NativeGraphicsSystem::ReadbackTextureToGuest(const TextureLockCommand& 
   image_barrier.dstAccessMask = previous_synchronization.access;
   image_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   image_barrier.newLayout = previous_layout;
-  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(readback_command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(readback_command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_PIPELINE_STAGE_HOST_BIT | previous_synchronization.stages, 0, 0,
                            nullptr, 1, &buffer_barrier, 1, &image_barrier); });
 
@@ -28784,7 +28784,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
   NativeProducerDepthResolve producer_depth_resolve{};
   NativeProducerDepthResolveScan producer_depth_resolve_scan{};
   const auto end_rendering = [&](int site = 0) {
-    if (site > 0 && site < int(g_rendering_end_sites.size())) ++g_rendering_end_sites[site];
+    (void)site;
     profile::CpuCall(profile::CpuOp::kDriverRendering, [&] { return dfn.vkCmdEndRendering(command_buffer); });
     gpu_labels::End(vulkan_provider->vulkan_device(), command_buffer);
     if (profile_scopes) gpu_labels::EndSceneScope(vulkan_provider->vulkan_device(), command_buffer, *native_gpu_scope_summary_);
@@ -32067,12 +32067,12 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
           VkMemoryBarrier memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
           memory.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
           memory.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-          (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &memory, 0, nullptr, 0, nullptr);
           dfn.vkCmdFillBuffer(command_buffer, buffer.buffer, 0, bytes, 0);
           memory.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
           memory.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-          (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &memory, 0, nullptr, 0, nullptr);
           fusion_cloud_buffer_index_ = index;
           fusion_cloud_extent_ = {target.width, target.height};
@@ -32249,7 +32249,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
             VkMemoryBarrier cloud_barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             cloud_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             cloud_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &cloud_barrier, 0, nullptr, 0, nullptr);
             if (postfx_resource_pool_.RequiresSunShaftRecreation(composite_input->format,
                                                                  composite_extent) &&
@@ -35720,7 +35720,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
     barrier.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
     barrier.buffer=tv_content_probe_buffer_.buffer;barrier.size=VK_WHOLE_SIZE;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr); });
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr); });
   }
   phone_frame_trace_ = phone_batch_trace;
   phone_record_event_ = 0;
@@ -35734,7 +35734,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.buffer = phone_content_probe_buffer_.buffer;
     barrier.size = VK_WHOLE_SIZE;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr); });
   }
   if (water_hud_probe_recorded) {
@@ -35746,7 +35746,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     buffer_barrier.buffer = content_probe_buffer_.buffer;
     buffer_barrier.size = VK_WHOLE_SIZE;
-    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &buffer_barrier, 0,
                              nullptr); });
     REXLOG_WARN(
@@ -36643,7 +36643,7 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
         release_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         release_barrier.image = vulkan_context.image();
         release_barrier.subresourceRange = ui::vulkan::util::InitializeSubresourceRange();
-        profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return (++g_barrier_sites[__LINE__], dfn.vkCmdPipelineBarrier)(command_buffer_,
+        profile::CpuCall(profile::CpuOp::kDriverBarrier, [&] { return dfn.vkCmdPipelineBarrier(command_buffer_,
                                  presenter_transfer_written
                                      ? VK_PIPELINE_STAGE_TRANSFER_BIT
                                      : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
