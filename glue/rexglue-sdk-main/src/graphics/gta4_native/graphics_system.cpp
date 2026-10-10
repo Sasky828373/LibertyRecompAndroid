@@ -278,6 +278,8 @@ REXCVAR_DEFINE_UINT32(gta4_native_debug_gpu_attribution, 0, "GTA IV/Graphics/Nat
                       "Measurement only, breaks the image: 1 = scene draws get an empty scissor "
                       "(vertex and state work only), 2 = scene draws bind state but are not issued")
     .range(0, 2);
+REXCVAR_DEFINE_BOOL(gta4_native_android_pipeline_telemetry, false, "GTA IV/Diagnostics",
+                    "Opt in to expensive Android per-line GPU call counters and 120-frame logging");
 REXCVAR_DEFINE_BOOL(gta4_native_merge_indexed_draws, true, "GTA IV/Graphics/Native Renderer",
                     "Record consecutive indexed triangle-list draws with identical state and "
                     "adjacent index ranges as one draw");
@@ -6702,7 +6704,7 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
           log_frame_batch("present", command, present.submitted_frame, queued_after_pop);
 #if REX_PLATFORM_ANDROID
           // TEMP: pipeline stall telemetry (perf investigation).
-          if (++pipeline_report_frames_ == 120) {
+          if (REXCVAR_GET(gta4_native_android_pipeline_telemetry) && ++pipeline_report_frames_ == 120) {
             const double ms_per_tick = 1000.0 / double(rex::chrono::Clock::QueryHostTickFrequency());
             std::string types;
             for (size_t i = 0; i < pipeline_sync_type_counts_.size(); ++i)
@@ -27670,7 +27672,7 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
         copy.dstOffset = {destination_x, destination_y, 0};
         copy.extent = {source_copy_width, source_copy_height, 1};
       }
-      profile::CpuCall(profile::CpuOp::kDriverCopy, [&] { return gpu_labels::Transfer(vulkan_device, command_buffer, "GTA4/RecordResolve/vkCmdCopyImage", [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdCopyImage)(command_buffer, content_source->resource.image,
+      profile::CpuCall(profile::CpuOp::kDriverCopy, [&] { return gpu_labels::Transfer(vulkan_device, command_buffer, "GTA4/RecordResolve/vkCmdCopyImage", [&] { return (REXCVAR_GET(gta4_native_android_pipeline_telemetry) ? ++g_resolve_sites[__LINE__] : 0, dfn.vkCmdCopyImage)(command_buffer, content_source->resource.image,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination->resource.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, copy_count, copies.data()); }); });
       break;
@@ -27685,7 +27687,7 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
       blit.dstOffsets[0] = {destination_x, destination_y, 0};
       blit.dstOffsets[1] = {destination_x + int32_t(destination_copy_width),
                             destination_y + int32_t(destination_copy_height), 1};
-      profile::CpuCall(profile::CpuOp::kDriverCopy, [&] { return gpu_labels::Transfer(vulkan_device, command_buffer, "GTA4/RecordResolve/vkCmdBlitImage", [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdBlitImage)(command_buffer, content_source->resource.image,
+      profile::CpuCall(profile::CpuOp::kDriverCopy, [&] { return gpu_labels::Transfer(vulkan_device, command_buffer, "GTA4/RecordResolve/vkCmdBlitImage", [&] { return (REXCVAR_GET(gta4_native_android_pipeline_telemetry) ? ++g_resolve_sites[__LINE__] : 0, dfn.vkCmdBlitImage)(command_buffer, content_source->resource.image,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination->resource.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST); }); });
       break;
@@ -27697,7 +27699,7 @@ bool Gta4NativeGraphicsSystem::RecordResolve(VkCommandBuffer command_buffer,
       image_resolve.dstSubresource = destination_layers;
       image_resolve.dstOffset = {destination_x, destination_y, 0};
       image_resolve.extent = {source_copy_width, source_copy_height, 1};
-      profile::CpuCall(profile::CpuOp::kDriverCopy, [&] { return gpu_labels::Transfer(vulkan_device, command_buffer, "GTA4/RecordResolve/vkCmdResolveImage", [&] { return (++g_resolve_sites[__LINE__], dfn.vkCmdResolveImage)(command_buffer, content_source->resource.image,
+      profile::CpuCall(profile::CpuOp::kDriverCopy, [&] { return gpu_labels::Transfer(vulkan_device, command_buffer, "GTA4/RecordResolve/vkCmdResolveImage", [&] { return (REXCVAR_GET(gta4_native_android_pipeline_telemetry) ? ++g_resolve_sites[__LINE__] : 0, dfn.vkCmdResolveImage)(command_buffer, content_source->resource.image,
                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination->resource.image,
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &image_resolve); }); });
       break;
