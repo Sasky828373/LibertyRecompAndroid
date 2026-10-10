@@ -27,3 +27,8 @@
 --gta4_profile_native_detailed_cpu=false
 --gta4_profile_native_detailed_gpu=false
 --gta4_output_height_cap=720
+
+# Experimental: replace pending-frame busy polling with short sleeps.
+# Compare p99 frame times and latency with this off if it regresses.
+--gta4_frame_wait_sleep=true
+--gta4_frame_wait_sleep_us=50
