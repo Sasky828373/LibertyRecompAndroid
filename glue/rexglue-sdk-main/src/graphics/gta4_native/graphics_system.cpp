@@ -35034,7 +35034,9 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
             head.index_count) {
           merged_indices = head.index_count;
           uint32_t next_start = head.start_index + head.index_count;
-          for (size_t next = command_index + 1; next < current_frame_.size() && merged_count < 64;
+          // Larger continuous batches save vkCmdDrawIndexed recording and driver work.
+          // Draw order, topology, bindings and captured state still must match.
+          for (size_t next = command_index + 1; next < current_frame_.size() && merged_count < 256;
                ++next) {
             const NativeCommand& other = current_frame_[next];
             if (other.type != CommandType::kDrawIndexedPrimitive || other.fire_trace ||
@@ -35063,7 +35065,8 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
             std::memcpy(&draw, other.bytes.data(), sizeof(draw));
             if (draw.primitive_type != head.primitive_type || draw.base_vertex != head.base_vertex ||
                 draw.start_index != next_start || !draw.index_count ||
-                merged_indices > UINT32_MAX - draw.index_count) {
+                merged_indices > UINT32_MAX - draw.index_count ||
+                next_start > UINT32_MAX - draw.index_count) {
               break;
             }
             merged_indices += draw.index_count;
