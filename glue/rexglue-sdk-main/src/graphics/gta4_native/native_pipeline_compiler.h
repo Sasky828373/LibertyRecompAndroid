@@ -22,8 +22,12 @@ class NativePipelineCompiler {
  public:
   using Compile = std::function<Result()>;
   explicit NativePipelineCompiler(size_t capacity, std::function<void()> idle = {})
-      : capacity_(std::max<size_t>(capacity, 1)), idle_(std::move(idle)),
-        thread_([this] { Run(); }) {}
+      : capacity_(std::max<size_t>(capacity, 1)), idle_(std::move(idle)) {
+    // The job table is bounded. Reserve before starting the worker so new
+    // pipeline recipes do not repeatedly rehash on the render thread.
+    jobs_.reserve(capacity_);
+    thread_ = std::thread([this] { Run(); });
+  }
   ~NativePipelineCompiler() { Stop(); }
   NativePipelineCompiler(const NativePipelineCompiler&) = delete;
   NativePipelineCompiler& operator=(const NativePipelineCompiler&) = delete;
