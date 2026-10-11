@@ -13,7 +13,17 @@ namespace rex::graphics::gta4_native {
 template <size_t DescriptorSetCount>
 class NativeDrawStateCache {
  public:
-  void Reset() { *this = {}; }
+  void Reset() {
+    pipeline_ = {};
+    descriptors_ = {};
+    viewport_ = {};
+    scissor_ = {};
+    depth_bias_ = {};
+    stencil_ = {};
+    blend_constants_ = {};
+    push_constants_ = {};
+    for (auto& binding : vertex_buffers_) binding = {};
+  }
 
   bool UpdatePipeline(uint64_t pipeline) {
     if (!pipeline_.Update(pipeline)) {
