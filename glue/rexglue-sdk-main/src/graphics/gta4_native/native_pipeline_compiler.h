@@ -52,7 +52,7 @@ class NativePipelineCompiler {
     } else {
       queue_.push_back(key);
     }
-    changed_.notify_all();
+    changed_.notify_one();
     return true;
   }
 
