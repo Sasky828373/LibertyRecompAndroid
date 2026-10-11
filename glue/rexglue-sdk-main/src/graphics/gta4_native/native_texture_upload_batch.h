@@ -16,6 +16,7 @@ namespace rex::graphics::gta4_native {
 // here, and queued handles must never be destroyed before Flush.
 class NativeTextureUploadBatch {
  public:
+  NativeTextureUploadBatch() { uploads_.reserve(kCapacity); }
   static constexpr size_t kCapacity = 128;
   struct Upload {
     VkBuffer buffer = VK_NULL_HANDLE;

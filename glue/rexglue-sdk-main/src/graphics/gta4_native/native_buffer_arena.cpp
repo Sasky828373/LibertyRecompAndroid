@@ -66,8 +66,12 @@ NativeBufferArenaResult NativeBufferArena::Reserve(uint64_t size) {
           best_block = &block;
           best_range_index = range_index;
           best_waste = waste;
+          // An exact fit cannot be improved by any later free range.
+          // Avoid scanning the remaining blocks on this allocation hot path.
+          if (waste == 0) break;
         }
       }
+      if (best_block && best_waste == 0) break;
     }
   }
 

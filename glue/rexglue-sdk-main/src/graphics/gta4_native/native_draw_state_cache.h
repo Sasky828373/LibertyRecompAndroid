@@ -13,7 +13,18 @@ namespace rex::graphics::gta4_native {
 template <size_t DescriptorSetCount>
 class NativeDrawStateCache {
  public:
-  void Reset() { *this = {}; }
+  void Reset() {
+    pipeline_ = {};
+    descriptors_ = {};
+    viewport_ = {};
+    scissor_ = {};
+    depth_bias_ = {};
+    stencil_ = {};
+    blend_constants_ = {};
+    push_constants_ = {};
+    for (auto& binding : vertex_buffers_) binding = {};
+    index_buffer_ = {};
+  }
 
   bool UpdatePipeline(uint64_t pipeline) {
     if (!pipeline_.Update(pipeline)) {
@@ -48,6 +59,13 @@ class NativeDrawStateCache {
   }
   // Vertex buffer bindings are command-buffer state that survives pipeline
   // and render-pass changes; the command buffer is part of the value.
+  // Index bindings persist across draw calls and pipeline switches, just like
+  // vertex bindings. Track buffer, offset, type and command buffer identity.
+  bool UpdateIndexBuffer(uint64_t command_buffer, uint64_t buffer,
+                         uint64_t offset, uint32_t index_type) {
+    return index_buffer_.Update({command_buffer, buffer, offset, index_type});
+  }
+
   bool UpdateVertexBuffer(uint64_t command_buffer, uint32_t binding, uint64_t buffer,
                           uint64_t offset) {
     if (binding >= vertex_buffers_.size()) return true;
@@ -82,6 +100,7 @@ class NativeDrawStateCache {
   Tracked<std::array<uint32_t, 4>> blend_constants_;
   Tracked<LayoutValues<3>> push_constants_;
   std::array<Tracked<std::array<uint64_t, 3>>, 32> vertex_buffers_;
+  Tracked<std::array<uint64_t, 4>> index_buffer_;
 };
 
 }  // namespace rex::graphics::gta4_native

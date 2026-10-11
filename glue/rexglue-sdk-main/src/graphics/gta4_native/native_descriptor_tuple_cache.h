@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,7 +40,10 @@ class NativeDescriptorTupleCache {
     if (last_submission_ > completed_submission) {
       return false;
     }
-    reusable_.insert(reusable_.end(), retired_.begin(), retired_.end());
+    // Recycle retired bundles without copying potentially large descriptor bundles.
+    reusable_.reserve(reusable_.size() + retired_.size());
+    reusable_.insert(reusable_.end(), std::make_move_iterator(retired_.begin()),
+                     std::make_move_iterator(retired_.end()));
     retired_.clear();
     writable_ = true;
     return true;
@@ -68,7 +72,7 @@ class NativeDescriptorTupleCache {
       if (required.contains(it->first)) {
         ++it;
       } else {
-        reusable_.push_back(it->second);
+        reusable_.push_back(std::move(it->second));
         RemoveDependencies(it->first);
         it = entries_.erase(it);
       }
@@ -81,7 +85,7 @@ class NativeDescriptorTupleCache {
       if (!references_retired_resource(it->first)) {
         ++it;
       } else {
-        retired_.push_back(it->second);
+        retired_.push_back(std::move(it->second));
         RemoveDependencies(it->first);
         it = entries_.erase(it);
       }
@@ -96,9 +100,11 @@ class NativeDescriptorTupleCache {
     if (dependency.empty()) {
       return;
     }
+    retired_.reserve(retired_.size() + dependency.mapped().size());
     for (const Key* key : dependency.mapped()) {
       const auto entry = entries_.find(*key);
-      retired_.push_back(entry->second);
+      if (entry == entries_.end()) continue;
+      retired_.push_back(std::move(entry->second));
       RemoveDependencies(entry->first);
       entries_.erase(entry);
     }
@@ -126,7 +132,7 @@ class NativeDescriptorTupleCache {
     if (!writable_ || reusable_.empty()) {
       return std::nullopt;
     }
-    Bundle bundle = reusable_.back();
+    Bundle bundle = std::move(reusable_.back());
     reusable_.pop_back();
     return bundle;
   }
