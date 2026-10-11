@@ -108,3 +108,18 @@ TEST_CASE("native draw cache preserves state across draw and external command tr
     REQUIRE_FALSE(cache.UpdateDescriptors(requested.layout, requested.descriptors));
   }
 }
+
+TEST_CASE("native index buffer binding cache tracks command buffers and index types",
+          "[gta4-native][draw-state]") {
+  Cache cache;
+  REQUIRE(cache.UpdateIndexBuffer(1, 10, 64, 1));
+  REQUIRE_FALSE(cache.UpdateIndexBuffer(1, 10, 64, 1));
+  REQUIRE(cache.UpdateIndexBuffer(1, 10, 64, 0));
+  REQUIRE(cache.UpdateIndexBuffer(1, 10, 128, 0));
+  REQUIRE(cache.UpdateIndexBuffer(1, 11, 128, 0));
+  REQUIRE(cache.UpdateIndexBuffer(2, 11, 128, 0));
+  REQUIRE(cache.UpdatePipeline(123));
+  REQUIRE_FALSE(cache.UpdateIndexBuffer(2, 11, 128, 0));
+  cache.Reset();
+  REQUIRE(cache.UpdateIndexBuffer(2, 11, 128, 0));
+}
