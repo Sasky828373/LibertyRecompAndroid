@@ -208,6 +208,8 @@ NativeSubmissionLifetime::GetDescriptorTombstones(uint32_t slot_index,
   }
   const FrameSlot& slot = frame_slots_[slot_index];
   std::vector<DescriptorTombstone> result;
+  // Skip allocation entirely when the frame already has the latest epoch.
+  if (slot.applied_descriptor_epoch == target_epoch) return result;
   auto tombstone = descriptor_tombstones_.upper_bound(slot.applied_descriptor_epoch);
   while (tombstone != descriptor_tombstones_.end() && tombstone->first <= target_epoch) {
     result.push_back({tombstone->second, tombstone->first});
