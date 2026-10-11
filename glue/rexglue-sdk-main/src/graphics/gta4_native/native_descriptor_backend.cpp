@@ -323,8 +323,7 @@ NativeDescriptorEpochTable::NativeDescriptorEpochTable(const NativeDescriptorEpo
 }
 
 bool NativeDescriptorEpochTable::HasPendingBatch() const {
-  return std::any_of(pending_batches_.begin(), pending_batches_.end(),
-                     [](const PendingBatch& batch) { return batch.id != 0; });
+  return active_pending_batch_count_ != 0;
 }
 
 NativeDescriptorStatus NativeDescriptorEpochTable::ValidateLiveHandle(
@@ -511,7 +510,11 @@ NativeDescriptorWriteBatch NativeDescriptorEpochTable::BeginFrameCopyWrites(uint
 
   PendingBatch& pending = pending_batches_[frame_copy];
   pending.id = result.batch_id;
-  pending.writes = result.writes;
+  ++active_pending_batch_count_;
+  // Reuse capacity from previous frames: descriptors often have a similar
+  // dirty working-set size, and rebuilding this copy every frame otherwise
+  // churns the allocator on the render thread.
+  pending.writes.assign(result.writes.begin(), result.writes.end());
   return result;
 }
 
@@ -548,7 +551,11 @@ NativeDescriptorStatus NativeDescriptorEpochTable::CommitFrameCopyWrites(
     dirty_slot_membership_[AppliedEpochOffset(batch.frame_copy, slot_index)] = 0;
   }
   dirty_slots.resize(retained_dirty_count);
-  pending = {};
+  // Keep the vector allocation for the next frame; only its contents and
+  // transaction identity need resetting.
+  pending.id = 0;
+  pending.writes.clear();
+  --active_pending_batch_count_;
   return NativeDescriptorStatus::kSuccess;
 }
 
@@ -564,7 +571,11 @@ NativeDescriptorStatus NativeDescriptorEpochTable::CancelFrameCopyWrites(
   if (!batch.batch_id || pending.id != batch.batch_id) {
     return NativeDescriptorStatus::kInvalidWriteBatch;
   }
-  pending = {};
+  // Keep the vector allocation for the next frame; only its contents and
+  // transaction identity need resetting.
+  pending.id = 0;
+  pending.writes.clear();
+  --active_pending_batch_count_;
   return NativeDescriptorStatus::kSuccess;
 }
 

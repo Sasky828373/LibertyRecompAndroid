@@ -319,6 +319,8 @@ class NativeDescriptorEpochTable {
   std::vector<uint32_t> retiring_slots_;
   std::vector<uint64_t> frame_copy_submission_serials_;
   std::vector<PendingBatch> pending_batches_;
+  // O(1) rejection of mutations while any descriptor write batch is pending.
+  size_t active_pending_batch_count_ = 0;
   uint64_t current_epoch_ = 0;
   uint64_t next_batch_id_ = 0;
   uint64_t completed_gpu_serial_ = 0;

@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -477,9 +478,20 @@ struct ActiveNativeCommandCapture {
 };
 
 thread_local ActiveNativeCommandCapture g_active_native_capture;
-std::mutex g_cached_native_command_lists_mutex;
-std::unordered_map<uint32_t, std::shared_ptr<const CachedNativeCommandList>>
-    g_cached_native_command_lists;
+// Command list replay is read-heavy and may run from several guest threads.
+// Sharding avoids one global lock serializing independent lists. Shared locks
+// also allow parallel reads within a shard.  Power of two keeps hashing cheap.
+constexpr size_t kNativeCommandCacheShards = 32;
+struct NativeCommandCacheShard {
+  std::shared_mutex mutex;
+  std::unordered_map<uint32_t, std::shared_ptr<const CachedNativeCommandList>> lists;
+};
+std::array<NativeCommandCacheShard, kNativeCommandCacheShards> g_cached_native_command_shards;
+NativeCommandCacheShard& CommandCacheShardFor(uint32_t handle) {
+  // Multiplicative mix: guest handles are often aligned, so low bits alone
+  // would concentrate them into a few shards.
+  return g_cached_native_command_shards[(uint32_t(handle * 2654435761u) >> 27)];
+}
 std::mutex g_vertex_declaration_diagnostic_mutex;
 std::unordered_map<uint32_t, bool> g_logged_vertex_declarations;
 
@@ -4106,9 +4118,10 @@ bool SubmitCapturedNativeCommand(PPCContext& ctx, uint8_t* base, uint32_t device
 }
 
 std::shared_ptr<const CachedNativeCommandList> FindCachedNativeCommandList(uint32_t command_list) {
-  std::lock_guard lock(g_cached_native_command_lists_mutex);
-  const auto found = g_cached_native_command_lists.find(command_list);
-  return found != g_cached_native_command_lists.end() ? found->second : nullptr;
+  auto& shard = CommandCacheShardFor(command_list);
+  std::shared_lock lock(shard.mutex);
+  const auto found = shard.lists.find(command_list);
+  return found != shard.lists.end() ? found->second : nullptr;
 }
 
 void PublishCachedNativeCommandList(uint32_t command_list,
@@ -4118,16 +4131,32 @@ void PublishCachedNativeCommandList(uint32_t command_list,
   }
   auto cached = std::make_shared<CachedNativeCommandList>();
   cached->commands = std::move(commands);
-  std::lock_guard lock(g_cached_native_command_lists_mutex);
-  g_cached_native_command_lists[command_list] = std::move(cached);
+  auto& shard = CommandCacheShardFor(command_list);
+  std::shared_ptr<const CachedNativeCommandList> retired;
+  {
+    std::unique_lock lock(shard.mutex);
+    auto& entry = shard.lists[command_list];
+    retired = std::move(entry);
+    entry = std::move(cached);
+  }
+  // Release the potentially large old command list outside the cache lock.
 }
 
 void EraseCachedNativeCommandList(uint32_t command_list) {
   if (!command_list) {
     return;
   }
-  std::lock_guard lock(g_cached_native_command_lists_mutex);
-  g_cached_native_command_lists.erase(command_list);
+  auto& shard = CommandCacheShardFor(command_list);
+  std::shared_ptr<const CachedNativeCommandList> retired;
+  {
+    std::unique_lock lock(shard.mutex);
+    auto found = shard.lists.find(command_list);
+    if (found != shard.lists.end()) {
+      retired = std::move(found->second);
+      shard.lists.erase(found);
+    }
+  }
+  // Destruction outside the lock keeps other replays from stalling.
 }
 
 bool ReplayCachedNativeCommandList(PPCContext& ctx, uint8_t* base, uint32_t device,

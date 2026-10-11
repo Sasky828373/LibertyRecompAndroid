@@ -1,0 +1,60 @@
+# GTA IV Android 120 Hz efficiency profile — native image quality preserved.
+# Apply with: bash os/android/scripts/push_args.sh os/android/android_args/120fps_efficiency.txt
+# Target: 120 FPS; not a guarantee. Does not reduce resolution, traffic, shadows or draw distance versus current Android defaults.
+--log_level=warn
+--gta4_frame_limit=120
+--gta4_present_mode=vsync
+--gta4_output_height_cap=720
+--gta4_native_upscaler=native
+--gta4_native_anti_aliasing=fxaa
+--gta4_draw_distance_scale=1.0
+--gta4_dynamic_draw_distance=false
+--gta4_shadow_map_base_size=256
+--gta4_shadow_distance_scale=1.0
+--gta4_reflection_resolution=original
+--gta4_reflection_capture_distance=near
+--gta4_traffic_density_scale=0.4
+--gta4_parked_car_density_scale=0.4
+--gta4_ped_density_scale=0.4
+--gta4_scenario_ped_density_scale=0.4
+--gta4_motion_blur=false
+--gta4_native_max_queued_frames=3
+--gta4_profile_native_detailed_cpu=false
+--gta4_profile_native_detailed_gpu=false
+# Existing high-value native fast paths; explicitly retain them rather than disabling.
+--gta4_native_coalesce_state_commands=true
+--gta4_native_recycle_commands=true
+--gta4_native_partial_constant_snapshot=true
+--gta4_native_lazy_constant_hash=true
+--gta4_native_direct_constant_apply=true
+--gta4_native_stamped_protection=true
+--gta4_native_buffer_validation_per_frame=true
+--gta4_native_assembly_constant_bound=true
+--gta4_native_prepared_binding_cache=true
+--gta4_native_dedupe_vertex_bindings=true
+--gta4_native_partial_constant_upload=true
+--gta4_native_vertex_cache_order=true
+# FPS guard targets 30 FPS in this source version, so don't use it for a 120 FPS test.
+--gta4_fps_guard=0
+
+# Existing lossless Vulkan/GPU fast paths: preserve scene fidelity.
+--gta4_native_pipeline_prewarm=true
+--gta4_native_persistent_buffers=true
+--gta4_native_lossless_resolve_optimization=true
+--gta4_native_merge_up_draws=true
+--gta4_native_merge_up_max=16
+--gta4_native_water_reflection_on_demand=true
+--gta4_native_fast_legacy_mul=true
+--gta4_native_stage_draw_commands=true
+--gta4_native_async_constant_release=true
+--gta4_native_fast_capacity=true
+--gta4_native_batched_worker_wake=true
+--gta4_native_sparse_capacity_plan=true
+--gta4_native_descriptor_backend=auto
+--gta4_native_state_transport=delta
+--gta4_native_pipeline_telemetry=false
+
+# Additional already-implemented image-preserving GPU workload reductions.
+--gta4_native_merge_indexed_draws=true
+--gta4_native_skip_invisible_draws=true
+--gta4_native_clear_skips_materialization=true

@@ -62,19 +62,31 @@ bool NativeSubmissionLifetime::StageQueuedReference(FrameToken token, ResourceKe
   if (resource == resources_.end()) {
     return false;
   }
-  const auto total_staged = GetStagedReferenceCountLocked(key);
-  if (!total_staged || *total_staged > resource->second.queued_reference_count ||
-      count > resource->second.queued_reference_count - *total_staged) {
+  // A frame has only two slots; use the other slot's staged references and
+  // the current slot's existing count directly, avoiding optional construction
+  // and a map lookup through the current slot for each draw resource.
+  const auto& current_staged = slot.staged_references;
+  const auto existing = current_staged.find(key);
+  const uint64_t own_count = existing == current_staged.end() ? 0 : existing->second;
+  const FrameSlot& other = frame_slots_[token.slot ^ 1u];
+  const auto other_it = other.staged_references.find(key);
+  const uint64_t other_count = other_it == other.staged_references.end() ? 0 : other_it->second;
+  const uint64_t queued = resource->second.queued_reference_count;
+  if (other_count > queued || own_count > queued - other_count ||
+      count > queued - other_count - own_count) {
     return false;
   }
-  uint64_t& staged_count = slot.staged_references[key];
-  if (count > std::numeric_limits<uint64_t>::max() - staged_count) {
-    if (!staged_count) {
-      slot.staged_references.erase(key);
-    }
+  // Avoid inserting a zero-valued tree node for a rejected operation.
+  // Most draw resources already have a staged entry, so use the iterator
+  // obtained during validation instead of performing a second tree search.
+  if (count > std::numeric_limits<uint64_t>::max() - own_count) {
     return false;
   }
-  staged_count += count;
+  if (existing == current_staged.end()) {
+    slot.staged_references.emplace(key, count);
+  } else {
+    existing->second += count;
+  }
   return true;
 }
 
@@ -106,11 +118,19 @@ bool NativeSubmissionLifetime::CommitSubmission(FrameToken token, SubmissionSeri
   }
 
   // Validate the complete transaction before changing the first resource.
+  // Validate both frame-slot journals with a single lookup per slot/key.
+  // This avoids the repeated generic frame-slot traversal in the hot path.
   for (const auto& [key, count] : slot.staged_references) {
     const auto resource = resources_.find(key);
-    const auto total_staged = GetStagedReferenceCountLocked(key);
-    if (resource == resources_.end() || !total_staged || *total_staged < count ||
-        resource->second.queued_reference_count < *total_staged) {
+    if (resource == resources_.end()) {
+      return false;
+    }
+    const FrameSlot& other = frame_slots_[token.slot ^ 1u];
+    const auto other_it = other.staged_references.find(key);
+    const uint64_t other_count =
+        other_it == other.staged_references.end() ? 0 : other_it->second;
+    const uint64_t queued = resource->second.queued_reference_count;
+    if (other_count > queued || count > queued - other_count) {
       return false;
     }
   }
@@ -146,11 +166,19 @@ bool NativeSubmissionLifetime::AbandonFrame(FrameToken token) {
   if (slot.state != FrameSlotState::kRecording && slot.state != FrameSlotState::kPrepared) {
     return false;
   }
+  // Validate both frame-slot journals with a single lookup per slot/key.
+  // This avoids the repeated generic frame-slot traversal in the hot path.
   for (const auto& [key, count] : slot.staged_references) {
     const auto resource = resources_.find(key);
-    const auto total_staged = GetStagedReferenceCountLocked(key);
-    if (resource == resources_.end() || !total_staged || *total_staged < count ||
-        resource->second.queued_reference_count < *total_staged) {
+    if (resource == resources_.end()) {
+      return false;
+    }
+    const FrameSlot& other = frame_slots_[token.slot ^ 1u];
+    const auto other_it = other.staged_references.find(key);
+    const uint64_t other_count =
+        other_it == other.staged_references.end() ? 0 : other_it->second;
+    const uint64_t queued = resource->second.queued_reference_count;
+    if (other_count > queued || count > queued - other_count) {
       return false;
     }
   }
@@ -209,9 +237,11 @@ NativeSubmissionLifetime::GetDescriptorTombstones(uint32_t slot_index,
   const FrameSlot& slot = frame_slots_[slot_index];
   std::vector<DescriptorTombstone> result;
   auto tombstone = descriptor_tombstones_.upper_bound(slot.applied_descriptor_epoch);
-  while (tombstone != descriptor_tombstones_.end() && tombstone->first <= target_epoch) {
+  // The tombstone journal is normally tiny. Avoid a second traversal of
+  // the ordered tree merely to pre-size a vector; grow only when needed.
+  for (; tombstone != descriptor_tombstones_.end() && tombstone->first <= target_epoch;
+       ++tombstone) {
     result.push_back({tombstone->second, tombstone->first});
-    ++tombstone;
   }
   return result;
 }
