@@ -333,6 +333,9 @@ bool NativeSubmissionLifetime::CanApplyDescriptorEpochLocked(uint32_t slot_index
       target_epoch > last_issued_descriptor_epoch_) {
     return false;
   }
+  // No new descriptor retirements: avoid walking the global tombstone index
+  // on the per-frame synchronization path.
+  if (target_epoch == slot.applied_descriptor_epoch) return true;
   auto tombstone = descriptor_tombstones_.upper_bound(slot.applied_descriptor_epoch);
   while (tombstone != descriptor_tombstones_.end() && tombstone->first <= target_epoch) {
     const auto resource = resources_.find(tombstone->second);
