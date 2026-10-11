@@ -52,7 +52,10 @@ class NativePipelineCompiler {
     } else {
       queue_.push_back(key);
     }
-    changed_.notify_one();
+    // Take() and WaitUntilIdle() share this condition variable with Run().
+    // notify_one() may wake a waiter whose predicate is false instead of
+    // the compiler worker, leaving queued pipeline jobs stuck indefinitely.
+    changed_.notify_all();
     return true;
   }
 
