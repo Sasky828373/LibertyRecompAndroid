@@ -89,6 +89,12 @@ void PinningLoop() {
   for (;;) {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     const uint32_t pinned = std::min<uint32_t>(REXCVAR_GET(gta4_thread_pinning), 4);
+    // Avoid scanning /proc and parsing every thread's CPU time when pinning
+    // is disabled. Keep polling the cvar so it can be enabled at runtime.
+    if (!pinned && !applied) {
+      previous.clear();
+      continue;
+    }
     std::vector<std::pair<uint64_t, pid_t>> usage;
     std::unordered_map<pid_t, uint64_t> current;
     if (DIR* directory = opendir("/proc/self/task")) {
